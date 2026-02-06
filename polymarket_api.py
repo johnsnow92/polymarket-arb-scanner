@@ -4,6 +4,14 @@ import json
 import time
 import requests
 
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import (
+    AssetType,
+    BalanceAllowanceParams,
+    OrderArgs,
+    PartialCreateOrderOptions,
+)
+
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 
@@ -218,3 +226,92 @@ def get_negrisk_events(events: list[dict]) -> list[dict]:
             continue
         negrisk_events.append(event)
     return negrisk_events
+
+
+class PolymarketTrader:
+    """CLOB trading client for Polymarket using py-clob-client."""
+
+    def __init__(self, private_key: str, chain_id: int = 137):
+        self.client = ClobClient(
+            host=CLOB_BASE,
+            key=private_key,
+            chain_id=chain_id,
+        )
+        # Derive L2 API creds for authenticated trading endpoints
+        self.client.set_api_creds(self.client.derive_api_key())
+
+    def get_balance(self) -> float | None:
+        """Get USDC balance available for trading."""
+        try:
+            resp = self.client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            if resp and "balance" in resp:
+                return float(resp["balance"]) / 1e6  # USDC has 6 decimals
+            return None
+        except Exception as e:
+            print(f"  [ERROR] Polymarket get_balance failed: {e}")
+            return None
+
+    def place_order(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        neg_risk: bool = False,
+        tick_size: str = "0.01",
+    ) -> dict | None:
+        """Place an order on the Polymarket CLOB.
+
+        Args:
+            token_id: The CLOB token ID (YES or NO token)
+            side: "BUY" or "SELL"
+            price: Price per share (0.01-0.99)
+            size: Number of shares
+            neg_risk: Whether this is a negRisk market
+            tick_size: Market tick size ("0.1", "0.01", "0.001", "0.0001")
+
+        Returns:
+            Order response dict or None on failure.
+        """
+        try:
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=side,
+            )
+            options = PartialCreateOrderOptions(
+                tick_size=tick_size,
+                neg_risk=neg_risk,
+            )
+            resp = self.client.create_and_post_order(order_args, options)
+            if resp and resp.get("success"):
+                return resp
+            if resp:
+                print(f"  [ERROR] Polymarket place_order unsuccessful: {resp}")
+            return resp
+        except Exception as e:
+            print(f"  [ERROR] Polymarket place_order failed: {e}")
+            return None
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order."""
+        try:
+            resp = self.client.cancel(order_id)
+            return bool(resp and resp.get("canceled"))
+        except Exception as e:
+            print(f"  [WARN] Polymarket cancel_order failed for {order_id}: {e}")
+            return False
+
+    def get_orders(self) -> list[dict]:
+        """Get open orders."""
+        try:
+            resp = self.client.get_orders()
+            if isinstance(resp, list):
+                return resp
+            return resp.get("orders", []) if resp else []
+        except Exception as e:
+            print(f"  [ERROR] Polymarket get_orders failed: {e}")
+            return []

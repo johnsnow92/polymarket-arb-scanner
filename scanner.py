@@ -5,13 +5,18 @@ Scans for three types of arbitrage opportunities:
 1. Binary internal (YES + NO < $1.00 on Polymarket)
 2. NegRisk internal (sum of all YES prices < $1.00 on multi-outcome markets)
 3. Cross-platform (Polymarket vs Kalshi price discrepancies)
+
+Supports one-shot (default) and continuous mode with optional trade execution.
 """
 
 import argparse
+import asyncio
 import io
 import json
 import os
+import signal
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Fix Windows console encoding for Unicode market names
@@ -29,6 +34,7 @@ from polymarket_api import (
     get_clob_prices,
     get_negrisk_events,
     parse_outcome_prices,
+    PolymarketTrader,
 )
 from kalshi_api import KalshiClient
 from matcher import match_markets_to_events, detect_inverted
@@ -37,6 +43,10 @@ from fees import (
     net_profit_negrisk_internal,
     net_profit_cross_platform,
 )
+from db import TradeDB
+from risk_manager import RiskManager
+from executor import ArbitrageExecutor
+from ws_feeds import FeedManager
 
 # Load .env from project dir first, then ~/.claude/.env as fallback
 load_dotenv()
@@ -500,16 +510,103 @@ def main():
         default=0,
         help="Minimum order book depth to display (default: 0 = no filter)",
     )
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Run persistently with WebSocket feeds and periodic re-scans",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=None,
+        help="Detect and log opportunities without executing trades",
+    )
+    parser.add_argument(
+        "--exec-mode",
+        choices=["semi-auto", "full-auto"],
+        default=None,
+        help="Execution mode (default: from .env or semi-auto)",
+    )
+    parser.add_argument(
+        "--max-trade",
+        type=float,
+        default=None,
+        help="Maximum dollar amount per trade (default: from .env or 5.00)",
+    )
     args = parser.parse_args()
 
     min_profit = args.min_profit or float(os.getenv("MIN_PROFIT_THRESHOLD", DEFAULT_MIN_PROFIT))
 
+    # Resolve execution settings from CLI > .env > defaults
+    dry_run = args.dry_run if args.dry_run is not None else os.getenv("DRY_RUN", "true").lower() == "true"
+    exec_mode = args.exec_mode or os.getenv("EXECUTION_MODE", "semi-auto")
+    max_trade = args.max_trade or float(os.getenv("MAX_TRADE_SIZE", "5.0"))
+
     print("=" * 80)
-    print("  POLYMARKET ARBITRAGE SCANNER")
+    print("  POLYMARKET ARBITRAGE SCANNER v2")
     print(f"  Min profit threshold: {min_profit * 100:.2f}%")
+    if args.continuous:
+        print(f"  Mode: CONTINUOUS | Exec: {exec_mode} | Dry-run: {dry_run} | Max trade: ${max_trade:.2f}")
     print("=" * 80)
 
-    # Fetch Polymarket data (once for any mode that needs it)
+    # Initialize execution components
+    db = TradeDB()
+    risk_config = {
+        "max_trade_size": max_trade,
+        "daily_loss_limit": float(os.getenv("DAILY_LOSS_LIMIT", "25.0")),
+        "max_open_positions": int(os.getenv("MAX_OPEN_POSITIONS", "10")),
+        "min_liquidity": float(os.getenv("MIN_LIQUIDITY", "50.0")),
+        "min_net_roi": float(os.getenv("MIN_NET_ROI", "0.01")),
+    }
+    risk_manager = RiskManager(risk_config)
+
+    # Initialize platform clients
+    kalshi_client = None
+    kalshi_api_key_id = os.getenv("KALSHI_API_KEY_ID")
+    kalshi_private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+    if kalshi_api_key_id and kalshi_private_key_path:
+        kalshi_private_key_path = os.path.expanduser(kalshi_private_key_path)
+        kalshi_client = KalshiClient()
+        print("\n  Authenticating with Kalshi (API key)...")
+        if not kalshi_client.login_with_api_key(kalshi_api_key_id, kalshi_private_key_path):
+            kalshi_client = None
+            print("  [WARN] Kalshi auth failed.")
+        else:
+            print("  Kalshi authenticated successfully.")
+    else:
+        print("\n  [SKIP] KALSHI_API_KEY_ID/KALSHI_PRIVATE_KEY_PATH not set in .env")
+
+    pm_trader = None
+    pm_private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
+    if pm_private_key and not dry_run:
+        pm_chain_id = int(os.getenv("POLYMARKET_CHAIN_ID", "137"))
+        try:
+            pm_trader = PolymarketTrader(pm_private_key, pm_chain_id)
+            print("  Polymarket trader initialized.")
+        except Exception as e:
+            print(f"  [WARN] Polymarket trader init failed: {e}")
+
+    executor = ArbitrageExecutor(
+        pm_trader=pm_trader,
+        kalshi_client=kalshi_client,
+        db=db,
+        risk_manager=risk_manager,
+        dry_run=dry_run,
+        exec_mode=exec_mode,
+        max_trade_size=max_trade,
+    )
+
+    if args.continuous:
+        _run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
+                        kalshi_private_key_path, executor, db)
+    else:
+        _run_oneshot(args, min_profit, kalshi_client, executor, db)
+
+    db.close()
+
+
+def _run_oneshot(args, min_profit, kalshi_client, executor, db):
+    """Original one-shot scan mode with optional execution."""
     all_opportunities = []
     poly_markets = None
     poly_events = None
@@ -541,28 +638,10 @@ def main():
     # Scan cross-platform
     if args.mode in ("all", "cross"):
         print("\n--- Cross-Platform Scan (Polymarket vs Kalshi) ---")
-        kalshi_client = None
-        kalshi_api_key_id = os.getenv("KALSHI_API_KEY_ID")
-        kalshi_private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
-
-        if kalshi_api_key_id and kalshi_private_key_path:
-            # Expand ~ in key path
-            kalshi_private_key_path = os.path.expanduser(kalshi_private_key_path)
-            kalshi_client = KalshiClient()
-            print("  Authenticating with Kalshi (API key)...")
-            if not kalshi_client.login_with_api_key(kalshi_api_key_id, kalshi_private_key_path):
-                kalshi_client = None
-                print("  [WARN] Kalshi auth failed. Skipping cross-platform scan.")
-            else:
-                print("  Kalshi authenticated successfully.")
-        else:
-            print("  [SKIP] KALSHI_API_KEY_ID/KALSHI_PRIVATE_KEY_PATH not set in .env")
-
         cross_opps = scan_cross_platform(
             poly_markets, kalshi_client, min_profit,
             min_confidence=args.min_confidence,
         )
-
         all_opportunities.extend(cross_opps)
         print(f"  Found {len(cross_opps)} opportunities.")
 
@@ -583,7 +662,155 @@ def main():
     if args.limit:
         all_opportunities = all_opportunities[:args.limit]
 
-    # Output
+    # Display results
+    _display_results(all_opportunities, args.json)
+
+    # Execute opportunities if not display-only
+    if all_opportunities and (executor.dry_run or executor.exec_mode in ("semi-auto", "full-auto")):
+        print("\n--- Execution Pass ---")
+        executed = 0
+        for opp in all_opportunities:
+            if executor.execute(opp):
+                executed += 1
+        print(f"\n  Executed: {executed}/{len(all_opportunities)}")
+
+
+def _run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
+                    kalshi_private_key_path, executor, db):
+    """Continuous mode: periodic re-scans with WebSocket price feeds."""
+    RESCAN_INTERVAL = 300  # 5 minutes between full re-scans
+
+    shutdown_event = asyncio.Event()
+
+    def _signal_handler(sig, frame):
+        print("\n\n  Shutting down gracefully...")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    # Price cache updated by WebSocket feeds
+    price_cache = {}
+
+    def on_price_update(platform, ticker, data):
+        price_cache[(platform, ticker)] = data
+
+    # Initialize WebSocket feed manager
+    feed_manager = FeedManager(
+        on_price_update=on_price_update,
+        kalshi_api_key_id=kalshi_api_key_id,
+        kalshi_private_key_path=kalshi_private_key_path,
+    )
+
+    async def _continuous_loop():
+        ws_task = None
+        scan_count = 0
+
+        while not shutdown_event.is_set():
+            scan_count += 1
+            print(f"\n{'='*80}")
+            print(f"  CONTINUOUS SCAN #{scan_count}")
+            print(f"{'='*80}")
+
+            try:
+                # Full market discovery scan
+                poly_markets = fetch_all_markets()
+                poly_events = fetch_events() if args.mode in ("all", "negrisk") else None
+
+                all_opportunities = []
+
+                if args.mode in ("all", "binary"):
+                    binary_opps = scan_binary_internal(poly_markets, min_profit)
+                    all_opportunities.extend(binary_opps)
+
+                if args.mode in ("all", "negrisk") and poly_events:
+                    negrisk_opps = scan_negrisk_internal(poly_events, min_profit)
+                    all_opportunities.extend(negrisk_opps)
+
+                if args.mode in ("all", "cross"):
+                    cross_opps = scan_cross_platform(
+                        poly_markets, kalshi_client, min_profit,
+                        min_confidence=args.min_confidence,
+                    )
+                    all_opportunities.extend(cross_opps)
+
+                # Apply filters
+                if args.min_depth > 0:
+                    all_opportunities = [
+                        opp for opp in all_opportunities
+                        if opp.get("_clob_depth", 0) >= args.min_depth
+                    ]
+
+                all_opportunities.sort(key=lambda x: x["net_profit"], reverse=True)
+
+                if args.limit:
+                    all_opportunities = all_opportunities[:args.limit]
+
+                _display_results(all_opportunities, args.json)
+
+                # Execute opportunities
+                if all_opportunities:
+                    print("\n--- Execution Pass ---")
+                    executed = 0
+                    for opp in all_opportunities:
+                        if shutdown_event.is_set():
+                            break
+                        if executor.execute(opp):
+                            executed += 1
+                    print(f"  Executed: {executed}/{len(all_opportunities)}")
+
+                # Subscribe to WebSocket feeds for discovered markets
+                # (on first scan or when new markets appear)
+                if scan_count == 1 and not ws_task:
+                    # Collect token IDs from Polymarket markets for WS subscription
+                    poly_token_ids = []
+                    for m in (poly_markets or []):
+                        token_ids_raw = m.get("clobTokenIds")
+                        if token_ids_raw:
+                            try:
+                                ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+                                poly_token_ids.extend(ids[:2])
+                            except (json.JSONDecodeError, ValueError):
+                                pass
+                    # Limit WS subscriptions to keep it manageable
+                    feed_manager.subscribe_polymarket(poly_token_ids[:100])
+
+                    if kalshi_client:
+                        kalshi_events = kalshi_client.fetch_all_events()
+                        kalshi_tickers = [
+                            e.get("event_ticker", "") for e in (kalshi_events or [])
+                            if e.get("event_ticker")
+                        ][:100]
+                        feed_manager.subscribe_kalshi(kalshi_tickers)
+
+                    ws_task = asyncio.create_task(feed_manager.run())
+
+            except Exception as e:
+                print(f"  [ERROR] Scan failed: {e}")
+
+            # Wait for next scan interval or shutdown
+            print(f"\n  Next scan in {RESCAN_INTERVAL}s (Ctrl+C to stop)...")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=RESCAN_INTERVAL)
+            except asyncio.TimeoutError:
+                pass
+
+        # Cleanup
+        print("  Stopping WebSocket feeds...")
+        feed_manager.stop()
+        if ws_task:
+            ws_task.cancel()
+            try:
+                await ws_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        print("  Shutdown complete.")
+
+    asyncio.run(_continuous_loop())
+
+
+def _display_results(all_opportunities: list[dict], json_output: bool = False):
+    """Display scan results as table or JSON."""
     print("\n" + "=" * 80)
     print(f"  RESULTS: {len(all_opportunities)} arbitrage opportunities found")
     print("=" * 80 + "\n")
@@ -593,8 +820,7 @@ def main():
         print("  Try lowering --min-profit or check back later.")
         return
 
-    if args.json:
-        # JSON output
+    if json_output:
         output = []
         for opp in all_opportunities:
             entry = {
@@ -606,7 +832,7 @@ def main():
                 "fees": opp["fees"],
                 "net_profit": f"${opp['net_profit']:.4f}",
                 "net_roi": opp["net_roi"],
-                "volume": opp["volume"],
+                "volume": opp.get("volume", ""),
             }
             if "kalshi" in opp:
                 entry["kalshi_market"] = opp["kalshi"]
@@ -617,7 +843,6 @@ def main():
             output.append(entry)
         print(json.dumps(output, indent=2))
     else:
-        # Table output
         has_cross = any("kalshi" in opp for opp in all_opportunities)
         has_depth = any("_clob_depth" in opp for opp in all_opportunities)
         table_data = []
@@ -635,7 +860,7 @@ def main():
                 opp["total_cost"],
                 f"${opp['net_profit']:.4f}",
                 opp["net_roi"],
-                opp["volume"],
+                opp.get("volume", ""),
             ])
             if has_depth:
                 depth = opp.get("_clob_depth")

@@ -187,6 +187,77 @@ class KalshiClient:
 
         return yes_price, no_price
 
+    def get_balance(self) -> float | None:
+        """Get account balance in dollars."""
+        resp = self._request("GET", "/portfolio/balance")
+        if not resp or resp.status_code != 200:
+            return None
+        data = resp.json()
+        # Balance is returned in cents
+        balance_cents = data.get("balance", 0)
+        return balance_cents / 100.0
+
+    def get_positions(self) -> list[dict]:
+        """Get open positions."""
+        resp = self._request("GET", "/portfolio/positions", params={"limit": 200})
+        if not resp or resp.status_code != 200:
+            return []
+        data = resp.json()
+        return data.get("market_positions", [])
+
+    def place_order(
+        self,
+        ticker: str,
+        side: str,
+        action: str,
+        count: int,
+        price_dollars: float,
+        time_in_force: str = "fill_or_kill",
+    ) -> dict | None:
+        """Place a limit order on Kalshi.
+
+        Args:
+            ticker: Market ticker (e.g. "KXBTC-26FEB07-T101999.99")
+            side: "yes" or "no"
+            action: "buy" or "sell"
+            count: Number of contracts
+            price_dollars: Price per contract in dollars (0.01-0.99)
+            time_in_force: "fill_or_kill" (default for arb safety) or "gtc"
+
+        Returns:
+            Order response dict or None on failure.
+        """
+        body = {
+            "ticker": ticker,
+            "side": side,
+            "action": action,
+            "count": count,
+            "type": "limit",
+            "time_in_force": time_in_force,
+        }
+        # Kalshi expects price in the appropriate side field
+        if side == "yes":
+            body["yes_price"] = int(round(price_dollars * 100))
+        else:
+            body["no_price"] = int(round(price_dollars * 100))
+
+        resp = self._request("POST", "/portfolio/orders", json_body=body)
+        if not resp:
+            return None
+        if resp.status_code in (200, 201):
+            return resp.json()
+        print(f"  [ERROR] Kalshi place_order failed: {resp.status_code} {resp.text[:200]}")
+        return None
+
+    def cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order."""
+        resp = self._request("DELETE", f"/portfolio/orders/{order_id}")
+        if resp and resp.status_code in (200, 204):
+            return True
+        print(f"  [WARN] Kalshi cancel_order failed for {order_id}: "
+              f"{resp.status_code if resp else 'no response'}")
+        return False
+
     def get_order_book_depth(self, ticker: str) -> dict | None:
         """Fetch order book and extract best bid/ask depth for a market.
 
