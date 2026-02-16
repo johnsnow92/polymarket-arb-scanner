@@ -27,7 +27,7 @@
         { "name": "MAX_TRADE_SIZE", "value": "25.0" },
         { "name": "DAILY_LOSS_LIMIT", "value": "25.0" },
         { "name": "MAX_OPEN_POSITIONS", "value": "25" },
-        { "name": "RESCAN_INTERVAL", "value": "300" }
+        { "name": "RESCAN_INTERVAL", "value": "60" }
       ],
       "secrets": [
         {
