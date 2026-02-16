@@ -1,0 +1,11 @@
+.git
+.env
+__pycache__
+*.pyc
+*.db
+.pytest_cache
+tests/
+CLAUDE.md
+.claude/
+scans/__pycache__
+.planning/

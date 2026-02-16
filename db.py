@@ -8,7 +8,11 @@ from datetime import datetime, timezone
 class TradeDB:
     """SQLite database for logging opportunities and trades."""
 
-    def __init__(self, db_path: str = "trades.db"):
+    def __init__(self, db_path: str = None):
+        if db_path is None:
+            import os
+            data_dir = os.getenv("DATA_DIR", ".")
+            db_path = os.path.join(data_dir, "trades.db")
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
@@ -39,6 +43,18 @@ class TradeDB:
                 status TEXT NOT NULL,
                 fill_price REAL,
                 order_id TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opportunity_id INTEGER REFERENCES opportunities(id),
+                market_identifier TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                entry_timestamp TEXT NOT NULL,
+                settlement_timestamp TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                realized_pnl REAL,
+                expected_pnl REAL
             );
         """)
         self.conn.commit()
@@ -120,20 +136,29 @@ class TradeDB:
         self.conn.commit()
 
     def get_daily_pnl(self) -> float:
-        """Get sum of net_profit for today's traded opportunities."""
+        """Get realized P&L from positions settled today, plus expected P&L from open positions today."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Sum realized P&L from settled positions today
         row = self.conn.execute(
-            """SELECT COALESCE(SUM(net_profit), 0) as total
-               FROM opportunities
-               WHERE action = 'traded' AND timestamp LIKE ?""",
+            """SELECT COALESCE(SUM(realized_pnl), 0) as total
+               FROM positions
+               WHERE status = 'settled' AND settlement_timestamp LIKE ?""",
             (f"{today}%",),
         ).fetchone()
-        return row["total"]
+        realized = row["total"]
+        # Also include expected P&L from positions opened today (not yet settled)
+        row2 = self.conn.execute(
+            """SELECT COALESCE(SUM(expected_pnl), 0) as total
+               FROM positions
+               WHERE status = 'open' AND entry_timestamp LIKE ?""",
+            (f"{today}%",),
+        ).fetchone()
+        return realized + row2["total"]
 
     def get_open_positions_count(self) -> int:
-        """Count trades that are currently filled (not yet settled)."""
+        """Count positions that are currently open (not yet settled)."""
         row = self.conn.execute(
-            "SELECT COUNT(*) as cnt FROM trades WHERE status = 'filled'"
+            "SELECT COUNT(*) as cnt FROM positions WHERE status = 'open'"
         ).fetchone()
         return row["cnt"]
 
@@ -153,15 +178,88 @@ class TradeDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def create_position(
+        self,
+        opportunity_id: int,
+        market_identifier: str,
+        platform: str,
+        expected_pnl: float,
+    ) -> int:
+        """Create an open position after a trade is filled. Returns position ID."""
+        cur = self.conn.execute(
+            """INSERT INTO positions
+               (opportunity_id, market_identifier, platform, entry_timestamp, status, expected_pnl)
+               VALUES (?, ?, ?, ?, 'open', ?)""",
+            (
+                opportunity_id,
+                market_identifier,
+                platform,
+                datetime.now(timezone.utc).isoformat(),
+                expected_pnl,
+            ),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def settle_position(self, position_id: int, realized_pnl: float, status: str = "settled"):
+        """Mark a position as settled with realized P&L."""
+        self.conn.execute(
+            """UPDATE positions
+               SET status = ?, realized_pnl = ?, settlement_timestamp = ?
+               WHERE id = ?""",
+            (status, realized_pnl, datetime.now(timezone.utc).isoformat(), position_id),
+        )
+        self.conn.commit()
+
+    def get_open_positions(self) -> list[dict]:
+        """Get all open positions."""
+        rows = self.conn.execute(
+            "SELECT * FROM positions WHERE status = 'open' ORDER BY entry_timestamp"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def is_market_active(self, market: str) -> bool:
-        """Check if there's an active (non-settled) trade for this market."""
+        """Check if there's an open position for this market."""
         row = self.conn.execute(
-            """SELECT COUNT(*) as cnt FROM opportunities o
-               JOIN trades t ON t.opportunity_id = o.id
-               WHERE o.market = ? AND t.status = 'filled'""",
+            """SELECT COUNT(*) as cnt FROM positions
+               WHERE market_identifier = ? AND status = 'open'""",
             (market,),
         ).fetchone()
         return row["cnt"] > 0
+
+    def get_active_market_expected_pnl(self, market: str) -> float | None:
+        """Get the expected P&L of the best open position for this market.
+
+        Returns None if no open position exists.
+        """
+        row = self.conn.execute(
+            """SELECT MAX(expected_pnl) as best_pnl FROM positions
+               WHERE market_identifier = ? AND status = 'open'""",
+            (market,),
+        ).fetchone()
+        return row["best_pnl"] if row and row["best_pnl"] is not None else None
+
+    def get_pending_trades(self) -> list[dict]:
+        """Get trades with status 'pending' (may be orphaned from a crash)."""
+        rows = self.conn.execute(
+            "SELECT * FROM trades WHERE status = 'pending' ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_open_positions_with_trades(self) -> list[dict]:
+        """Get open positions with their associated trade order IDs.
+
+        Returns positions joined with their trade legs so crash recovery
+        can check order status on each platform.
+        """
+        rows = self.conn.execute(
+            """SELECT p.*, t.platform as trade_platform, t.order_id, t.status as trade_status
+               FROM positions p
+               LEFT JOIN trades t ON t.opportunity_id = p.opportunity_id
+               WHERE p.status = 'open'
+               ORDER BY p.id, t.id"""
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self):
         self.conn.close()

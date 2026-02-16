@@ -1,0 +1,103 @@
+"""Centralized configuration — all constants backed by environment variables."""
+
+import logging
+import os
+import sys
+from dotenv import load_dotenv
+
+load_dotenv()
+load_dotenv(os.path.expanduser("~/.claude/.env"))
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FILE = os.getenv("LOG_FILE", "")  # Empty = no file logging
+
+
+def setup_logging(level: str | None = None, log_file: str | None = None):
+    """Configure root logger with console and optional file handlers."""
+    lvl = getattr(logging, (level or LOG_LEVEL), logging.INFO)
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+
+    handlers: list[logging.Handler] = [
+        logging.StreamHandler(sys.stdout),
+    ]
+    handlers[0].setLevel(lvl)
+
+    file_path = log_file if log_file is not None else LOG_FILE
+    if file_path:
+        fh = logging.FileHandler(file_path, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+        handlers.append(fh)
+
+    logging.basicConfig(level=logging.DEBUG, format=fmt, datefmt=datefmt,
+                        handlers=handlers, force=True)
+
+
+# Scanner defaults
+DEFAULT_MIN_PROFIT = float(os.getenv("MIN_PROFIT_THRESHOLD", "0.005"))
+FUZZY_MATCH_THRESHOLD = int(os.getenv("FUZZY_MATCH_THRESHOLD", "80"))
+WS_SUBSCRIPTION_LIMIT = int(os.getenv("WS_SUBSCRIPTION_LIMIT", "500"))
+WS_TRIGGER_ENABLED = os.getenv("WS_TRIGGER_ENABLED", "true").lower() == "true"
+WS_TRIGGER_THRESHOLD = float(os.getenv("WS_TRIGGER_THRESHOLD", "0.005"))
+PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "4"))
+RESCAN_INTERVAL = int(os.getenv("RESCAN_INTERVAL", "300"))
+
+# Kalshi fee parameters
+KALSHI_FEE_CAP_CENTS = int(os.getenv("KALSHI_FEE_CAP_CENTS", "175"))
+
+# Risk management
+MAX_TRADE_SIZE = float(os.getenv("MAX_TRADE_SIZE", "5.0"))
+DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "25.0"))
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "25"))
+MIN_LIQUIDITY = float(os.getenv("MIN_LIQUIDITY", "25.0"))
+MIN_LIQUIDITY_HIGH_ROI = float(os.getenv("MIN_LIQUIDITY_HIGH_ROI", "10.0"))
+MIN_NET_ROI = float(os.getenv("MIN_NET_ROI", "0"))
+ALLOW_BETTER_REENTRY = os.getenv("ALLOW_BETTER_REENTRY", "true").lower() == "true"
+REENTRY_IMPROVEMENT_THRESHOLD = float(os.getenv("REENTRY_IMPROVEMENT_THRESHOLD", "0.20"))
+
+# Dynamic sizing
+DYNAMIC_SIZING_ENABLED = os.getenv("DYNAMIC_SIZING_ENABLED", "false").lower() == "true"
+SIZING_AGGRESSIVENESS = float(os.getenv("SIZING_AGGRESSIVENESS", "0.5"))
+
+# Execution
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
+EXECUTION_MODE = os.getenv("EXECUTION_MODE", "semi-auto")
+
+# Revalidation
+REVALIDATION_MIN_FLOOR = float(os.getenv("REVALIDATION_MIN_FLOOR", "0.003"))
+REVALIDATION_ADAPTIVE = os.getenv("REVALIDATION_ADAPTIVE", "true").lower() == "true"
+
+# API rate limits (seconds between requests)
+PM_RATE_LIMIT = float(os.getenv("PM_RATE_LIMIT", "0.1"))
+KALSHI_RATE_LIMIT = float(os.getenv("KALSHI_RATE_LIMIT", "0.15"))
+
+# Proxy configuration
+POLYMARKET_PROXY_URL = os.getenv("POLYMARKET_PROXY_URL")
+KALSHI_PROXY_URL = os.getenv("KALSHI_PROXY_URL")
+
+# Platform credentials (presence-checked, not stored)
+POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY")
+POLYMARKET_CHAIN_ID = int(os.getenv("POLYMARKET_CHAIN_ID", "137"))
+KALSHI_API_KEY_ID = os.getenv("KALSHI_API_KEY_ID")
+KALSHI_PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+PREDICTIT_EMAIL = os.getenv("PREDICTIT_EMAIL")
+PREDICTIT_PASSWORD = os.getenv("PREDICTIT_PASSWORD")
+BETFAIR_USERNAME = os.getenv("BETFAIR_USERNAME")
+BETFAIR_PASSWORD = os.getenv("BETFAIR_PASSWORD")
+BETFAIR_API_KEY = os.getenv("BETFAIR_API_KEY")
+MANIFOLD_API_KEY = os.getenv("MANIFOLD_API_KEY")
+
+# Notifications
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Slack/Discord/generic URL
+WEBHOOK_MIN_PROFIT = float(os.getenv("WEBHOOK_MIN_PROFIT", "0.01"))
+
+# Data directory (for EFS mount in Fargate)
+DATA_DIR = os.getenv("DATA_DIR", ".")
+
+# Dashboard
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "0"))  # 0 = disabled
