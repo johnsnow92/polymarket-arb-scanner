@@ -122,6 +122,11 @@ def match_markets_to_events(
             # Use token_sort_ratio for order-independent matching
             score = fuzz.token_sort_ratio(pm_norm, k_norm)
 
+            # Fallback: try partial_ratio if token_sort is borderline
+            if score < threshold and score >= threshold - 15:
+                partial = fuzz.partial_ratio(pm_norm, k_norm)
+                score = max(score, partial)
+
             # Require meaningful entity overlap proportional to title length
             min_entities = min(len(pm_entities), len(k_entities))
             if min_entities > 0:
@@ -178,13 +183,159 @@ def match_markets_to_events(
     return deduped
 
 
+def _get_title(market: dict) -> str:
+    """Extract the best title from a market dict regardless of platform."""
+    return (
+        market.get("question", "")
+        or market.get("title", "")
+        or market.get("name", "")
+        or market.get("shortName", "")
+        or ""
+    )
+
+
+def _get_market_id(market: dict) -> str:
+    """Extract a unique identifier from a market dict regardless of platform."""
+    return (
+        market.get("conditionId", "")
+        or market.get("ticker", "")
+        or market.get("event_ticker", "")
+        or market.get("id", "")
+        or market.get("slug", "")
+        or _get_title(market)
+    )
+
+
+def match_cross_platform(
+    markets_a: list[dict],
+    markets_b: list[dict],
+    platform_a: str,
+    platform_b: str,
+    threshold: int = 80,
+    min_confidence: str = "LOW",
+) -> list[dict]:
+    """Platform-agnostic cross-platform matching between any two market lists.
+
+    Args:
+        markets_a: List of market dicts from platform A.
+        markets_b: List of market dicts from platform B.
+        platform_a: Name of platform A (e.g. "polymarket").
+        platform_b: Name of platform B (e.g. "predictit").
+        threshold: Minimum combined score for a match.
+        min_confidence: Minimum confidence tier (HIGH/MEDIUM/LOW).
+
+    Returns:
+        List of matched pairs with similarity scores.
+    """
+    matches = []
+    min_conf_level = CONFIDENCE_ORDER.get(min_confidence.upper(), 1)
+
+    # Pre-normalize platform B markets
+    b_prepared = []
+    for mb in markets_b:
+        title = _get_title(mb)
+        if not title:
+            continue
+        norm = normalize_title(title)
+        entities = _extract_entities(title)
+        b_prepared.append((norm, entities, mb))
+
+    for ma in markets_a:
+        a_title = _get_title(ma)
+        a_norm = normalize_title(a_title)
+        a_entities = _extract_entities(a_title)
+
+        if not a_norm or len(a_norm) < 8:
+            continue
+
+        best_score = 0
+        best_match = None
+        best_entity_overlap = 0
+        best_min_entities = 0
+
+        for b_norm, b_entities, mb in b_prepared:
+            if not b_norm:
+                continue
+
+            overlap = a_entities & b_entities
+            if len(overlap) < 2:
+                continue
+
+            score = fuzz.token_sort_ratio(a_norm, b_norm)
+
+            # Fallback: try partial_ratio if token_sort is borderline
+            if score < threshold and score >= threshold - 15:
+                partial = fuzz.partial_ratio(a_norm, b_norm)
+                score = max(score, partial)
+
+            min_entities = min(len(a_entities), len(b_entities))
+            entity_ratio = len(overlap) / min_entities if min_entities > 0 else 0
+            combined = score + (entity_ratio * 15)
+
+            if combined > best_score:
+                best_score = combined
+                best_match = mb
+                best_entity_overlap = len(overlap)
+                best_min_entities = min_entities
+
+        if best_score >= threshold and best_match and best_entity_overlap >= 2:
+            confidence = classify_confidence(
+                int(best_score), best_entity_overlap, best_min_entities
+            )
+            if CONFIDENCE_ORDER.get(confidence, 0) < min_conf_level:
+                continue
+            matches.append({
+                "market_a": ma,
+                "market_b": best_match,
+                "platform_a": platform_a,
+                "platform_b": platform_b,
+                "similarity": int(best_score),
+                "entity_overlap": best_entity_overlap,
+                "confidence": confidence,
+                "title_a": a_title,
+                "title_b": _get_title(best_match),
+            })
+
+    matches.sort(key=lambda x: x["similarity"], reverse=True)
+
+    # Deduplicate: best match per platform B market
+    seen_b = set()
+    deduped = []
+    for m in matches:
+        b_id = _get_market_id(m["market_b"])
+        if b_id not in seen_b:
+            seen_b.add(b_id)
+            deduped.append(m)
+
+    return deduped
+
+
+_INVERSION_SIGNALS = [
+    "not", "won't", "wouldn't", "cannot", "can't",
+    "below", "under", "less than", "fewer",
+    "fail to", "fails to", "decline", "drop below",
+    "lose", "loses", "defeat", "defeats", "against",
+    "no longer", "never", "neither",
+]
+
+
 def detect_inverted(pm_title: str, kalshi_title: str) -> bool:
     """Detect if a Kalshi market is inverted relative to Polymarket.
 
     Some markets may be phrased oppositely:
     - Polymarket: "Will X happen?" (YES = it happens)
     - Kalshi: "X will NOT happen" (YES = it doesn't happen)
+
+    Uses XOR logic: inversion only if one title has negation, not both.
     """
+    pm_lower = pm_title.lower()
     kalshi_lower = kalshi_title.lower()
-    inversion_signals = ["not", "won't", "below", "under", "less than", "fewer"]
-    return any(f" {signal} " in f" {kalshi_lower} " for signal in inversion_signals)
+
+    def _has_inversion(text):
+        return any(f" {signal} " in f" {text} " for signal in _INVERSION_SIGNALS)
+
+    pm_inv = _has_inversion(pm_lower)
+    kalshi_inv = _has_inversion(kalshi_lower)
+
+    # XOR: inversion only if exactly one title has negation signals
+    return pm_inv != kalshi_inv

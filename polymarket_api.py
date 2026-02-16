@@ -1,8 +1,14 @@
 """Polymarket API client for Gamma API and CLOB."""
 
 import json
+import logging
+import os
+import threading
 import time
 import requests
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+logger = logging.getLogger(__name__)
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
@@ -15,18 +21,47 @@ from py_clob_client.clob_types import (
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
 
-# Rate limiting
+# Rate limiting (thread-safe)
 _last_request_time = 0
+_rate_lock = threading.Lock()
 MIN_REQUEST_INTERVAL = 0.1  # 100ms between requests
+
+# Proxy support
+_session = requests.Session()
+_proxy_url = os.getenv("POLYMARKET_PROXY_URL")
+if _proxy_url:
+    _session.proxies = {"http": _proxy_url, "https": _proxy_url}
+
+
+class _RateLimitError(Exception):
+    """Raised on HTTP 429 to trigger retry."""
+    pass
 
 
 def _rate_limit():
     global _last_request_time
-    now = time.time()
-    elapsed = now - _last_request_time
-    if elapsed < MIN_REQUEST_INTERVAL:
-        time.sleep(MIN_REQUEST_INTERVAL - elapsed)
-    _last_request_time = time.time()
+    with _rate_lock:
+        now = time.time()
+        elapsed = now - _last_request_time
+        if elapsed < MIN_REQUEST_INTERVAL:
+            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        _last_request_time = time.time()
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type((_RateLimitError, requests.ConnectionError, requests.Timeout)),
+    reraise=True,
+)
+def _get_with_retry(url: str, params: dict = None, timeout: int = 30) -> requests.Response:
+    """GET request with retry on 429, connection errors, and timeouts."""
+    _rate_limit()
+    resp = _session.get(url, params=params, timeout=timeout)
+    if resp.status_code == 429:
+        raise _RateLimitError(f"Rate limited: {url}")
+    resp.raise_for_status()
+    return resp
 
 
 def fetch_all_markets(limit: int = 500, max_pages: int = 20) -> list[dict]:
@@ -35,7 +70,6 @@ def fetch_all_markets(limit: int = 500, max_pages: int = 20) -> list[dict]:
     offset = 0
 
     for _ in range(max_pages):
-        _rate_limit()
         params = {
             "limit": limit,
             "offset": offset,
@@ -43,11 +77,10 @@ def fetch_all_markets(limit: int = 500, max_pages: int = 20) -> list[dict]:
             "closed": "false",
         }
         try:
-            resp = requests.get(f"{GAMMA_BASE}/markets", params=params, timeout=30)
-            resp.raise_for_status()
+            resp = _get_with_retry(f"{GAMMA_BASE}/markets", params=params)
             markets = resp.json()
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            print(f"  [WARN] Polymarket markets request failed at offset {offset}: {e}")
+        except (requests.RequestException, json.JSONDecodeError, _RateLimitError) as e:
+            logger.warning("Polymarket markets request failed at offset %s: %s", offset, e)
             break
 
         if not markets:
@@ -68,7 +101,6 @@ def fetch_events(limit: int = 500, max_pages: int = 20) -> list[dict]:
     offset = 0
 
     for _ in range(max_pages):
-        _rate_limit()
         params = {
             "limit": limit,
             "offset": offset,
@@ -76,11 +108,10 @@ def fetch_events(limit: int = 500, max_pages: int = 20) -> list[dict]:
             "closed": "false",
         }
         try:
-            resp = requests.get(f"{GAMMA_BASE}/events", params=params, timeout=30)
-            resp.raise_for_status()
+            resp = _get_with_retry(f"{GAMMA_BASE}/events", params=params)
             events = resp.json()
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            print(f"  [WARN] Polymarket events request failed at offset {offset}: {e}")
+        except (requests.RequestException, json.JSONDecodeError, _RateLimitError) as e:
+            logger.warning("Polymarket events request failed at offset %s: %s", offset, e)
             break
 
         if not events:
@@ -97,17 +128,11 @@ def fetch_events(limit: int = 500, max_pages: int = 20) -> list[dict]:
 
 def fetch_order_book(token_id: str) -> dict | None:
     """Fetch order book from CLOB for a given token ID."""
-    _rate_limit()
     try:
-        resp = requests.get(
-            f"{CLOB_BASE}/book",
-            params={"token_id": token_id},
-            timeout=15,
-        )
-        resp.raise_for_status()
+        resp = _get_with_retry(f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=15)
         return resp.json()
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        print(f"  [WARN] Order book request failed for {token_id}: {e}")
+    except (requests.RequestException, json.JSONDecodeError, _RateLimitError) as e:
+        logger.warning("Order book request failed for %s: %s", token_id, e)
         return None
 
 
@@ -250,7 +275,7 @@ class PolymarketTrader:
                 return float(resp["balance"]) / 1e6  # USDC has 6 decimals
             return None
         except Exception as e:
-            print(f"  [ERROR] Polymarket get_balance failed: {e}")
+            logger.error("Polymarket get_balance failed: %s", e)
             return None
 
     def place_order(
@@ -290,10 +315,10 @@ class PolymarketTrader:
             if resp and resp.get("success"):
                 return resp
             if resp:
-                print(f"  [ERROR] Polymarket place_order unsuccessful: {resp}")
-            return resp
+                logger.error("Polymarket place_order unsuccessful: %s", resp)
+            return None
         except Exception as e:
-            print(f"  [ERROR] Polymarket place_order failed: {e}")
+            logger.error("Polymarket place_order failed: %s", e)
             return None
 
     def cancel_order(self, order_id: str) -> bool:
@@ -302,8 +327,22 @@ class PolymarketTrader:
             resp = self.client.cancel(order_id)
             return bool(resp and resp.get("canceled"))
         except Exception as e:
-            print(f"  [WARN] Polymarket cancel_order failed for {order_id}: {e}")
+            logger.warning("Polymarket cancel_order failed for %s: %s", order_id, e)
             return False
+
+    def get_order_status(self, order_id: str) -> dict | None:
+        """Get the status of a specific order.
+
+        Returns dict with 'status' key (e.g. 'matched', 'live', 'canceled') or None.
+        """
+        try:
+            resp = self.client.get_order(order_id)
+            if resp:
+                return resp
+            return None
+        except Exception as e:
+            logger.warning("Polymarket get_order_status failed for %s: %s", order_id, e)
+            return None
 
     def get_orders(self) -> list[dict]:
         """Get open orders."""
@@ -313,5 +352,5 @@ class PolymarketTrader:
                 return resp
             return resp.get("orders", []) if resp else []
         except Exception as e:
-            print(f"  [ERROR] Polymarket get_orders failed: {e}")
+            logger.error("Polymarket get_orders failed: %s", e)
             return []

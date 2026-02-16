@@ -2,6 +2,8 @@
 
 import math
 
+from config import KALSHI_FEE_CAP_CENTS, POLYGON_GAS_ESTIMATE
+
 
 def polymarket_fee(buy_price: float, sell_price: float = 1.0) -> float:
     """Calculate Polymarket fee on a winning position.
@@ -28,8 +30,8 @@ def kalshi_taker_fee(price: float, contracts: int = 1) -> float:
         return 0.0
     # Fee per contract in cents
     fee_cents = max(2, math.ceil(7 * price * (1 - price)))
-    # Cap at 1.75 cents (high-volume tier) -- use conservative estimate
-    fee_cents = min(fee_cents, 175)  # 1.75 * 100 = no real cap for retail
+    # Cap per contract in cents (default 175 = $1.75, effectively no cap for retail)
+    fee_cents = min(fee_cents, KALSHI_FEE_CAP_CENTS)
     return (fee_cents * contracts) / 100.0
 
 
@@ -50,10 +52,13 @@ def net_profit_binary_internal(yes_price: float, no_price: float) -> dict:
     cheaper = min(yes_price, no_price)
     fee = polymarket_fee(cheaper, 1.0)
 
+    # Gas cost: two Polygon transactions (buy YES + buy NO)
+    gas = POLYGON_GAS_ESTIMATE * 2
+
     return {
         "gross_spread": gross_spread,
-        "fees": fee,
-        "net_profit": gross_spread - fee,
+        "fees": fee + gas,
+        "net_profit": gross_spread - fee - gas,
     }
 
 
@@ -73,10 +78,53 @@ def net_profit_negrisk_internal(yes_prices: list[float]) -> dict:
     cheapest = min(yes_prices)
     fee = polymarket_fee(cheapest, 1.0)
 
+    # Gas cost: one Polygon transaction per outcome
+    gas = POLYGON_GAS_ESTIMATE * len(yes_prices)
+
     return {
         "gross_spread": gross_spread,
-        "fees": fee,
-        "net_profit": gross_spread - fee,
+        "fees": fee + gas,
+        "net_profit": gross_spread - fee - gas,
+    }
+
+
+def net_profit_kalshi_binary(yes_price: float, no_price: float) -> dict:
+    """Calculate net profit for a Kalshi binary arbitrage.
+
+    Buy YES + NO on the same market. One always pays $1.00.
+    Both legs pay Kalshi taker fee at entry.
+    """
+    total_cost = yes_price + no_price
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    fees = kalshi_taker_fee(yes_price) + kalshi_taker_fee(no_price)
+    return {
+        "gross_spread": gross_spread,
+        "fees": fees,
+        "net_profit": gross_spread - fees,
+    }
+
+
+def net_profit_kalshi_multi(yes_prices: list[float]) -> dict:
+    """Calculate net profit for a Kalshi multi-outcome arbitrage.
+
+    Buy YES on each outcome in an event. Exactly one pays $1.00.
+    Each leg pays Kalshi taker fee at entry.
+    """
+    total_cost = sum(yes_prices)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    fees = sum(kalshi_taker_fee(p) for p in yes_prices)
+    return {
+        "gross_spread": gross_spread,
+        "fees": fees,
+        "net_profit": gross_spread - fees,
     }
 
 
@@ -109,11 +157,162 @@ def net_profit_cross_platform(
     # Case 2 (Kalshi wins): only Kalshi entry fee (PM side loses, no fee)
     case2_fees = kalshi_entry_fee
 
-    # Use worst-case fees
+    # Use worst-case fees + Polygon gas for the PM leg
     worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees,
-        "net_profit": gross_spread - worst_fees,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PredictIt fee calculations
+# ---------------------------------------------------------------------------
+
+def predictit_fee(profit: float) -> float:
+    """PredictIt takes 10% of profits, 5% withdrawal fee.
+
+    The 10% profit fee is deducted at settlement. The 5% withdrawal fee
+    applies when withdrawing funds and is handled separately.
+    """
+    if profit <= 0:
+        return 0.0
+    return profit * 0.10
+
+
+def net_profit_cross_predictit(
+    poly_price: float,
+    pi_price: float,
+    poly_side: str,
+    pi_side: str,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs PredictIt.
+
+    poly_side/pi_side: 'yes' or 'no' -- what we're buying on each platform.
+    One of the two positions will win $1.00, the other $0.00.
+    """
+    total_cost = poly_price + pi_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Case 1 (Poly wins): Polymarket 2% winner fee + no PredictIt fee (PI side lost)
+    poly_win_profit = 1.0 - poly_price
+    case1_fees = polymarket_fee(poly_price, 1.0)
+
+    # Case 2 (PredictIt wins): PredictIt 10% profit fee + no PM fee (PM side lost)
+    pi_win_profit = 1.0 - pi_price
+    case2_fees = predictit_fee(pi_win_profit)
+
+    # Use worst-case fees + Polygon gas for the PM leg
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Betfair fee calculations
+# ---------------------------------------------------------------------------
+
+def betfair_commission(net_winnings: float, commission_rate: float = 0.05) -> float:
+    """Betfair charges 2-5% commission on net winnings per market.
+
+    The rate depends on the user's discount rate (based on activity).
+    Default 5% is the standard rate for new/low-volume users.
+    """
+    if net_winnings <= 0:
+        return 0.0
+    return net_winnings * commission_rate
+
+
+def net_profit_cross_betfair(
+    poly_price: float,
+    bf_price: float,
+    poly_side: str,
+    bf_side: str,
+    commission_rate: float = 0.05,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs Betfair.
+
+    poly_side/bf_side: 'yes' or 'no' -- what we're buying on each platform.
+    One of the two positions will win $1.00, the other $0.00.
+    """
+    total_cost = poly_price + bf_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Case 1 (Poly wins): PM 2% winner fee + no Betfair commission (BF side lost)
+    case1_fees = polymarket_fee(poly_price, 1.0)
+
+    # Case 2 (Betfair wins): Betfair commission on net winnings + no PM fee
+    bf_win_profit = 1.0 - bf_price
+    case2_fees = betfair_commission(bf_win_profit, commission_rate)
+
+    # Use worst-case fees + Polygon gas for the PM leg
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Manifold fee calculations
+# ---------------------------------------------------------------------------
+
+def manifold_fee(amount: float) -> float:
+    """Manifold has no trading fees."""
+    return 0.0
+
+
+def net_profit_cross_manifold(
+    poly_price: float,
+    mf_price: float,
+    poly_side: str,
+    mf_side: str,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs Manifold.
+
+    poly_side/mf_side: 'yes' or 'no' -- what we're buying on each platform.
+    One of the two positions will win $1.00, the other $0.00.
+
+    Note: Manifold uses mana (play money) for most markets. Cross-platform
+    arb is only meaningful for sweepstakes markets with real-money payouts.
+    """
+    total_cost = poly_price + mf_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Manifold has no fees, so only PM fees apply when PM side wins
+    # Case 1 (Poly wins): PM 2% winner fee
+    case1_fees = polymarket_fee(poly_price, 1.0)
+    # Case 2 (Manifold wins): no fees on either side
+    case2_fees = 0.0
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
     }

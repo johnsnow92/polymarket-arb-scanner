@@ -59,6 +59,13 @@ class TradeDB:
         """)
         self.conn.commit()
 
+        # Safe migration: add slippage column if it doesn't exist
+        try:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN slippage REAL")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
     def log_opportunity(
         self,
         opp_type: str,
@@ -260,6 +267,13 @@ class TradeDB:
                ORDER BY p.id, t.id"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_avg_slippage(self) -> float:
+        """Get average slippage across all trades that have slippage data."""
+        row = self.conn.execute(
+            "SELECT AVG(slippage) as avg_slip FROM trades WHERE slippage IS NOT NULL"
+        ).fetchone()
+        return row["avg_slip"] if row and row["avg_slip"] is not None else 0.0
 
     def close(self):
         self.conn.close()

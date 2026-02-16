@@ -7,9 +7,12 @@ class RiskManager:
     def __init__(self, config: dict):
         self.max_trade_size = config.get("max_trade_size", 5.0)
         self.daily_loss_limit = config.get("daily_loss_limit", 25.0)
-        self.max_open_positions = config.get("max_open_positions", 10)
-        self.min_liquidity = config.get("min_liquidity", 50.0)
-        self.min_net_roi = config.get("min_net_roi", 0.01)
+        self.max_open_positions = config.get("max_open_positions", 25)
+        self.min_liquidity = config.get("min_liquidity", 25.0)
+        self.min_liquidity_high_roi = config.get("min_liquidity_high_roi", 10.0)
+        self.min_net_roi = config.get("min_net_roi", 0)
+        self.allow_better_reentry = config.get("allow_better_reentry", True)
+        self.reentry_improvement_threshold = config.get("reentry_improvement_threshold", 0.20)
 
     def check(self, opportunity: dict, db, balances: dict | None = None) -> tuple[bool, str]:
         """Check if an opportunity passes all risk gates.
@@ -40,38 +43,92 @@ class RiskManager:
             total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
             trade_cost = min(self.max_trade_size, total_cost)
 
-            if "Cross" in opp_type:
-                pm_balance = balances.get("polymarket", 0)
+            if "Kalshi" in opp_type and "Cross" not in opp_type:
+                # Kalshi-only arb: entire cost is on Kalshi
                 k_balance = balances.get("kalshi", 0)
-                if pm_balance is not None and pm_balance < trade_cost / 2:
-                    return False, f"Insufficient Polymarket balance (${pm_balance:.2f})"
-                if k_balance is not None and k_balance < trade_cost / 2:
+                if k_balance is not None and k_balance < trade_cost:
                     return False, f"Insufficient Kalshi balance (${k_balance:.2f})"
+            elif "Cross" in opp_type:
+                # Cross-platform: check both participating platforms
+                half_cost = trade_cost / 2
+                platform_a = opportunity.get("_platform_a", "")
+                platform_b = opportunity.get("_platform_b", "")
+                platforms_involved = {platform_a, platform_b} if platform_a else {"polymarket", "kalshi"}
+                for plat in platforms_involved:
+                    if not plat:
+                        continue
+                    bal = balances.get(plat, 0)
+                    if bal is not None and bal < half_cost:
+                        return False, f"Insufficient {plat.capitalize()} balance (${bal:.2f})"
             else:
                 pm_balance = balances.get("polymarket", 0)
                 if pm_balance is not None and pm_balance < trade_cost:
                     return False, f"Insufficient Polymarket balance (${pm_balance:.2f})"
 
-        # 4. Order book depth check
+        # 4. Order book depth check (tiered by ROI)
         depth = opportunity.get("_clob_depth", 0)
-        if depth < self.min_liquidity:
-            return False, f"Insufficient depth ({depth:.0f} < {self.min_liquidity:.0f})"
-
-        # 5. Net ROI check
         net_profit = opportunity.get("net_profit", 0)
         total_cost_str = opportunity.get("total_cost", "$0")
         total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
-        if total_cost > 0:
-            roi = net_profit / total_cost
+        roi = net_profit / total_cost if total_cost > 0 else 0
+
+        # High-ROI opportunities (>5%) use lower depth threshold
+        depth_threshold = self.min_liquidity_high_roi if roi > 0.05 else self.min_liquidity
+        if depth < depth_threshold:
+            return False, f"Insufficient depth ({depth:.0f} < {depth_threshold:.0f})"
+
+        # 5. Net ROI check (skip when min_net_roi == 0)
+        if self.min_net_roi > 0 and total_cost > 0:
             if roi < self.min_net_roi:
                 return False, f"ROI too low ({roi:.2%} < {self.min_net_roi:.2%})"
 
-        # 6. Dedup: not already trading this market
+        # 6. Dedup: not already trading this market (with smart re-entry)
         market = opportunity.get("market", "")
         if db.is_market_active(market):
-            return False, f"Already trading this market"
+            if self.allow_better_reentry:
+                existing_pnl = db.get_active_market_expected_pnl(market)
+                if existing_pnl is not None and net_profit > existing_pnl * (1 + self.reentry_improvement_threshold):
+                    pass  # Allow re-entry — new opportunity is significantly better
+                else:
+                    return False, "Already trading this market"
+            else:
+                return False, "Already trading this market"
 
         return True, "OK"
+
+    def calculate_dynamic_size(self, opportunity: dict, aggressiveness: float = 0.5) -> float:
+        """Calculate trade size based on opportunity quality using half-Kelly sizing.
+
+        Formula: base_size * (1 + ROI * aggressiveness * 20)
+        Capped at 50% of available depth to avoid slippage.
+        Still clamped by max_trade_size.
+
+        Args:
+            opportunity: Opportunity dict with net_profit, total_cost, _clob_depth
+            aggressiveness: Fraction of Kelly criterion (0.5 = half-Kelly)
+
+        Returns:
+            Calculated trade size in dollars.
+        """
+        base_size = self.max_trade_size
+        net_profit = opportunity.get("net_profit", 0)
+        total_cost_str = opportunity.get("total_cost", "$0")
+        total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
+
+        if total_cost <= 0 or net_profit <= 0:
+            return base_size
+
+        roi = net_profit / total_cost
+        size = base_size * (1 + roi * aggressiveness * 20)
+
+        # Cap at 50% of available depth to avoid slippage
+        depth = opportunity.get("_clob_depth", 0)
+        if depth > 0:
+            size = min(size, depth * 0.5)
+
+        # Still capped by max_trade_size
+        size = min(size, self.max_trade_size)
+        return max(0, size)
 
     def clamp_size(self, desired_size: float, depth: float, balance: float | None) -> float:
         """Calculate safe trade size given constraints."""

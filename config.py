@@ -40,12 +40,12 @@ def setup_logging(level: str | None = None, log_file: str | None = None):
 
 # Scanner defaults
 DEFAULT_MIN_PROFIT = float(os.getenv("MIN_PROFIT_THRESHOLD", "0.005"))
-FUZZY_MATCH_THRESHOLD = int(os.getenv("FUZZY_MATCH_THRESHOLD", "80"))
-WS_SUBSCRIPTION_LIMIT = int(os.getenv("WS_SUBSCRIPTION_LIMIT", "500"))
+FUZZY_MATCH_THRESHOLD = int(os.getenv("FUZZY_MATCH_THRESHOLD", "72"))
+WS_SUBSCRIPTION_LIMIT = int(os.getenv("WS_SUBSCRIPTION_LIMIT", "2000"))
 WS_TRIGGER_ENABLED = os.getenv("WS_TRIGGER_ENABLED", "true").lower() == "true"
-WS_TRIGGER_THRESHOLD = float(os.getenv("WS_TRIGGER_THRESHOLD", "0.005"))
+WS_TRIGGER_THRESHOLD = float(os.getenv("WS_TRIGGER_THRESHOLD", "0.003"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "4"))
-RESCAN_INTERVAL = int(os.getenv("RESCAN_INTERVAL", "300"))
+RESCAN_INTERVAL = int(os.getenv("RESCAN_INTERVAL", "60"))
 
 # Kalshi fee parameters
 KALSHI_FEE_CAP_CENTS = int(os.getenv("KALSHI_FEE_CAP_CENTS", "175"))
@@ -54,27 +54,30 @@ KALSHI_FEE_CAP_CENTS = int(os.getenv("KALSHI_FEE_CAP_CENTS", "175"))
 MAX_TRADE_SIZE = float(os.getenv("MAX_TRADE_SIZE", "5.0"))
 DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "25.0"))
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "25"))
-MIN_LIQUIDITY = float(os.getenv("MIN_LIQUIDITY", "25.0"))
+MIN_LIQUIDITY = float(os.getenv("MIN_LIQUIDITY", "10.0"))
 MIN_LIQUIDITY_HIGH_ROI = float(os.getenv("MIN_LIQUIDITY_HIGH_ROI", "10.0"))
 MIN_NET_ROI = float(os.getenv("MIN_NET_ROI", "0"))
 ALLOW_BETTER_REENTRY = os.getenv("ALLOW_BETTER_REENTRY", "true").lower() == "true"
 REENTRY_IMPROVEMENT_THRESHOLD = float(os.getenv("REENTRY_IMPROVEMENT_THRESHOLD", "0.20"))
 
 # Dynamic sizing
-DYNAMIC_SIZING_ENABLED = os.getenv("DYNAMIC_SIZING_ENABLED", "false").lower() == "true"
+DYNAMIC_SIZING_ENABLED = os.getenv("DYNAMIC_SIZING_ENABLED", "true").lower() == "true"
 SIZING_AGGRESSIVENESS = float(os.getenv("SIZING_AGGRESSIVENESS", "0.5"))
 
 # Execution
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "semi-auto")
 
+# Polygon gas cost estimate (per transaction, in dollars)
+POLYGON_GAS_ESTIMATE = float(os.getenv("POLYGON_GAS_ESTIMATE", "0.03"))
+
 # Revalidation
 REVALIDATION_MIN_FLOOR = float(os.getenv("REVALIDATION_MIN_FLOOR", "0.003"))
 REVALIDATION_ADAPTIVE = os.getenv("REVALIDATION_ADAPTIVE", "true").lower() == "true"
 
 # API rate limits (seconds between requests)
-PM_RATE_LIMIT = float(os.getenv("PM_RATE_LIMIT", "0.1"))
-KALSHI_RATE_LIMIT = float(os.getenv("KALSHI_RATE_LIMIT", "0.15"))
+PM_RATE_LIMIT = float(os.getenv("PM_RATE_LIMIT", "0.05"))
+KALSHI_RATE_LIMIT = float(os.getenv("KALSHI_RATE_LIMIT", "0.1"))
 
 # Proxy configuration
 POLYMARKET_PROXY_URL = os.getenv("POLYMARKET_PROXY_URL")

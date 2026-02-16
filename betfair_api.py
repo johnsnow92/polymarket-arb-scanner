@@ -1,0 +1,392 @@
+"""Betfair Exchange API client for market data and trading."""
+
+import logging
+import os
+import threading
+import time
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+BETFAIR_SSO_URL = "https://identitysso.betfair.com/api/login"
+BETFAIR_EXCHANGE_URL = "https://api.betfair.com/exchange/betting/rest/v1.0"
+BETFAIR_ACCOUNT_URL = "https://api.betfair.com/exchange/account/rest/v1.0"
+
+# Rate limiting (thread-safe)
+_last_request_time = 0
+_rate_lock = threading.Lock()
+MIN_REQUEST_INTERVAL = 0.2  # 200ms between requests
+
+
+def _rate_limit():
+    global _last_request_time
+    with _rate_lock:
+        now = time.time()
+        elapsed = now - _last_request_time
+        if elapsed < MIN_REQUEST_INTERVAL:
+            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        _last_request_time = time.time()
+
+
+class BetfairClient:
+    """Betfair Exchange API client with SSO authentication."""
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.api_key = None
+        self.ssoid = None
+        self.authenticated = False
+
+    def login(
+        self,
+        username: str = None,
+        password: str = None,
+        api_key: str = None,
+    ) -> bool:
+        """Authenticate via Betfair SSO.
+
+        Args:
+            username: Betfair username (falls back to BETFAIR_USERNAME env var).
+            password: Betfair password (falls back to BETFAIR_PASSWORD env var).
+            api_key: Betfair API key (falls back to BETFAIR_API_KEY env var).
+
+        Returns:
+            True if login succeeded.
+        """
+        username = username or os.getenv("BETFAIR_USERNAME")
+        password = password or os.getenv("BETFAIR_PASSWORD")
+        api_key = api_key or os.getenv("BETFAIR_API_KEY")
+
+        if not all([username, password, api_key]):
+            logger.error("Betfair credentials not provided")
+            return False
+
+        self.api_key = api_key
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                BETFAIR_SSO_URL,
+                data={"username": username, "password": password},
+                headers={"X-Application": api_key, "Accept": "application/json"},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "SUCCESS":
+                    self.ssoid = data.get("token")
+                    self.session.headers.update({
+                        "X-Application": self.api_key,
+                        "X-Authentication": self.ssoid,
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    })
+                    self.authenticated = True
+                    return True
+                logger.error("Betfair login failed: %s", data.get('error', 'unknown'))
+                return False
+            logger.error("Betfair SSO returned status %s", resp.status_code)
+            return False
+        except requests.RequestException as e:
+            logger.error("Betfair login request failed: %s", e)
+            return False
+
+    def _request(self, endpoint: str, params: dict = None) -> dict | None:
+        """Make an authenticated request to the Betfair Exchange API.
+
+        Args:
+            endpoint: API endpoint name (e.g. 'listEventTypes').
+            params: JSON-RPC filter parameters.
+
+        Returns:
+            Response data or None on failure.
+        """
+        if not self.authenticated:
+            logger.error("Betfair: must login before making API calls")
+            return None
+
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                f"{BETFAIR_EXCHANGE_URL}/{endpoint}/",
+                json={"filter": params or {}},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning("Betfair %s returned %s: %s", endpoint, resp.status_code, resp.text[:200])
+            return None
+        except requests.RequestException as e:
+            logger.warning("Betfair %s failed: %s", endpoint, e)
+            return None
+
+    def list_event_types(self) -> list[dict]:
+        """Fetch all event types (sports categories).
+
+        Returns:
+            List of event type dicts.
+        """
+        data = self._request("listEventTypes")
+        if data and isinstance(data, list):
+            return data
+        return []
+
+    def list_events(self, event_type_id: str = None) -> list[dict]:
+        """Fetch events, optionally filtered by event type.
+
+        Args:
+            event_type_id: Filter by event type (e.g. '7' for horse racing).
+
+        Returns:
+            List of event dicts.
+        """
+        params = {}
+        if event_type_id:
+            params["eventTypeIds"] = [event_type_id]
+        data = self._request("listEvents", params)
+        if data and isinstance(data, list):
+            return data
+        return []
+
+    def list_markets(self, event_id: str) -> list[dict]:
+        """Fetch market catalogue for an event.
+
+        Args:
+            event_id: Betfair event ID.
+
+        Returns:
+            List of market dicts with runner info.
+        """
+        if not self.authenticated:
+            return []
+
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                f"{BETFAIR_EXCHANGE_URL}/listMarketCatalogue/",
+                json={
+                    "filter": {"eventIds": [event_id]},
+                    "maxResults": 100,
+                    "marketProjection": [
+                        "RUNNER_DESCRIPTION",
+                        "MARKET_DESCRIPTION",
+                        "EVENT",
+                    ],
+                },
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            return []
+        except requests.RequestException as e:
+            logger.warning("Betfair list_markets failed: %s", e)
+            return []
+
+    def list_runners(self, market_id: str) -> list[dict]:
+        """Fetch market book with price data for all runners.
+
+        Args:
+            market_id: Betfair market ID.
+
+        Returns:
+            List of runner dicts with price/size data.
+        """
+        if not self.authenticated:
+            return []
+
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                f"{BETFAIR_EXCHANGE_URL}/listMarketBook/",
+                json={
+                    "marketIds": [market_id],
+                    "priceProjection": {
+                        "priceData": ["EX_BEST_OFFERS"],
+                    },
+                },
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and isinstance(data, list) and data:
+                    return data[0].get("runners", [])
+            return []
+        except requests.RequestException as e:
+            logger.warning("Betfair list_runners failed for %s: %s", market_id, e)
+            return []
+
+    def place_orders(self, market_id: str, instructions: list[dict]) -> dict | None:
+        """Place orders on a Betfair market.
+
+        Args:
+            market_id: Betfair market ID.
+            instructions: List of order instruction dicts, each with:
+                - selectionId: Runner selection ID
+                - side: 'BACK' or 'LAY'
+                - orderType: 'LIMIT'
+                - limitOrder: {size, price, persistenceType}
+
+        Returns:
+            Place orders response or None on failure.
+        """
+        if not self.authenticated:
+            logger.error("Betfair: must login before placing orders")
+            return None
+
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                f"{BETFAIR_EXCHANGE_URL}/placeOrders/",
+                json={
+                    "marketId": market_id,
+                    "instructions": instructions,
+                },
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                status = data.get("status")
+                if status == "SUCCESS":
+                    return data
+                logger.error("Betfair place_orders failed: %s", data.get('errorCode', 'unknown'))
+                return None
+            logger.error("Betfair place_orders: %s %s", resp.status_code, resp.text[:200])
+            return None
+        except requests.RequestException as e:
+            logger.error("Betfair place_orders failed: %s", e)
+            return None
+
+    def get_current_orders(self) -> list[dict]:
+        """Get all current unmatched orders.
+
+        Returns:
+            List of order dicts.
+        """
+        if not self.authenticated:
+            return []
+
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                f"{BETFAIR_EXCHANGE_URL}/listCurrentOrders/",
+                json={},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("currentOrders", [])
+            return []
+        except requests.RequestException as e:
+            logger.warning("Betfair get_current_orders failed: %s", e)
+            return []
+
+    def get_balance(self) -> float | None:
+        """Get available account balance.
+
+        Returns:
+            Balance as float or None on failure.
+        """
+        if not self.authenticated:
+            return None
+
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                f"{BETFAIR_ACCOUNT_URL}/getAccountFunds/",
+                json={"wallet": "UK"},
+                headers={
+                    "X-Application": self.api_key,
+                    "X-Authentication": self.ssoid,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return float(data.get("availableToBetBalance", 0))
+            return None
+        except requests.RequestException as e:
+            logger.warning("Betfair get_balance failed: %s", e)
+            return None
+
+    def get_order_status(self, bet_id: str) -> dict | None:
+        """Get status of a specific bet/order.
+
+        Args:
+            bet_id: Betfair bet ID.
+
+        Returns:
+            Order dict or None.
+        """
+        if not self.authenticated:
+            return None
+
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                f"{BETFAIR_EXCHANGE_URL}/listCurrentOrders/",
+                json={"betIds": [bet_id]},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                orders = data.get("currentOrders", [])
+                return orders[0] if orders else None
+            return None
+        except requests.RequestException as e:
+            logger.warning("Betfair get_order_status failed: %s", e)
+            return None
+
+    def get_market_price(self, market: dict) -> tuple[float | None, float | None]:
+        """Extract best back/lay prices from a Betfair market as YES/NO equivalents.
+
+        For prediction market compatibility, back price maps to YES price
+        and (1 / lay price) maps to the implied NO probability.
+
+        For a two-runner market, returns the first runner's prices converted
+        from decimal odds to probability (0-1) range.
+
+        Args:
+            market: Betfair runner dict from list_runners() or a market dict
+                    with 'runners' key containing price data.
+
+        Returns:
+            (yes_price, no_price) in probability terms (0-1), or (None, None).
+        """
+        runners = market.get("runners", [market] if "ex" in market else [])
+        if not runners:
+            return None, None
+
+        runner = runners[0] if isinstance(runners, list) else runners
+        ex = runner.get("ex", {})
+
+        back_prices = ex.get("availableToBack", [])
+        lay_prices = ex.get("availableToLay", [])
+
+        if not back_prices and not lay_prices:
+            return None, None
+
+        # Convert decimal odds to implied probability (0-1)
+        yes_price = None
+        no_price = None
+
+        if back_prices:
+            # Best back odds (highest price available to back)
+            best_back = float(back_prices[0].get("price", 0))
+            if best_back > 0:
+                yes_price = 1.0 / best_back  # Implied probability
+
+        if lay_prices:
+            # Best lay odds (lowest price available to lay)
+            best_lay = float(lay_prices[0].get("price", 0))
+            if best_lay > 0:
+                no_price = 1.0 - (1.0 / best_lay)  # Implied NO probability
+
+        # If only one side available, derive the other
+        if yes_price is not None and no_price is None:
+            no_price = 1.0 - yes_price
+        elif no_price is not None and yes_price is None:
+            yes_price = 1.0 - no_price
+
+        return yes_price, no_price

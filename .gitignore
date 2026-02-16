@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.mcp.json
+*.pem
 nul
 trades.db
