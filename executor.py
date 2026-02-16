@@ -784,6 +784,11 @@ class ArbitrageExecutor:
                     # Poll for fill confirmation
                     fill_price = self._confirm_fill_kalshi(order_id, price)
                     return True, order_id, fill_price
+                logger.warning("Kalshi order not filled: status=%s ticker=%s resp=%s",
+                               status, ticker, str(resp)[:300])
+            else:
+                logger.warning("Kalshi place_order returned None for %s %s @ $%.3f (count=%d)",
+                               side, ticker, price, count)
             return False, None, None
 
         elif platform == "predictit":
