@@ -20,16 +20,20 @@
       "environment": [
         { "name": "DATA_DIR", "value": "/data" },
         { "name": "DASHBOARD_PORT", "value": "8080" },
-        { "name": "DRY_RUN", "value": "true" },
-        { "name": "EXECUTION_MODE", "value": "semi-auto" },
+        { "name": "DRY_RUN", "value": "false" },
+        { "name": "EXECUTION_MODE", "value": "full-auto" },
         { "name": "LOG_LEVEL", "value": "INFO" },
         { "name": "MIN_PROFIT_THRESHOLD", "value": "0.005" },
-        { "name": "MAX_TRADE_SIZE", "value": "5.0" },
+        { "name": "MAX_TRADE_SIZE", "value": "25.0" },
         { "name": "DAILY_LOSS_LIMIT", "value": "25.0" },
         { "name": "MAX_OPEN_POSITIONS", "value": "25" },
         { "name": "RESCAN_INTERVAL", "value": "300" }
       ],
       "secrets": [
+        {
+          "name": "POLYMARKET_PRIVATE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/polymarket-private-key"
+        },
         {
           "name": "KALSHI_API_KEY_ID",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/kalshi-api-key-id"
@@ -37,10 +41,6 @@
         {
           "name": "KALSHI_PRIVATE_KEY_BASE64",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/kalshi-private-key"
-        },
-        {
-          "name": "POLYMARKET_PRIVATE_KEY",
-          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/polymarket-private-key"
         }
       ],
       "mountPoints": [
@@ -72,7 +72,7 @@
       "name": "efs-data",
       "efsVolumeConfiguration": {
         "fileSystemId": "EFS_FILE_SYSTEM_ID",
-        "rootDirectory": "/scanner-data",
+        "rootDirectory": "/",
         "transitEncryption": "ENABLED"
       }
     }

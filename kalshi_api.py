@@ -2,13 +2,18 @@
 
 import base64
 import datetime
+import logging
+import os
 import threading
 import time
 
 import requests
+
+logger = logging.getLogger(__name__)
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 KALSHI_BASE_URL = "https://api.elections.kalshi.com"
 KALSHI_API_PATH = "/trade-api/v2"
@@ -39,6 +44,16 @@ def _load_private_key(file_path: str):
         )
 
 
+def _load_private_key_from_base64(b64_string: str):
+    """Load an RSA private key from a base64-encoded PEM string."""
+    pem_bytes = base64.b64decode(b64_string)
+    return serialization.load_pem_private_key(
+        pem_bytes,
+        password=None,
+        backend=default_backend(),
+    )
+
+
 def _sign_pss(private_key, message: str) -> str:
     """Sign a message with RSA-PSS (SHA-256, salt=DIGEST_LENGTH) and return base64."""
     signature = private_key.sign(
@@ -52,30 +67,49 @@ def _sign_pss(private_key, message: str) -> str:
     return base64.b64encode(signature).decode("utf-8")
 
 
+class _RateLimitError(Exception):
+    """Raised on HTTP 429 to trigger retry."""
+    pass
+
+
 class KalshiClient:
     """Kalshi API client with RSA-PSS API key authentication."""
 
     def __init__(self):
         self.session = requests.Session()
+        # Proxy support
+        proxy_url = os.getenv("KALSHI_PROXY_URL")
+        if proxy_url:
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
         self.api_key_id = None
         self.private_key = None
 
-    def login_with_api_key(self, api_key_id: str, private_key_path: str) -> bool:
-        """Authenticate using API key ID + RSA private key file."""
+    def login_with_api_key(self, api_key_id: str, private_key_path: str = None, private_key_base64: str = None) -> bool:
+        """Authenticate using API key ID + RSA private key (file path or base64).
+
+        Provide either private_key_path (PEM file) or private_key_base64
+        (base64-encoded PEM string, e.g. for container deployments).
+        """
         self.api_key_id = api_key_id
         try:
-            self.private_key = _load_private_key(private_key_path)
+            if private_key_base64:
+                self.private_key = _load_private_key_from_base64(private_key_base64)
+            elif private_key_path:
+                self.private_key = _load_private_key(private_key_path)
+            else:
+                logger.error("No Kalshi private key provided (need path or base64)")
+                return False
             # Verify auth works with a lightweight call
             resp = self._request("GET", "/exchange/status")
             if resp and resp.status_code == 200:
                 return True
-            print(f"  [ERROR] Kalshi auth check returned status {resp.status_code if resp else 'None'}")
+            logger.error("Kalshi auth check returned status %s", resp.status_code if resp else 'None')
             return False
         except FileNotFoundError:
-            print(f"  [ERROR] Private key file not found: {private_key_path}")
+            logger.error("Private key file not found: %s", private_key_path)
             return False
         except Exception as e:
-            print(f"  [ERROR] Failed to load private key: {e}")
+            logger.error("Failed to load private key: %s", e)
             return False
 
     def _auth_headers(self, method: str, path: str) -> dict:
@@ -94,8 +128,14 @@ class KalshiClient:
             "Accept": "application/json",
         }
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((_RateLimitError, requests.ConnectionError, requests.Timeout)),
+        reraise=True,
+    )
     def _request(self, method: str, path: str, params: dict = None, json_body: dict = None) -> requests.Response | None:
-        """Make an authenticated request to Kalshi API."""
+        """Make an authenticated request to Kalshi API with retry."""
         _rate_limit()
         headers = self._auth_headers(method, path)
         url = KALSHI_BASE_URL + KALSHI_API_PATH + path
@@ -108,9 +148,14 @@ class KalshiClient:
                 json=json_body,
                 timeout=30,
             )
+            if resp.status_code == 429:
+                raise _RateLimitError(f"Rate limited: {method} {path}")
             return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            logger.warning("Kalshi request failed (%s %s): %s", method, path, e)
+            raise
         except requests.RequestException as e:
-            print(f"  [WARN] Kalshi request failed ({method} {path}): {e}")
+            logger.warning("Kalshi request failed (%s %s): %s", method, path, e)
             return None
 
     def fetch_all_events(self, limit: int = 200, max_pages: int = 50) -> list[dict]:
@@ -125,7 +170,7 @@ class KalshiClient:
 
             resp = self._request("GET", "/events", params=params)
             if not resp or resp.status_code != 200:
-                print(f"  [WARN] Kalshi events request failed: {resp.status_code if resp else 'no response'}")
+                logger.warning("Kalshi events request failed: %s", resp.status_code if resp else 'no response')
                 break
 
             data = resp.json()
@@ -246,7 +291,18 @@ class KalshiClient:
             return None
         if resp.status_code in (200, 201):
             return resp.json()
-        print(f"  [ERROR] Kalshi place_order failed: {resp.status_code} {resp.text[:200]}")
+        logger.error("Kalshi place_order failed: %s %s", resp.status_code, resp.text[:200])
+        return None
+
+    def get_order_status(self, order_id: str) -> dict | None:
+        """Get the status of a specific order.
+
+        Returns dict with order details including 'status' field, or None.
+        """
+        resp = self._request("GET", f"/portfolio/orders/{order_id}")
+        if resp and resp.status_code == 200:
+            data = resp.json()
+            return data.get("order", data)
         return None
 
     def cancel_order(self, order_id: str) -> bool:
@@ -254,8 +310,8 @@ class KalshiClient:
         resp = self._request("DELETE", f"/portfolio/orders/{order_id}")
         if resp and resp.status_code in (200, 204):
             return True
-        print(f"  [WARN] Kalshi cancel_order failed for {order_id}: "
-              f"{resp.status_code if resp else 'no response'}")
+        logger.warning("Kalshi cancel_order failed for %s: %s", order_id,
+                       resp.status_code if resp else 'no response')
         return False
 
     def get_order_book_depth(self, ticker: str) -> dict | None:

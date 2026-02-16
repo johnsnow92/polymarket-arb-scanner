@@ -130,69 +130,37 @@ echo ""
 # -----------------------------------------------------------------------
 echo "=== Creating IAM roles ==="
 
-# ECS Task Execution Role (pulls images, writes logs, reads secrets)
-cat > /tmp/ecs-trust-policy.json << 'TRUST'
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": { "Service": "ecs-tasks.amazonaws.com" },
-    "Action": "sts:AssumeRole"
-  }]
-}
-TRUST
+TRUST_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 
+# ECS Task Execution Role (pulls images, writes logs, reads secrets)
 aws iam get-role --role-name ecsTaskExecutionRole 2>/dev/null \
   || aws iam create-role \
     --role-name ecsTaskExecutionRole \
-    --assume-role-policy-document file:///tmp/ecs-trust-policy.json
+    --assume-role-policy-document "$TRUST_POLICY"
 
 aws iam attach-role-policy --role-name ecsTaskExecutionRole \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy 2>/dev/null || true
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy || true
 
 # Allow reading secrets from Secrets Manager
-cat > /tmp/secrets-policy.json << SECRETS
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "secretsmanager:GetSecretValue"
-    ],
-    "Resource": "arn:aws:secretsmanager:$REGION:$ACCOUNT_ID:secret:arb-scanner/*"
-  }]
-}
-SECRETS
+SECRETS_POLICY="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\"],\"Resource\":\"arn:aws:secretsmanager:$REGION:$ACCOUNT_ID:secret:arb-scanner/*\"}]}"
 
 aws iam put-role-policy \
   --role-name ecsTaskExecutionRole \
   --policy-name ArbScannerSecretsAccess \
-  --policy-document file:///tmp/secrets-policy.json 2>/dev/null || true
+  --policy-document "$SECRETS_POLICY" 2>/dev/null || true
 
 # ECS Task Role (the container's own permissions — EFS access)
 aws iam get-role --role-name ecsTaskRole 2>/dev/null \
   || aws iam create-role \
     --role-name ecsTaskRole \
-    --assume-role-policy-document file:///tmp/ecs-trust-policy.json
+    --assume-role-policy-document "$TRUST_POLICY"
 
-cat > /tmp/efs-policy.json << EFS
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "elasticfilesystem:ClientMount",
-      "elasticfilesystem:ClientWrite"
-    ],
-    "Resource": "arn:aws:elasticfilesystem:$REGION:$ACCOUNT_ID:file-system/$EFS_ID"
-  }]
-}
-EFS
+EFS_POLICY="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"elasticfilesystem:ClientMount\",\"elasticfilesystem:ClientWrite\"],\"Resource\":\"arn:aws:elasticfilesystem:$REGION:$ACCOUNT_ID:file-system/$EFS_ID\"}]}"
 
 aws iam put-role-policy \
   --role-name ecsTaskRole \
   --policy-name ArbScannerEFSAccess \
-  --policy-document file:///tmp/efs-policy.json 2>/dev/null || true
+  --policy-document "$EFS_POLICY" 2>/dev/null || true
 
 echo "IAM roles configured"
 echo ""
@@ -212,14 +180,11 @@ echo ""
 # -----------------------------------------------------------------------
 echo "=== Registering task definition ==="
 
-# Substitute placeholders in task definition
-TASK_DEF=$(cat infra/task-definition.json \
-  | sed "s/ACCOUNT_ID/$ACCOUNT_ID/g" \
-  | sed "s/EFS_FILE_SYSTEM_ID/$EFS_ID/g")
+# Substitute placeholders in task definition and register
+TASK_DEF=$(sed -e "s/ACCOUNT_ID/$ACCOUNT_ID/g" -e "s/EFS_FILE_SYSTEM_ID/$EFS_ID/g" infra/task-definition.json)
 
-echo "$TASK_DEF" > /tmp/task-definition-resolved.json
 aws ecs register-task-definition \
-  --cli-input-json file:///tmp/task-definition-resolved.json \
+  --cli-input-json "$TASK_DEF" \
   --region "$REGION"
 echo "Task definition registered"
 echo ""
