@@ -682,14 +682,10 @@ class ArbitrageExecutor:
                     success, order_id, fill_price = future.result()
                     trade_id = leg["_trade_id"]
                     if success:
-                        self.db.update_trade_status(trade_id, "filled", fill_price)
                         # Track slippage: difference between fill and expected price
                         slippage = fill_price - leg.get("price", 0) if fill_price else 0
-                        self.db.conn.execute(
-                            "UPDATE trades SET slippage = ? WHERE id = ?",
-                            (slippage, trade_id),
-                        )
-                        self.db.conn.commit()
+                        self.db.update_trade_status(trade_id, "filled", fill_price,
+                                                    slippage=slippage)
                         results[idx] = True
                         logger.info(f"Leg {idx+1} FILLED: {leg['platform']} order={order_id}")
                     else:
