@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from polymarket_api import get_binary_markets, parse_outcome_prices
 from fees import net_profit_binary_internal
-from scans.helpers import _extract_token_ids, _fetch_clob_for_market
+from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _within_resolution_window
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,11 @@ def scan_binary_internal(markets: list[dict], min_profit: float) -> list[dict]:
     binary_markets = get_binary_markets(markets)
     logger.info("Scanning %d binary markets...", len(binary_markets))
 
+    filtered_resolution = 0
     for m in binary_markets:
+        if not _within_resolution_window(m, platform="polymarket"):
+            filtered_resolution += 1
+            continue
         prices = parse_outcome_prices(m)
         if not prices or len(prices) != 2:
             continue
@@ -117,6 +121,9 @@ def scan_binary_internal(markets: list[dict], min_profit: float) -> list[dict]:
                 "_market_key": market_key,
                 "_token_ids": token_ids,
             })
+
+    if filtered_resolution:
+        logger.info("Filtered %d/%d binary markets outside resolution window.", filtered_resolution, len(binary_markets))
 
     # Stage 2: Refine with CLOB ask prices
     opportunities = _refine_binary_with_clob(opportunities, markets_by_question, min_profit)

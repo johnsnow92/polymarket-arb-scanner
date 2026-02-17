@@ -3,11 +3,46 @@
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone, timedelta
 
 from polymarket_api import get_clob_prices
 from kalshi_api import KalshiClient
+from config import MAX_RESOLUTION_DAYS
 
 logger = logging.getLogger(__name__)
+
+
+def _within_resolution_window(market: dict, max_days: int = None, platform: str = "polymarket") -> bool:
+    """Check if a market resolves within max_days from now.
+
+    Returns True if the market resolves within the window (keep it),
+    False if it resolves too far out or has no date (skip it).
+    """
+    if max_days is None:
+        max_days = MAX_RESOLUTION_DAYS
+    if max_days <= 0:
+        return True  # 0 = disabled
+
+    cutoff = datetime.now(timezone.utc) + timedelta(days=max_days)
+
+    if platform == "kalshi":
+        date_str = market.get("close_time") or market.get("expected_expiration_time")
+    else:  # polymarket
+        date_str = market.get("endDateIso")
+
+    if not date_str:
+        return False  # No date = skip (conservative)
+
+    try:
+        # Parse ISO 8601 (handles both "Z" and "+00:00" suffixes)
+        if date_str.endswith("Z"):
+            date_str = date_str[:-1] + "+00:00"
+        resolve_dt = datetime.fromisoformat(date_str)
+        if resolve_dt.tzinfo is None:
+            resolve_dt = resolve_dt.replace(tzinfo=timezone.utc)
+        return resolve_dt <= cutoff
+    except (ValueError, TypeError):
+        return False  # Unparseable date = skip
 
 
 def _extract_token_ids(market: dict) -> list[str]:

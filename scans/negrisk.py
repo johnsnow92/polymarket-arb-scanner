@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from polymarket_api import get_negrisk_events, parse_outcome_prices
 from fees import net_profit_negrisk_internal
-from scans.helpers import _extract_token_ids, _fetch_clob_for_market
+from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _within_resolution_window
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +111,7 @@ def scan_negrisk_internal(events: list[dict], min_profit: float) -> list[dict]:
     negrisk_events = get_negrisk_events(events)
     logger.info("Scanning %d NegRisk events...", len(negrisk_events))
 
+    filtered_resolution = 0
     for event in negrisk_events:
         markets = event.get("markets", [])
         if len(markets) < 2:
@@ -122,6 +123,10 @@ def scan_negrisk_internal(events: list[dict], min_profit: float) -> list[dict]:
         valid = True
 
         for m in markets:
+            if not _within_resolution_window(m, platform="polymarket"):
+                filtered_resolution += 1
+                valid = False
+                break
             prices = parse_outcome_prices(m)
             if not prices:
                 valid = False
@@ -173,6 +178,9 @@ def scan_negrisk_internal(events: list[dict], min_profit: float) -> list[dict]:
                 "_event_key": event_key,
                 "_token_ids": negrisk_token_ids,
             })
+
+    if filtered_resolution:
+        logger.info("Filtered %d NegRisk events outside resolution window.", filtered_resolution)
 
     # Stage 2: Refine with CLOB ask prices
     opportunities = _refine_negrisk_with_clob(opportunities, events_by_title, min_profit)

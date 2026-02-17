@@ -3,10 +3,14 @@
 import io
 import pytest
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone, timedelta
 import json
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# Future date within the default 7-day resolution window for test fixtures
+_SOON = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
 
 
 # Mock external API modules before importing scanner
@@ -112,6 +116,7 @@ class TestScanBinaryInternal:
             "negRisk": False,
             "volume": "1000",
             "clobTokenIds": '["yes_token", "no_token"]',
+            "endDateIso": _SOON,
         }
 
     def test_finds_arb_opportunity(self):
@@ -205,6 +210,7 @@ class TestScanNegRiskInternal:
                 "negRisk": True,
                 "outcomePrices": json.dumps([price, 1.0 - price]),
                 "clobTokenIds": json.dumps([f"token_{i}_yes", f"token_{i}_no"]),
+                "endDateIso": _SOON,
             })
         return {"id": f"event_{title}", "title": title, "markets": markets}
 

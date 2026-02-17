@@ -13,7 +13,7 @@ from fees import (
     net_profit_cross_betfair,
     net_profit_cross_manifold,
 )
-from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi
+from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +156,14 @@ def scan_cross_platform(
         tickers = [m["kalshi_event"].get("event_ticker", "") for m in matched if m["kalshi_event"].get("event_ticker")]
         kalshi_markets_by_event = _parallel_fetch_kalshi(kalshi_client, tickers)
 
+    filtered_resolution = 0
     for i, match in enumerate(matched):
         pm = match["polymarket"]
         ke = match["kalshi_event"]
+
+        if not _within_resolution_window(pm, platform="polymarket"):
+            filtered_resolution += 1
+            continue
 
         # Get Polymarket prices
         pm_prices = parse_outcome_prices(pm)
@@ -176,6 +181,8 @@ def scan_cross_platform(
         best_opp = None
 
         for km in k_markets:
+            if not _within_resolution_window(km, platform="kalshi"):
+                continue
             k_yes, k_no = kalshi_client.get_market_price(km)
             if k_yes is None or k_no is None:
                 continue
@@ -235,6 +242,9 @@ def scan_cross_platform(
 
         if (i + 1) % 50 == 0:
             logger.info("Processed %d/%d matches...", i + 1, len(matched))
+
+    if filtered_resolution:
+        logger.info("Filtered %d/%d cross-platform matches outside resolution window.", filtered_resolution, len(matched))
 
     # Stage 2: Refine with CLOB ask prices
     opportunities = _refine_cross_with_clob(opportunities, markets_by_key, min_profit)

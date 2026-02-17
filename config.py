@@ -46,6 +46,7 @@ WS_TRIGGER_ENABLED = os.getenv("WS_TRIGGER_ENABLED", "true").lower() == "true"
 WS_TRIGGER_THRESHOLD = float(os.getenv("WS_TRIGGER_THRESHOLD", "0.003"))
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "4"))
 RESCAN_INTERVAL = int(os.getenv("RESCAN_INTERVAL", "60"))
+MAX_RESOLUTION_DAYS = int(os.getenv("MAX_RESOLUTION_DAYS", "7"))
 
 # Kalshi fee parameters
 KALSHI_FEE_CAP_CENTS = int(os.getenv("KALSHI_FEE_CAP_CENTS", "175"))

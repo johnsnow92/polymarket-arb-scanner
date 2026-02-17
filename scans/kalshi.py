@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kalshi_api import KalshiClient
 from fees import net_profit_kalshi_binary, net_profit_kalshi_multi
-from scans.helpers import _parallel_fetch_kalshi
+from scans.helpers import _parallel_fetch_kalshi, _within_resolution_window
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +52,13 @@ def scan_kalshi_binary(
         return opportunities
 
     total_markets = 0
+    filtered_resolution = 0
     for event_ticker, markets in markets_by_event.items():
         for km in markets:
             total_markets += 1
+            if not _within_resolution_window(km, platform="kalshi"):
+                filtered_resolution += 1
+                continue
             yes_price, no_price = kalshi_client.get_market_price(km)
             if yes_price is None or no_price is None:
                 continue
@@ -79,7 +83,9 @@ def scan_kalshi_binary(
                     "_kalshi_no": no_price,
                 })
 
-    logger.info("Scanned %d Kalshi markets across %d events.", total_markets, len(events))
+    if filtered_resolution:
+        logger.info("Filtered %d/%d Kalshi markets outside resolution window.", filtered_resolution, total_markets)
+    logger.info("Scanned %d Kalshi markets across %d events.", total_markets - filtered_resolution, len(events))
 
     # Stage 2: Re-fetch order book depth for top candidates (parallel)
     if opportunities:
@@ -123,6 +129,7 @@ def scan_kalshi_multi(
     if not markets_by_event:
         return opportunities
 
+    filtered_resolution = 0
     for event_ticker, markets in markets_by_event.items():
         if len(markets) < 2:
             continue
@@ -132,6 +139,10 @@ def scan_kalshi_multi(
         valid = True
 
         for km in markets:
+            if not _within_resolution_window(km, platform="kalshi"):
+                filtered_resolution += 1
+                valid = False
+                break
             yes_price, _ = kalshi_client.get_market_price(km)
             if yes_price is None or yes_price <= 0:
                 valid = False
@@ -171,6 +182,9 @@ def scan_kalshi_multi(
                 "_kalshi_tickers": market_tickers,
                 "_kalshi_prices": yes_prices,
             })
+
+    if filtered_resolution:
+        logger.info("Filtered %d Kalshi multi-outcome events outside resolution window.", filtered_resolution)
 
     # Stage 2: Re-fetch order book depth for candidates (parallel, min depth across all legs)
     if opportunities:
