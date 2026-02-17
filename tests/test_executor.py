@@ -933,3 +933,144 @@ class TestSlippageTracking:
         trades = db.get_trades_for_opportunity(1)
         for t in trades:
             assert t["slippage"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# _per_leg_budget — correct platform balance and leg division
+# ---------------------------------------------------------------------------
+
+class TestPerLegBudget:
+    def test_kalshi_binary_uses_kalshi_balance(self, executor):
+        """KalshiBinary divides Kalshi balance by 2 legs."""
+        balances = {"polymarket": 100.0, "kalshi": 20.0}
+        budget = executor._per_leg_budget("KalshiBinary", {}, balances)
+        assert budget == pytest.approx(10.0)
+
+    def test_kalshi_multi_divides_by_leg_count(self, executor):
+        """KalshiMulti(3) divides Kalshi balance by 3 legs."""
+        balances = {"kalshi": 30.0}
+        budget = executor._per_leg_budget("KalshiMulti(3)", {}, balances)
+        assert budget == pytest.approx(10.0)
+
+    def test_kalshi_multi_parses_count_from_type(self, executor):
+        """Parses leg count from type string like 'KalshiMulti(5)'."""
+        balances = {"kalshi": 50.0}
+        budget = executor._per_leg_budget("KalshiMulti(5)", {}, balances)
+        assert budget == pytest.approx(10.0)
+
+    def test_binary_uses_polymarket_balance(self, executor):
+        """Binary uses Polymarket balance divided by 2."""
+        balances = {"polymarket": 40.0, "kalshi": 100.0}
+        budget = executor._per_leg_budget("Binary", {}, balances)
+        assert budget == pytest.approx(20.0)
+
+    def test_cross_uses_minimum_balance(self, executor):
+        """Cross uses minimum of all platform balances (1 leg per platform)."""
+        balances = {"polymarket": 40.0, "kalshi": 15.0}
+        budget = executor._per_leg_budget("Cross(PM_YES + K_NO)", {}, balances)
+        assert budget == pytest.approx(15.0)
+
+    def test_no_balances_returns_none(self, executor):
+        """Returns None when no balances available."""
+        budget = executor._per_leg_budget("Binary", {}, None)
+        assert budget is None
+
+    def test_zero_balance_returns_zero(self, executor):
+        """Returns 0.0 when platform balance is zero."""
+        balances = {"kalshi": 0.0}
+        budget = executor._per_leg_budget("KalshiBinary", {}, balances)
+        assert budget == pytest.approx(0.0)
+
+    def test_negrisk_parses_count(self, executor):
+        """NegRisk(4) divides Polymarket balance by 4."""
+        balances = {"polymarket": 40.0}
+        budget = executor._per_leg_budget("NegRisk(4)", {}, balances)
+        assert budget == pytest.approx(10.0)
+
+    def test_negrisk_fallback_to_token_ids(self, executor):
+        """NegRisk without count in type falls back to _token_ids length."""
+        balances = {"polymarket": 30.0}
+        opp = {"_token_ids": ["t1", "t2", "t3"]}
+        budget = executor._per_leg_budget("NegRisk", opp, balances)
+        assert budget == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# Sequential leg execution for same-platform arbs
+# ---------------------------------------------------------------------------
+
+class TestSequentialLegExecution:
+    def test_same_platform_legs_abort_on_failure(self, executor, db):
+        """Same-platform legs should abort remaining legs after first failure."""
+        executor.dry_run = False
+        opp = {
+            "type": "KalshiMulti(3)",
+            "market": "Test Sequential",
+            "prices": "0.20, 0.30, 0.40",
+            "total_cost": "$0.9000",
+            "net_profit": 0.10,
+            "net_roi": "11.1%",
+            "_clob_depth": 100.0,
+            "_kalshi_tickers": ["T1", "T2", "T3"],
+            "_kalshi_prices": [0.20, 0.30, 0.40],
+        }
+        legs = [
+            {"platform": "kalshi", "side": "yes", "price": 0.20, "_ticker": "T1"},
+            {"platform": "kalshi", "side": "yes", "price": 0.30, "_ticker": "T2"},
+            {"platform": "kalshi", "side": "yes", "price": 0.40, "_ticker": "T3"},
+        ]
+
+        call_count = [0]
+        def mock_execute(leg, size, opp_arg):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First leg fails
+                return (False, None, None)
+            # Should not reach here
+            return (True, "order_mock", leg["price"])
+
+        executor._execute_single_leg = mock_execute
+
+        result = executor._execute_legs(opp, legs, 5.0)
+        assert result is False
+        # Only 1 leg should have been attempted (abort after failure)
+        assert call_count[0] == 1
+
+        trades = db.get_trades_for_opportunity(1)
+        statuses = [t["status"] for t in trades]
+        assert statuses[0] == "failed"
+        # Remaining legs should be aborted
+        assert statuses[1] == "aborted"
+        assert statuses[2] == "aborted"
+
+    def test_cross_platform_legs_execute_concurrently(self, executor, db):
+        """Cross-platform legs (different exchanges) should both execute."""
+        executor.dry_run = False
+        opp = {
+            "type": "Cross(PM_YES + K_NO)",
+            "market": "Test Concurrent",
+            "prices": "PM_Y=0.300 K_N=0.350",
+            "total_cost": "$0.6500",
+            "net_profit": 0.10,
+            "net_roi": "15.4%",
+            "_clob_depth": 100.0,
+            "_token_ids": ["tok_yes", "tok_no"],
+            "_kalshi_ticker": "TICKER-XYZ",
+        }
+        legs = [
+            {"platform": "polymarket", "side": "BUY", "price": 0.30, "_token_id": "tok_yes"},
+            {"platform": "kalshi", "side": "no", "price": 0.35, "_ticker": "TICKER-XYZ"},
+        ]
+
+        def mock_execute(leg, size, opp_arg):
+            leg["_order_id"] = "order_mock"
+            return (True, "order_mock", leg["price"])
+
+        executor._execute_single_leg = mock_execute
+
+        result = executor._execute_legs(opp, legs, 5.0)
+        assert result is True
+
+        trades = db.get_trades_for_opportunity(1)
+        assert len(trades) == 2
+        assert all(t["status"] == "filled" for t in trades)

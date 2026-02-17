@@ -1,16 +1,10 @@
-# CLAUDE.md — Polymarket Arb Scanner
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-Python CLI tool that scans for arbitrage opportunities across prediction markets. Detects arbs on:
-- **Polymarket** — Binary internal (YES + NO < $1.00) and NegRisk (multi-outcome sum < $1.00)
-- **Kalshi** — Binary and multi-outcome internal arbs
-- **Cross-platform** — Price discrepancies between any platform pair
-- **PredictIt** — Binary market arbs and cross-platform matching
-- **Betfair Exchange** — Exchange-based arbs with commission handling
-- **Manifold Markets** — Play-money/sweepstakes market arbs
-
-Supports one-shot (default) and continuous mode with optional automated trade execution.
+Python CLI tool that scans for arbitrage opportunities across prediction markets (Polymarket, Kalshi, PredictIt, Betfair, Manifold Markets). Supports one-shot scans, continuous mode with WebSocket feeds, and automated trade execution. Deployed to AWS ECS Fargate via GitHub Actions CI/CD.
 
 ## Commands
 
@@ -21,92 +15,126 @@ pip install -r requirements.txt
 # One-shot scan (all arb types)
 python scanner.py
 
-# Continuous mode with trade execution
+# Continuous mode
 python scanner.py --continuous --interval 60
 
-# Cross-all: match across all platforms
+# Specific modes: binary, negrisk, cross, kalshi, cross-all
+python scanner.py --mode kalshi
 python scanner.py --mode cross-all
 
-# Kalshi-only
-python scanner.py --mode kalshi
+# Execution controls
+python scanner.py --dry-run                         # detect only (default)
+python scanner.py --exec-mode full-auto --max-trade 10  # live trading
 
-# Adjust thresholds
-python scanner.py --min-profit 0.01 --min-depth 50
-
-# Dry run (default) vs live execution
-python scanner.py --dry-run                         # log only
-python scanner.py --exec-mode full-auto --max-trade 10  # live
-
-# Run tests
+# Run all tests
 pytest tests/ -v
+
+# Run a single test file or class
+pytest tests/test_fees.py -v
+pytest tests/test_executor.py::TestExecutor -v
+
+# Docker build (used by CI/CD)
+docker build -t polymarket-arb-scanner .
 ```
 
 ## Architecture
 
-| Module | Purpose |
-|--------|---------|
-| `scanner.py` | Main entry point, CLI args, orchestrates scan loop, displays results |
-| `polymarket_api.py` | Polymarket REST + CLOB API — markets, events, order books, trading via `PolymarketTrader` |
-| `kalshi_api.py` | Kalshi REST API — `KalshiClient` with RSA-PSS auth, market/event fetching, orders |
-| `predictit_api.py` | PredictIt REST API — `PredictItClient` with session auth, $850 position limits |
-| `betfair_api.py` | Betfair Exchange API — `BetfairClient` with SSO auth, back/lay odds, commission |
-| `manifold_api.py` | Manifold Markets API — `ManifoldClient` with API key auth, mana/sweepstakes |
-| `matcher.py` | Fuzzy title matching — platform-specific (`match_markets_to_events`) and generic (`match_cross_platform`) |
-| `fees.py` | Net profit calculators for all platform pairs (accounts for platform-specific fees) |
-| `risk_manager.py` | `RiskManager` — position limits, daily loss limits, balance checks, depth checks |
-| `executor.py` | `ArbitrageExecutor` — multi-leg execution with revalidation, fill confirmation, position tracking |
-| `db.py` | `TradeDB` — SQLite with opportunities, trades, and positions tables |
-| `ws_feeds.py` | `FeedManager` — WebSocket price feeds for Polymarket + Kalshi |
-| `config.py` | Centralized env-var-backed configuration constants |
-| `tests/` | pytest test suite — fees, risk, db, executor, matcher |
+The codebase has three layers and a thin orchestration shell:
+
+### Orchestration (scanner.py → cli.py, continuous.py, display.py)
+
+`scanner.py` is a **re-export facade** — it imports everything from the actual implementation modules and re-exports them so that `import scanner` continues to work for backward compatibility and test patching. The real entry point is `cli.py:main()`, which parses CLI args, initializes all platform clients, and dispatches to either `_run_oneshot()` or `continuous.py:run_continuous()`.
+
+**Data flow in one-shot mode** (`cli.py:_run_oneshot`):
+1. **Parallel fetch** — ThreadPoolExecutor fetches Polymarket markets, events, and Kalshi data simultaneously
+2. **Parallel scan** — ThreadPoolExecutor runs binary, negrisk, kalshi_binary, kalshi_multi scans
+3. **Sequential cross-platform** — cross/cross-all scans run after (they need data from step 1)
+4. **Sort by capital efficiency** — `capital_efficiency_score()` ranks by ROI * depth
+5. **Display + Execute** — results shown, then executor runs on each opportunity
+
+**Continuous mode** (`continuous.py:run_continuous`) adds:
+- `asyncio` event loop with graceful shutdown via SIGINT/SIGTERM
+- `FeedManager` WebSocket feeds for real-time Polymarket + Kalshi prices
+- `OpportunityIndex` maps (platform, ticker) → opportunities for O(1) WS-triggered execution
+- Price cache with 60s TTL, shared between WS feeds and executor for revalidation
+- Per-market locks prevent concurrent execution on the same market
+- Crash recovery via `recovery.py:reconcile_orphaned_positions()` on startup
+
+### Scan Layer (scans/ package)
+
+Each scan module follows the same two-stage pattern:
+1. **Mid-price scan** (fast) — uses REST API mid prices to find candidates
+2. **CLOB refinement** (accurate) — re-checks candidates against actual ask prices via `_refine_*_with_clob()`
+
+The `_refine` step can drop candidates that looked profitable at mid prices but aren't at ask prices. Scan modules: `binary.py`, `negrisk.py`, `cross.py`, `kalshi.py`, `helpers.py` (shared utilities).
+
+### Execution Layer (executor.py, risk_manager.py, db.py)
+
+`ArbitrageExecutor.execute(opp)` is the core execution path:
+1. **Risk check** — RiskManager validates position limits, daily loss, balance, depth, reentry rules
+2. **Price revalidation** — re-fetches live prices; rejects if profit dropped >10% (adaptive floor)
+3. **Dynamic sizing** — adjusts trade size based on depth and aggressiveness setting
+4. **Order placement** — dispatches to platform-specific trader (PolymarketTrader, KalshiClient, etc.)
+5. **Fill confirmation** — polls order status every 100ms for up to 2s
+6. **DB logging** — records opportunity, trades, and position in SQLite (thread-safe with WAL mode)
+
+### Platform API Clients
+
+Each `*_api.py` wraps a platform's REST API with auth, retries (`tenacity`), and proxy support. Key auth methods:
+- **Polymarket**: Ethereum private key → CLOB API (py-clob-client)
+- **Kalshi**: RSA-PSS signed headers (key file or base64)
+- **PredictIt**: Email/password session
+- **Betfair**: SSO login + API key
+- **Manifold**: API key header
+
+### Supporting Modules
+
+- `matcher.py` — Fuzzy title matching with `thefuzz` for cross-platform market pairing
+- `fees.py` — Net profit calculators accounting for platform-specific fee structures
+- `notifier.py` — Async webhook alerts (auto-detects Slack/Discord/generic format)
+- `dashboard.py` — Lightweight HTTP server exposing `/status` JSON endpoint
+- `recovery.py` — Reconciles orphaned positions/trades after crashes
+- `config.py` — All constants backed by env vars with sensible defaults
 
 ## Key Patterns
 
-- Two-stage detection: mid prices (fast) → CLOB ask prices (accurate)
-- Token ID resolution: CLOB token IDs attached during scan, used in execution
-- Price revalidation: re-fetches prices before execution, rejects if profit drops >10%
-- Fill confirmation: polls order status every 100ms for up to 2s after placement
-- Position lifecycle: open → settled/expired (tracks realized P&L vs expected)
-- Retry with backoff: `tenacity` for API calls (3 attempts, exponential backoff, 429-aware)
-- Proxy support: per-platform proxy URLs via env vars
-- WebSocket cache: executor uses WS price cache for revalidation (5s freshness window)
-- Parallel fetching: `ThreadPoolExecutor` for Kalshi markets and cross-platform matching
-- Platform-agnostic matching: `match_cross_platform()` compares any two market lists
+- **scanner.py is a facade**: Never add logic here. It only re-exports from `scans/`, `cli.py`, `continuous.py`, `display.py` for backward compatibility. Tests patch `scanner.<name>` which hits these re-exports.
+- **Two-stage detection**: Mid prices (fast) → CLOB ask prices (accurate). All scan modules follow this.
+- **Token ID resolution**: CLOB token IDs are extracted during scanning (`_extract_token_ids`) and attached to opportunity dicts as `_token_ids` for use during execution.
+- **Opportunity dicts**: Opportunities flow through the system as plain dicts with standardized keys: `type`, `market`, `prices`, `total_cost`, `net_profit`, `net_roi`, `_token_ids`, `_clob_depth`, `_market_key`, etc. Internal keys prefixed with `_`.
+- **Thread safety**: `TradeDB` uses a threading lock on all operations + SQLite WAL mode. Price cache is a plain dict updated from WS threads. Per-market locks in continuous mode prevent double execution.
+- **Config precedence**: CLI args > env vars > defaults in `config.py`.
+- **Parallel everything**: Data fetching, scanning, and execution all use `ThreadPoolExecutor`.
+
+## Testing
+
+Tests use `pytest` with `unittest.mock`. The test for `executor.py` mocks external API modules in `sys.modules` before import since platform SDKs may not be installed in the test environment. Tests path-insert the parent directory for imports (no package installation needed).
+
+Run a specific test: `pytest tests/test_fees.py::TestPolymarketFee::test_zero_when_sell_equals_buy -v`
+
+## Deployment
+
+- **CI/CD**: Push to `master` triggers `.github/workflows/deploy.yml` — builds Docker image, pushes to ECR, deploys to ECS Fargate
+- **Manual deploy**: `bash infra/deploy.sh` (requires AWS CLI + Docker)
+- **Docker**: Runs `scanner.py --continuous` as entrypoint. Health check hits dashboard at `:8080/status`
+- **Data persistence**: `DATA_DIR` env var points to EFS mount for `trades.db`
 
 ## Environment Variables
 
-See `.env.example` for all supported variables. Key ones:
-- `POLYMARKET_PRIVATE_KEY` — Ethereum key for CLOB trading
-- `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PATH` — Kalshi RSA-PSS auth
-- `PREDICTIT_EMAIL`, `PREDICTIT_PASSWORD` — PredictIt session auth
-- `BETFAIR_USERNAME`, `BETFAIR_PASSWORD`, `BETFAIR_API_KEY` — Betfair SSO
-- `MANIFOLD_API_KEY` — Manifold API key
-- `POLYMARKET_PROXY_URL`, `KALSHI_PROXY_URL` — proxy configuration
-- `DRY_RUN`, `EXECUTION_MODE`, `MAX_TRADE_SIZE` — execution controls
-
-## Dependencies
-
-`requests`, `python-dotenv`, `tabulate`, `thefuzz[speedup]`, `cryptography`, `py-clob-client`, `websockets`, `tenacity`, `python-socks[asyncio]`, `pytest`
+All env vars are defined in `config.py` with defaults. Key groups:
+- Platform credentials: `POLYMARKET_PRIVATE_KEY`, `KALSHI_API_KEY_ID`/`KALSHI_PRIVATE_KEY_PATH` (or `_BASE64`), `PREDICTIT_EMAIL`/`PASSWORD`, `BETFAIR_*`, `MANIFOLD_API_KEY`
+- Execution: `DRY_RUN` (default: true), `EXECUTION_MODE`, `MAX_TRADE_SIZE`
+- Risk: `DAILY_LOSS_LIMIT`, `MAX_OPEN_POSITIONS`, `MIN_LIQUIDITY`, `MIN_NET_ROI`
+- Tuning: `RESCAN_INTERVAL`, `WS_TRIGGER_THRESHOLD`, `WS_SUBSCRIPTION_LIMIT`, `FUZZY_MATCH_THRESHOLD`
+- Infra: `WEBHOOK_URL`, `DASHBOARD_PORT`, `DATA_DIR`, `LOG_LEVEL`, `LOG_FILE`
+- Proxies: `POLYMARKET_PROXY_URL`, `KALSHI_PROXY_URL`
 
 ## Agent Team Notes
 
 When splitting work across teammates:
-- **API layer** (`polymarket_api.py`, `kalshi_api.py`, `predictit_api.py`, `betfair_api.py`, `manifold_api.py`, `ws_feeds.py`) — platform integration, auth, data fetching
-- **Analysis layer** (`scanner.py`, `matcher.py`, `fees.py`, `config.py`) — detection logic, matching, profit calculation
+- **API layer** (`*_api.py`, `ws_feeds.py`) — platform integration, auth, data fetching
+- **Analysis layer** (`scans/`, `matcher.py`, `fees.py`, `config.py`) — detection logic, matching, profit calculation
 - **Execution layer** (`executor.py`, `risk_manager.py`, `db.py`) — trade execution, risk management, persistence
+- **Orchestration** (`cli.py`, `continuous.py`, `display.py`, `scanner.py`) — entry points, loops, output
 
-Avoid two teammates editing the same module simultaneously. The scanner.py file is large — coordinate carefully if multiple people need to change it.
-
-## Position Lifecycle
-
-```
-Trade executed → Position created (status='open', expected_pnl set)
-  ↓
-Continuous mode polls for settlement:
-  - Kalshi: checks market 'result' field
-  - Polymarket: checks market closed/resolved status
-  ↓
-Position settled (status='settled', realized_pnl calculated)
-  or
-Position expired (status='expired')
-```
+Avoid two teammates editing the same module. `cli.py` and `continuous.py` are large — coordinate carefully.
