@@ -262,8 +262,8 @@ def main():
     parser.add_argument(
         "--interval",
         type=int,
-        default=300,
-        help="Seconds between re-scans in continuous mode (default: 300)",
+        default=None,
+        help="Seconds between re-scans in continuous mode (default: from RESCAN_INTERVAL env/config)",
     )
     parser.add_argument(
         "--dry-run",
