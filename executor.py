@@ -712,6 +712,27 @@ class ArbitrageExecutor:
             )
             leg["_trade_id"] = trade_id
 
+        # Pre-flight: verify total cost of all legs fits within balance
+        total_expected_cost = 0
+        for leg in legs:
+            price = leg.get("price", 0)
+            if price > 0:
+                count = int(size / price)
+                total_expected_cost += count * price
+        if total_expected_cost > 0:
+            platform_key = legs[0]["platform"] if legs else ""
+            preflight_balance = None
+            if platform_key == "kalshi" and self.kalshi_client:
+                preflight_balance = self.kalshi_client.get_balance()
+            elif platform_key == "polymarket" and self.pm_trader:
+                preflight_balance = self.pm_trader.get_balance()
+            if preflight_balance is not None and isinstance(preflight_balance, (int, float)) and total_expected_cost > preflight_balance * 0.95:
+                logger.warning("Pre-flight: total cost $%.2f exceeds 95%% of balance $%.2f. Skipping.",
+                               total_expected_cost, preflight_balance)
+                for leg in legs:
+                    self.db.update_trade_status(leg["_trade_id"], "aborted")
+                return False
+
         results = {}
         if cross_platform:
             # Cross-platform: execute legs concurrently (different exchanges)
