@@ -130,7 +130,7 @@ def scan_spread_kalshi(kalshi_client: KalshiClient, min_profit: float, kalshi_da
 
             orderbook = book.get("orderbook", book)
             for side in ("yes", "no"):
-                entries = orderbook.get(side, [])
+                entries = orderbook.get(side) or []
                 if len(entries) < 2:
                     continue
                 # Check if best bid > best ask (crossed book)
