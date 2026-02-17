@@ -92,12 +92,12 @@ class ArbitrageExecutor:
 
         # 3. Size calculation
         depth = opportunity.get("_clob_depth", 0)
-        pm_balance = balances.get("polymarket") if balances else None
+        per_leg_budget = self._per_leg_budget(opp_type, opportunity, balances)
         if self.dynamic_sizing:
             desired_size = self.risk.calculate_dynamic_size(opportunity, self.sizing_aggressiveness)
         else:
             desired_size = self.max_trade_size
-        size = self.risk.clamp_size(desired_size, depth, pm_balance)
+        size = self.risk.clamp_size(desired_size, depth, per_leg_budget)
         if size <= 0:
             logger.info(f"{prefix}Size 0 after constraints. Skipping.")
             self._log_skipped(opportunity, "zero_size")
@@ -378,6 +378,43 @@ class ArbitrageExecutor:
             return False
         opp["net_profit"] = result["net_profit"]
         return True
+
+    def _per_leg_budget(self, opp_type: str, opportunity: dict, balances: dict | None) -> float | None:
+        """Calculate per-leg budget based on platform balance and number of legs.
+
+        For multi-leg arbs on the same platform, divides the available balance
+        by the number of legs so the total trade fits within the balance.
+        """
+        if not balances:
+            return None
+
+        # Determine relevant balance
+        if "Kalshi" in opp_type and "Cross" not in opp_type:
+            balance = balances.get("kalshi")
+        elif "Cross" in opp_type:
+            # Cross arbs have 1 leg per platform — use the smaller balance
+            bal_values = [v for v in balances.values() if v is not None and v > 0]
+            balance = min(bal_values) if bal_values else None
+        else:
+            balance = balances.get("polymarket")
+
+        if balance is None or balance <= 0:
+            return 0.0
+
+        # Estimate number of legs on the same platform
+        if opp_type == "Binary" or opp_type == "KalshiBinary":
+            num_legs = 2
+        elif opp_type.startswith("KalshiMulti") or opp_type.startswith("NegRisk"):
+            # Parse count from type like "KalshiMulti(3)" or "NegRisk(5)"
+            import re
+            m = re.search(r'\((\d+)\)', opp_type)
+            num_legs = int(m.group(1)) if m else len(opportunity.get("_token_ids", [])) or 2
+        elif "Cross" in opp_type:
+            num_legs = 1  # 1 leg per platform
+        else:
+            num_legs = 2
+
+        return balance / num_legs
 
     def _fetch_balances(self, opp_type: str) -> dict | None:
         """Fetch balances from relevant platforms."""

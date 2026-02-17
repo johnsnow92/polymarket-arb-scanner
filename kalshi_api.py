@@ -235,7 +235,9 @@ class KalshiClient:
     def get_balance(self) -> float | None:
         """Get account balance in dollars."""
         resp = self._request("GET", "/portfolio/balance")
-        if not resp or resp.status_code != 200:
+        if resp is None or resp.status_code != 200:
+            logger.warning("Kalshi get_balance failed: %s",
+                           resp.status_code if resp is not None else "no response")
             return None
         data = resp.json()
         # Balance is returned in cents
