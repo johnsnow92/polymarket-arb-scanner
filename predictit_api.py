@@ -241,6 +241,33 @@ class PredictItClient:
             logger.warning("PredictIt get_order_status failed: %s", e)
             return None
 
+    def cancel_order(self, order_id: int) -> bool:
+        """Cancel an open order.
+
+        Args:
+            order_id: PredictIt trade/order ID.
+
+        Returns:
+            True if cancellation succeeded.
+        """
+        if not self.authenticated:
+            logger.error("PredictIt: must login before canceling orders")
+            return False
+
+        _rate_limit()
+        try:
+            resp = self.session.delete(
+                f"{PREDICTIT_BASE}/api/Trade/{order_id}",
+                timeout=30,
+            )
+            if resp.status_code in (200, 204):
+                return True
+            logger.warning("PredictIt cancel_order %s: %s", order_id, resp.status_code)
+            return False
+        except requests.RequestException as e:
+            logger.warning("PredictIt cancel_order failed: %s", e)
+            return False
+
     def get_market_price(self, market: dict) -> tuple[float | None, float | None]:
         """Extract best YES/NO prices from a PredictIt market.
 

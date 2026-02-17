@@ -13,7 +13,7 @@ from fees import (
     net_profit_cross_betfair,
     net_profit_cross_manifold,
 )
-from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window
+from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +235,7 @@ def scan_cross_platform(
                         "_kalshi_ticker": km.get("ticker", ""),
                         "_token_ids": pm_token_ids,
                         "confidence": match.get("confidence", "LOW"),
+                        "_days_to_resolution": _days_to_resolution(pm, "polymarket"),
                     }
 
         if best_opp:
@@ -248,6 +249,8 @@ def scan_cross_platform(
 
     # Stage 2: Refine with CLOB ask prices
     opportunities = _refine_cross_with_clob(opportunities, markets_by_key, min_profit)
+
+    opportunities = filter_dust(opportunities)
 
     return opportunities
 
@@ -371,6 +374,7 @@ def scan_cross_all(
                         "confidence": m["confidence"],
                         "_platform_a": pa,
                         "_platform_b": pb,
+                        "_days_to_resolution": _days_to_resolution(ma, pa),
                     }
 
                     # Attach execution metadata per platform
@@ -381,6 +385,8 @@ def scan_cross_all(
 
     # Stage 2: Refine Polymarket side with CLOB ask prices
     _refine_cross_all_with_clob(opportunities, min_profit)
+
+    opportunities = filter_dust(opportunities)
 
     return opportunities
 

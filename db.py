@@ -60,6 +60,21 @@ class TradeDB:
                 realized_pnl REAL,
                 expected_pnl REAL
             );
+
+            CREATE TABLE IF NOT EXISTS partial_fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER REFERENCES trades(id),
+                opportunity_id INTEGER REFERENCES opportunities(id),
+                platform TEXT NOT NULL,
+                token_id TEXT,
+                side TEXT NOT NULL,
+                fill_price REAL NOT NULL,
+                size REAL NOT NULL,
+                hedge_status TEXT NOT NULL DEFAULT 'pending',
+                hedge_attempts INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            );
         """)
         self.conn.commit()
 
@@ -297,6 +312,56 @@ class TradeDB:
                 "SELECT AVG(slippage) as avg_slip FROM trades WHERE slippage IS NOT NULL"
             ).fetchone()
             return row["avg_slip"] if row and row["avg_slip"] is not None else 0.0
+
+    def log_partial_fill(
+        self,
+        trade_id: int,
+        opportunity_id: int,
+        platform: str,
+        token_id: str,
+        side: str,
+        fill_price: float,
+        size: float,
+    ) -> int:
+        """Log a partial fill for hedging. Returns partial_fill ID."""
+        with self._lock:
+            cur = self.conn.execute(
+                """INSERT INTO partial_fills
+                   (trade_id, opportunity_id, platform, token_id, side, fill_price, size, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (trade_id, opportunity_id, platform, token_id, side, fill_price, size,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def get_pending_partial_fills(self) -> list[dict]:
+        """Get partial fills awaiting hedge."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM partial_fills WHERE hedge_status = 'pending' ORDER BY id"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_partial_fill(self, pf_id: int, status: str, attempts: int = None):
+        """Update partial fill hedge status."""
+        with self._lock:
+            if attempts is not None:
+                self.conn.execute(
+                    "UPDATE partial_fills SET hedge_status = ?, hedge_attempts = ? WHERE id = ?",
+                    (status, attempts, pf_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE partial_fills SET hedge_status = ? WHERE id = ?",
+                    (status, pf_id),
+                )
+            if status in ("hedged", "failed"):
+                self.conn.execute(
+                    "UPDATE partial_fills SET resolved_at = ? WHERE id = ?",
+                    (datetime.now(timezone.utc).isoformat(), pf_id),
+                )
+            self.conn.commit()
 
     def close(self):
         self.conn.close()

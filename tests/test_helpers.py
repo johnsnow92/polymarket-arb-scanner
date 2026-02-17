@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from scans.helpers import capital_efficiency_score, _within_resolution_window
+from scans.helpers import capital_efficiency_score, _within_resolution_window, filter_dust, _days_to_resolution
 
 
 class TestCapitalEfficiencyScore:
@@ -149,3 +149,87 @@ class TestWithinResolutionWindow:
         naive_str = dt.strftime("%Y-%m-%dT%H:%M:%S")  # no tz info
         market = {"endDateIso": naive_str}
         assert _within_resolution_window(market, max_days=7, platform="polymarket") is True
+
+
+class TestFilterDust:
+    def test_removes_below_threshold(self):
+        opps = [
+            {"net_profit": 0.10, "market": "A"},
+            {"net_profit": 0.03, "market": "B"},
+            {"net_profit": 0.06, "market": "C"},
+        ]
+        result = filter_dust(opps, min_amount=0.05)
+        assert len(result) == 2
+        assert all(o["net_profit"] >= 0.05 for o in result)
+
+    def test_keeps_all_above_threshold(self):
+        opps = [
+            {"net_profit": 0.10, "market": "A"},
+            {"net_profit": 0.20, "market": "B"},
+        ]
+        result = filter_dust(opps, min_amount=0.05)
+        assert len(result) == 2
+
+    def test_empty_list_returns_empty(self):
+        assert filter_dust([], min_amount=0.05) == []
+
+    def test_default_threshold_from_config(self):
+        """Uses MIN_PROFIT_AMOUNT from config when no min_amount given."""
+        opps = [{"net_profit": 0.01}, {"net_profit": 0.10}]
+        with patch("scans.helpers.MIN_PROFIT_AMOUNT", 0.05):
+            result = filter_dust(opps)
+        assert len(result) == 1
+
+
+class TestDaysToResolution:
+    def _future_iso(self, days: float) -> str:
+        dt = datetime.now(timezone.utc) + timedelta(days=days)
+        return dt.isoformat()
+
+    def test_polymarket_date(self):
+        market = {"endDateIso": self._future_iso(3)}
+        days = _days_to_resolution(market, "polymarket")
+        assert days is not None
+        assert 2.9 < days < 3.1
+
+    def test_kalshi_date(self):
+        market = {"close_time": self._future_iso(5)}
+        days = _days_to_resolution(market, "kalshi")
+        assert days is not None
+        assert 4.9 < days < 5.1
+
+    def test_no_date_returns_none(self):
+        assert _days_to_resolution({}, "polymarket") is None
+
+    def test_past_date_floors_at_001(self):
+        market = {"endDateIso": self._future_iso(-1)}
+        days = _days_to_resolution(market, "polymarket")
+        assert days == pytest.approx(0.01)
+
+
+class TestTimeWeightedScoring:
+    def test_short_duration_scores_higher(self):
+        """Same ROI/depth, but 2-day market should score higher than 7-day."""
+        short = {"net_profit": 0.10, "total_cost": "$0.9000", "_clob_depth": 50.0, "_days_to_resolution": 2.0}
+        long = {"net_profit": 0.10, "total_cost": "$0.9000", "_clob_depth": 50.0, "_days_to_resolution": 7.0}
+        assert capital_efficiency_score(short) > capital_efficiency_score(long)
+
+    def test_no_resolution_uses_base_score(self):
+        """Without _days_to_resolution, uses the original base score."""
+        opp = {"net_profit": 0.10, "total_cost": "$0.9000", "_clob_depth": 50.0}
+        score = capital_efficiency_score(opp)
+        expected = (0.10 / 0.90) * 50
+        assert score == pytest.approx(expected, rel=1e-3)
+
+    def test_resolution_none_uses_base_score(self):
+        opp = {"net_profit": 0.10, "total_cost": "$0.9000", "_clob_depth": 50.0, "_days_to_resolution": None}
+        score = capital_efficiency_score(opp)
+        expected = (0.10 / 0.90) * 50
+        assert score == pytest.approx(expected, rel=1e-3)
+
+    def test_one_day_resolution_matches_base(self):
+        """1-day resolution divides by 1, so score equals base score."""
+        opp = {"net_profit": 0.10, "total_cost": "$0.9000", "_clob_depth": 50.0, "_days_to_resolution": 1.0}
+        score = capital_efficiency_score(opp)
+        expected = (0.10 / 0.90) * 50 / 1.0
+        assert score == pytest.approx(expected, rel=1e-3)

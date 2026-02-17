@@ -90,6 +90,9 @@ def _reconcile_pending_trades(
             resolved += 1
         # If status is "pending", leave it — the order may still be resting
 
+    # Convert any existing orphaned trades to partial_fill records
+    _convert_orphans_to_partial_fills(db)
+
     if resolved:
         logger.info("Reconciled %d/%d pending trades.", resolved, len(pending_trades))
 
@@ -165,3 +168,32 @@ def _check_order_status(
         logger.warning("Failed to check order %s on %s: %s", order_id, platform, e)
 
     return "unknown"
+
+
+def _convert_orphans_to_partial_fills(db: TradeDB):
+    """Convert legacy orphaned trades to partial_fill records for hedging."""
+    with db._lock:
+        rows = db.conn.execute(
+            "SELECT * FROM trades WHERE status = 'orphaned'"
+        ).fetchall()
+
+    if not rows:
+        return
+
+    logger.info("Converting %d orphaned trades to partial fills...", len(rows))
+    for trade in rows:
+        trade = dict(trade)
+        try:
+            db.log_partial_fill(
+                trade_id=trade["id"],
+                opportunity_id=trade["opportunity_id"],
+                platform=trade["platform"],
+                token_id=trade.get("order_id", ""),
+                side=trade["side"],
+                fill_price=trade.get("fill_price") or trade["price"],
+                size=trade["size"],
+            )
+            db.update_trade_status(trade["id"], "hedge_pending")
+            logger.info("Converted orphaned trade #%d to partial fill.", trade["id"])
+        except Exception as e:
+            logger.warning("Failed to convert orphaned trade #%d: %s", trade["id"], e)

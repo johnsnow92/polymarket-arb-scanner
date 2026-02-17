@@ -338,6 +338,76 @@ class BetfairClient:
             logger.warning("Betfair get_order_status failed: %s", e)
             return None
 
+    def list_market_books(self, market_ids: list[str]) -> list[dict]:
+        """Fetch market books for multiple markets (batch, max 10 per call).
+
+        Args:
+            market_ids: List of Betfair market IDs (max 10).
+
+        Returns:
+            List of market book dicts with runner price data.
+        """
+        if not self.authenticated:
+            return []
+
+        # Batch into groups of 10
+        results = []
+        for i in range(0, len(market_ids), 10):
+            batch = market_ids[i:i + 10]
+            _rate_limit()
+            try:
+                resp = self.session.post(
+                    f"{BETFAIR_EXCHANGE_URL}/listMarketBook/",
+                    json={
+                        "marketIds": batch,
+                        "priceProjection": {
+                            "priceData": ["EX_BEST_OFFERS"],
+                        },
+                    },
+                    timeout=30,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        results.extend(data)
+            except requests.RequestException as e:
+                logger.warning("Betfair list_market_books failed for batch %d: %s", i // 10, e)
+        return results
+
+    def cancel_orders(self, market_id: str = None, bet_ids: list[str] = None) -> bool:
+        """Cancel orders on a market or specific bet IDs.
+
+        Args:
+            market_id: Cancel all orders on this market (optional).
+            bet_ids: Cancel specific bets (optional).
+
+        Returns:
+            True if cancellation succeeded.
+        """
+        if not self.authenticated:
+            return False
+
+        body = {}
+        if market_id:
+            body["marketId"] = market_id
+        if bet_ids:
+            body["instructions"] = [{"betId": bid} for bid in bet_ids]
+
+        _rate_limit()
+        try:
+            resp = self.session.post(
+                f"{BETFAIR_EXCHANGE_URL}/cancelOrders/",
+                json=body,
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("status") == "SUCCESS"
+            return False
+        except requests.RequestException as e:
+            logger.warning("Betfair cancel_orders failed: %s", e)
+            return False
+
     def get_market_price(self, market: dict) -> tuple[float | None, float | None]:
         """Extract best back/lay prices from a Betfair market as YES/NO equivalents.
 

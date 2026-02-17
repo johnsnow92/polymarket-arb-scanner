@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from polymarket_api import get_binary_markets, parse_outcome_prices
 from fees import net_profit_binary_internal
-from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _within_resolution_window
+from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _within_resolution_window, filter_dust, _days_to_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,7 @@ def scan_binary_internal(markets: list[dict], min_profit: float) -> list[dict]:
                 "volume": f"${float(m.get('volume', 0) or 0):,.0f}",
                 "_market_key": market_key,
                 "_token_ids": token_ids,
+                "_days_to_resolution": _days_to_resolution(m, "polymarket"),
             })
 
     if filtered_resolution:
@@ -127,5 +128,7 @@ def scan_binary_internal(markets: list[dict], min_profit: float) -> list[dict]:
 
     # Stage 2: Refine with CLOB ask prices
     opportunities = _refine_binary_with_clob(opportunities, markets_by_question, min_profit)
+
+    opportunities = filter_dust(opportunities)
 
     return opportunities

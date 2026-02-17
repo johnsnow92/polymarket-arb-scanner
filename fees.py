@@ -316,3 +316,140 @@ def net_profit_cross_manifold(
         "fees": worst_fees + gas,
         "net_profit": gross_spread - worst_fees - gas,
     }
+
+
+# ---------------------------------------------------------------------------
+# Spread (intra-platform) fee calculations
+# ---------------------------------------------------------------------------
+
+def net_profit_spread_polymarket(ask: float, bid: float) -> dict:
+    """Calculate net profit for a Polymarket spread capture (buy at ask, sell at bid).
+
+    Round-trip on same token — no CLOB fee, only Polygon gas for 2 txns.
+    """
+    if bid <= ask:
+        return {"gross_spread": bid - ask, "fees": 0, "net_profit": bid - ask}
+
+    gross = bid - ask
+    gas = POLYGON_GAS_ESTIMATE * 2
+    return {
+        "gross_spread": gross,
+        "fees": gas,
+        "net_profit": gross - gas,
+    }
+
+
+def net_profit_spread_kalshi(ask: float, bid: float) -> dict:
+    """Calculate net profit for a Kalshi spread capture (buy at ask, sell at bid).
+
+    Both buy and sell pay taker fees.
+    """
+    if bid <= ask:
+        return {"gross_spread": bid - ask, "fees": 0, "net_profit": bid - ask}
+
+    gross = bid - ask
+    fees = kalshi_taker_fee(ask) + kalshi_taker_fee(bid)
+    return {
+        "gross_spread": gross,
+        "fees": fees,
+        "net_profit": gross - fees,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PredictIt standalone fee calculations
+# ---------------------------------------------------------------------------
+
+def net_profit_predictit_binary(yes_price: float, no_price: float) -> dict:
+    """Calculate net profit for a PredictIt binary arbitrage (buy YES + NO).
+
+    PredictIt charges 10% on profits at settlement. Buy both sides for < $1.
+    """
+    total_cost = yes_price + no_price
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    # Winner's profit: $1 - winning_side_price. 10% fee on that profit.
+    # Worst case: cheapest side wins (highest profit, highest fee).
+    cheapest = min(yes_price, no_price)
+    fee = predictit_fee(1.0 - cheapest)
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fee,
+        "net_profit": gross_spread - fee,
+    }
+
+
+def net_profit_predictit_multi(yes_prices: list[float]) -> dict:
+    """Calculate net profit for a PredictIt multi-outcome arbitrage.
+
+    Buy YES on every contract in a market. Exactly one pays $1.
+    10% profit fee on the winner.
+    """
+    total_cost = sum(yes_prices)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    cheapest = min(yes_prices)
+    fee = predictit_fee(1.0 - cheapest)
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fee,
+        "net_profit": gross_spread - fee,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Betfair standalone fee calculations
+# ---------------------------------------------------------------------------
+
+def net_profit_betfair_backall(implied_probs: list[float], commission_rate: float = 0.05) -> dict:
+    """Calculate net profit for a Betfair back-all arbitrage.
+
+    Back all runners. Sum of implied probabilities < 1.0 means under-round book.
+    Exactly one runner wins; commission on net winnings.
+    """
+    total_cost = sum(implied_probs)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    # Winner pays out $1. Commission on net winnings (1 - cost of winning bet).
+    cheapest = min(implied_probs)
+    net_winnings = 1.0 - cheapest
+    fee = betfair_commission(net_winnings, commission_rate)
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fee,
+        "net_profit": gross_spread - fee,
+    }
+
+
+def net_profit_betfair_backlay(back_price: float, lay_price: float, commission_rate: float = 0.05) -> dict:
+    """Calculate net profit for a Betfair back-lay arbitrage on same runner.
+
+    Back at back_price, lay at lay_price. Profit when back < lay (crossed book).
+    back_price and lay_price are in implied probability (0-1) terms.
+    """
+    if lay_price <= back_price:
+        return {"gross_spread": 0, "fees": 0, "net_profit": 0}
+
+    # Gross profit from the spread
+    gross = lay_price - back_price
+
+    # Commission applies to net market profit
+    fee = betfair_commission(gross, commission_rate)
+
+    return {
+        "gross_spread": gross,
+        "fees": fee,
+        "net_profit": gross - fee,
+    }

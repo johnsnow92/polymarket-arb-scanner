@@ -6,6 +6,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from config import FILL_POLL_INTERVAL, FILL_POLL_TIMEOUT, HEDGE_ENABLED
 from db import TradeDB
 from risk_manager import RiskManager
 from polymarket_api import get_clob_prices, fetch_order_book, get_best_bid_ask, PolymarketTrader
@@ -152,6 +153,12 @@ class ArbitrageExecutor:
                 return self._revalidate_kalshi_binary(opportunity, original_profit)
             elif opp_type.startswith("KalshiMulti"):
                 return self._revalidate_kalshi_multi(opportunity, original_profit)
+            elif opp_type.startswith("Spread"):
+                return True  # Spread prices are live order book — no mid-price staleness
+            elif opp_type in ("PIBinary",) or opp_type.startswith("PIMulti"):
+                return True  # PredictIt prices are from public API, revalidation not critical
+            elif opp_type in ("BetfairBackAll", "BetfairBackLay"):
+                return True  # Betfair prices are live order book
             # Unknown type — proceed cautiously
             return True
         except Exception as e:
@@ -505,6 +512,68 @@ class ArbitrageExecutor:
                     "price": price,
                     "_token_id": token_ids[i] if i < len(token_ids) else "",
                 })
+        elif opp_type.startswith("Spread"):
+            # Spread capture: BUY then SELL on same token
+            token_id = opportunity.get("_token_id", "")
+            buy_price = opportunity.get("_ask_price", 0)
+            sell_price = opportunity.get("_bid_price", 0)
+            spread_platform = opportunity.get("_spread_platform", "polymarket")
+            if spread_platform == "polymarket":
+                legs = [
+                    {"platform": "polymarket", "side": "BUY", "token": "yes",
+                     "price": buy_price, "_token_id": token_id},
+                    {"platform": "polymarket", "side": "SELL", "token": "yes",
+                     "price": sell_price, "_token_id": token_id},
+                ]
+            elif spread_platform == "kalshi":
+                ticker = opportunity.get("_kalshi_ticker", "")
+                side = opportunity.get("_spread_side", "yes")
+                legs = [
+                    {"platform": "kalshi", "side": side, "action": "buy",
+                     "price": buy_price, "_ticker": ticker},
+                    {"platform": "kalshi", "side": side, "action": "sell",
+                     "price": sell_price, "_ticker": ticker},
+                ]
+        elif opp_type == "PIBinary":
+            contract_id = opportunity.get("_contract_id")
+            yes_price = opportunity.get("_pi_yes", 0)
+            no_price = opportunity.get("_pi_no", 0)
+            legs = [
+                {"platform": "predictit", "side": "yes", "price": yes_price,
+                 "_contract_id": contract_id},
+                {"platform": "predictit", "side": "no", "price": no_price,
+                 "_contract_id": contract_id},
+            ]
+        elif opp_type.startswith("PIMulti"):
+            legs = [
+                {"platform": "predictit", "side": "yes", "price": price,
+                 "_contract_id": cid}
+                for cid, price in zip(
+                    opportunity.get("_pi_contract_ids", []),
+                    opportunity.get("_pi_prices", []),
+                )
+            ]
+        elif opp_type == "BetfairBackAll":
+            legs = [
+                {"platform": "betfair", "side": "BACK",
+                 "price": price, "_market_id": opportunity.get("_bf_market_id", ""),
+                 "_selection_id": sel_id}
+                for sel_id, price in zip(
+                    opportunity.get("_bf_selection_ids", []),
+                    opportunity.get("_bf_prices", []),
+                )
+            ]
+        elif opp_type == "BetfairBackLay":
+            market_id = opportunity.get("_bf_market_id", "")
+            sel_id = opportunity.get("_bf_selection_id")
+            legs = [
+                {"platform": "betfair", "side": "BACK",
+                 "price": opportunity.get("_bf_back_price", 0),
+                 "_market_id": market_id, "_selection_id": sel_id},
+                {"platform": "betfair", "side": "LAY",
+                 "price": opportunity.get("_bf_lay_price", 0),
+                 "_market_id": market_id, "_selection_id": sel_id},
+            ]
         elif opp_type.startswith("Cross"):
             # One leg on Polymarket, one on Kalshi
             prices_str = opportunity.get("prices", "")
@@ -809,16 +878,41 @@ class ArbitrageExecutor:
                 expected_pnl=opportunity.get("net_profit", 0),
             )
         else:
-            # Attempt to cancel any filled legs if partial fill
-            logger.warning("Partial fill detected. Attempting cleanup...")
-            for i, leg in enumerate(legs):
-                if results.get(i) and leg.get("_order_id"):
-                    cancel_ok = self._cancel_leg(leg)
-                    if not cancel_ok:
-                        trade_id = leg.get("_trade_id")
-                        if trade_id:
-                            self.db.update_trade_status(trade_id, "orphaned")
-                        logger.warning(f"Leg {i+1} cancel failed -- marked as orphaned.")
+            # Partial fill detected — attempt hedging on filled legs
+            logger.warning("Partial fill detected. Attempting hedge...")
+            if HEDGE_ENABLED:
+                from hedger import PartialFillHedger
+                hedger = PartialFillHedger(
+                    pm_trader=self.pm_trader,
+                    kalshi_client=self.kalshi_client,
+                    predictit_client=self.predictit_client,
+                    betfair_client=self.betfair_client,
+                    db=self.db,
+                )
+                for i, leg in enumerate(legs):
+                    if results.get(i) and leg.get("_order_id"):
+                        fill_price = leg.get("price", 0)
+                        hedger.queue_hedge(
+                            trade_id=leg.get("_trade_id"),
+                            platform=leg["platform"],
+                            token_id=leg.get("_token_id", leg.get("_ticker", "")),
+                            side=leg.get("side", ""),
+                            fill_price=fill_price,
+                            size=size,
+                            opportunity_id=opp_id,
+                        )
+                        # Attempt immediate hedge
+                        hedger.process_pending_hedges()
+            else:
+                # Legacy fallback: cancel + orphan
+                for i, leg in enumerate(legs):
+                    if results.get(i) and leg.get("_order_id"):
+                        cancel_ok = self._cancel_leg(leg)
+                        if not cancel_ok:
+                            trade_id = leg.get("_trade_id")
+                            if trade_id:
+                                self.db.update_trade_status(trade_id, "orphaned")
+                            logger.warning(f"Leg {i+1} cancel failed -- marked as orphaned.")
 
         return all_filled
 
@@ -873,8 +967,15 @@ class ArbitrageExecutor:
                 order_id = order.get("order_id", "")
                 leg["_order_id"] = order_id
                 status = order.get("status", "")
-                if status in ("resting", "executed"):
-                    # Poll for fill confirmation
+                if status == "executed":
+                    # FOK filled instantly — extract avg_price directly
+                    avg_price = order.get("avg_price")
+                    if avg_price is not None:
+                        fill_price = float(avg_price) / 100.0
+                    else:
+                        fill_price = price
+                    return True, order_id, fill_price
+                elif status == "resting":
                     fill_price = self._confirm_fill_kalshi(order_id, price)
                     return True, order_id, fill_price
                 logger.warning("Kalshi order not filled: status=%s ticker=%s resp=%s",
@@ -953,8 +1054,8 @@ class ArbitrageExecutor:
         """Poll Polymarket for fill confirmation. Returns actual fill price."""
         if not self.pm_trader or not order_id:
             return expected_price
-        # Poll every 100ms for up to 2s
-        for _ in range(20):
+        max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
+        for _ in range(max_polls):
             status = self.pm_trader.get_order_status(order_id)
             if status:
                 order_status = status.get("status", "")
@@ -962,15 +1063,15 @@ class ArbitrageExecutor:
                     return float(status.get("price", expected_price))
                 elif order_status in ("canceled", "expired"):
                     return expected_price
-            time.sleep(0.1)
+            time.sleep(FILL_POLL_INTERVAL)
         return expected_price
 
     def _confirm_fill_kalshi(self, order_id: str, expected_price: float) -> float:
         """Poll Kalshi for fill confirmation. Returns actual fill price."""
         if not self.kalshi_client or not order_id:
             return expected_price
-        # Poll every 100ms for up to 2s
-        for _ in range(20):
+        max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
+        for _ in range(max_polls):
             status = self.kalshi_client.get_order_status(order_id)
             if status:
                 order_status = status.get("status", "")
@@ -981,7 +1082,7 @@ class ArbitrageExecutor:
                     return expected_price
                 elif order_status in ("canceled", "expired"):
                     return expected_price
-            time.sleep(0.1)
+            time.sleep(FILL_POLL_INTERVAL)
         return expected_price
 
     def _cancel_leg(self, leg: dict) -> bool:

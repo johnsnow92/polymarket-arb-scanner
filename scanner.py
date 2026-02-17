@@ -31,6 +31,9 @@ from scans.cross import (  # noqa: F401
     _CROSS_FEE_FUNCS,
 )
 from scans.kalshi import scan_kalshi_binary, scan_kalshi_multi, _fetch_kalshi_data  # noqa: F401
+from scans.spread import scan_spread_polymarket, scan_spread_kalshi  # noqa: F401
+from scans.predictit import scan_predictit_binary, scan_predictit_multi  # noqa: F401
+from scans.betfair import scan_betfair_backall, scan_betfair_backlay  # noqa: F401
 from display import display_results as _display_results  # noqa: F401
 from continuous import check_settlements as _check_settlements, run_continuous as _run_continuous  # noqa: F401
 from cli import main, _run_oneshot  # noqa: F401

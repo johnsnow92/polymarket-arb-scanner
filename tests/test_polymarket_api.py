@@ -26,7 +26,8 @@ for mod in ["py_clob_client", "py_clob_client.client", "py_clob_client.clob_type
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 
-from polymarket_api import _rate_limit, _rate_lock, MIN_REQUEST_INTERVAL
+from polymarket_api import _rate_limit, _rate_lock
+from config import PM_RATE_LIMIT as MIN_REQUEST_INTERVAL
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ class TestRateLockExists:
         assert isinstance(_rate_lock, type(threading.Lock()))
 
     def test_min_request_interval_value(self):
-        assert MIN_REQUEST_INTERVAL == 0.1
+        assert MIN_REQUEST_INTERVAL == 0.01
 
 
 # ---------------------------------------------------------------------------

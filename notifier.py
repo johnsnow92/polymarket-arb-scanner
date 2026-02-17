@@ -66,3 +66,31 @@ class WebhookNotifier:
             return {"content": f"Arb Scanner: {len(items)} opportunities\n" + "\n".join(lines)}
         else:
             return {"opportunities": items, "count": len(items)}
+
+    def notify_partial_fill(self, trade_id: int, platform: str, market: str, fill_price: float, status: str):
+        """Send urgent notification about a partial fill event."""
+        if not self.url:
+            return
+        payload = self._build_partial_fill_payload(trade_id, platform, market, fill_price, status)
+        thread = threading.Thread(target=self._send_raw, args=(payload,), daemon=True)
+        thread.start()
+
+    def _send_raw(self, payload: dict):
+        """POST a raw payload to the webhook URL."""
+        try:
+            resp = self._session.post(self.url, json=payload, timeout=10)
+            if resp.status_code >= 300:
+                logger.warning("Webhook returned %d: %s", resp.status_code, resp.text[:200])
+        except requests.RequestException as e:
+            logger.warning("Webhook request failed: %s", e)
+
+    def _build_partial_fill_payload(self, trade_id: int, platform: str, market: str, fill_price: float, status: str) -> dict:
+        """Build partial fill alert payload."""
+        msg = f"PARTIAL FILL #{trade_id} on {platform}: {market} @ ${fill_price:.3f} — {status}"
+        if "hooks.slack.com" in self.url:
+            return {"text": f":warning: {msg}"}
+        elif "discord.com/api/webhooks" in self.url:
+            return {"content": f"\u26a0\ufe0f {msg}"}
+        else:
+            return {"event": "partial_fill", "trade_id": trade_id, "platform": platform,
+                    "market": market, "fill_price": fill_price, "status": status}

@@ -6,7 +6,10 @@ import os
 import threading
 import time
 import requests
+from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from config import PM_RATE_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +27,13 @@ CLOB_BASE = "https://clob.polymarket.com"
 # Rate limiting (thread-safe)
 _last_request_time = 0
 _rate_lock = threading.Lock()
-MIN_REQUEST_INTERVAL = 0.1  # 100ms between requests
 
 # Proxy support
 _session = requests.Session()
 _proxy_url = os.getenv("POLYMARKET_PROXY_URL")
 if _proxy_url:
     _session.proxies = {"http": _proxy_url, "https": _proxy_url}
+_session.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=10))
 
 
 class _RateLimitError(Exception):
@@ -43,8 +46,8 @@ def _rate_limit():
     with _rate_lock:
         now = time.time()
         elapsed = now - _last_request_time
-        if elapsed < MIN_REQUEST_INTERVAL:
-            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        if elapsed < PM_RATE_LIMIT:
+            time.sleep(PM_RATE_LIMIT - elapsed)
         _last_request_time = time.time()
 
 

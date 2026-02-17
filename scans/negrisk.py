@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from polymarket_api import get_negrisk_events, parse_outcome_prices
 from fees import net_profit_negrisk_internal
-from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _within_resolution_window
+from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _within_resolution_window, filter_dust, _days_to_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,7 @@ def scan_negrisk_internal(events: list[dict], min_profit: float) -> list[dict]:
                 "volume": f"${sum(float(m.get('volume', 0) or 0) for m in markets):,.0f}",
                 "_event_key": event_key,
                 "_token_ids": negrisk_token_ids,
+                "_days_to_resolution": _days_to_resolution(markets[0], "polymarket"),
             })
 
     if filtered_resolution:
@@ -184,5 +185,7 @@ def scan_negrisk_internal(events: list[dict], min_profit: float) -> list[dict]:
 
     # Stage 2: Refine with CLOB ask prices
     opportunities = _refine_negrisk_with_clob(opportunities, events_by_title, min_profit)
+
+    opportunities = filter_dust(opportunities)
 
     return opportunities

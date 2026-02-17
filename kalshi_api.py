@@ -8,6 +8,7 @@ import threading
 import time
 
 import requests
+from requests.adapters import HTTPAdapter
 
 logger = logging.getLogger(__name__)
 from cryptography.hazmat.primitives import serialization, hashes
@@ -15,13 +16,14 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from config import KALSHI_RATE_LIMIT
+
 KALSHI_BASE_URL = "https://api.elections.kalshi.com"
 KALSHI_API_PATH = "/trade-api/v2"
 
 # Rate limiting (thread-safe)
 _last_request_time = 0
 _rate_lock = threading.Lock()
-MIN_REQUEST_INTERVAL = 0.15  # 150ms between requests (conservative)
 
 
 def _rate_limit():
@@ -29,8 +31,8 @@ def _rate_limit():
     with _rate_lock:
         now = time.time()
         elapsed = now - _last_request_time
-        if elapsed < MIN_REQUEST_INTERVAL:
-            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        if elapsed < KALSHI_RATE_LIMIT:
+            time.sleep(KALSHI_RATE_LIMIT - elapsed)
         _last_request_time = time.time()
 
 
@@ -81,6 +83,7 @@ class KalshiClient:
         proxy_url = os.getenv("KALSHI_PROXY_URL")
         if proxy_url:
             self.session.proxies = {"http": proxy_url, "https": proxy_url}
+        self.session.mount("https://", HTTPAdapter(pool_connections=1, pool_maxsize=10))
         self.api_key_id = None
         self.private_key = None
 

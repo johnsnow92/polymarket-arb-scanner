@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kalshi_api import KalshiClient
 from fees import net_profit_kalshi_binary, net_profit_kalshi_multi
-from scans.helpers import _parallel_fetch_kalshi, _within_resolution_window
+from scans.helpers import _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ def scan_kalshi_binary(
                     "_kalshi_ticker": ticker,
                     "_kalshi_yes": yes_price,
                     "_kalshi_no": no_price,
+                    "_days_to_resolution": _days_to_resolution(km, "kalshi"),
                 })
 
     if filtered_resolution:
@@ -105,6 +106,8 @@ def scan_kalshi_binary(
             for future in as_completed(futures):
                 opp, d = future.result()
                 opp["_clob_depth"] = d
+
+    opportunities = filter_dust(opportunities)
 
     return opportunities
 
@@ -181,6 +184,7 @@ def scan_kalshi_multi(
                 "net_roi": f"{result['net_profit'] / total * 100:.2f}%",
                 "_kalshi_tickers": market_tickers,
                 "_kalshi_prices": yes_prices,
+                "_days_to_resolution": _days_to_resolution(markets[0], "kalshi"),
             })
 
     if filtered_resolution:
@@ -208,5 +212,7 @@ def scan_kalshi_multi(
             for future in as_completed(futures):
                 opp, d = future.result()
                 opp["_clob_depth"] = d
+
+    opportunities = filter_dust(opportunities)
 
     return opportunities

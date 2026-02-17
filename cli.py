@@ -41,6 +41,12 @@ from scans import (
     scan_kalshi_multi,
     _fetch_kalshi_data,
     capital_efficiency_score,
+    scan_spread_polymarket,
+    scan_spread_kalshi,
+    scan_predictit_binary,
+    scan_predictit_multi,
+    scan_betfair_backall,
+    scan_betfair_backlay,
 )
 from config import (
     DEFAULT_MIN_PROFIT,
@@ -83,11 +89,11 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
 
     fetch_futures = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
-        if args.mode != "kalshi":
+        if args.mode not in ("kalshi", "predictit", "betfair"):
             fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
         if args.mode in ("all", "negrisk"):
             fetch_futures["poly_events"] = pool.submit(fetch_events)
-        if args.mode in ("all", "kalshi", "cross") and kalshi_client:
+        if args.mode in ("all", "kalshi", "cross", "spread") and kalshi_client:
             fetch_futures["kalshi_data"] = pool.submit(_fetch_kalshi_data, kalshi_client)
 
         for key, future in fetch_futures.items():
@@ -177,6 +183,40 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         all_opportunities.extend(cross_all_opps)
         logger.info("Found %d cross-all opportunities.", len(cross_all_opps))
 
+    # Stage 4: New platform scans (spread, predictit, betfair)
+    if args.mode in ("all", "spread"):
+        logger.info("--- Spread Scan ---")
+        if poly_markets:
+            spread_pm = scan_spread_polymarket(poly_markets, min_profit)
+            all_opportunities.extend(spread_pm)
+            logger.info("Found %d Polymarket spread opportunities.", len(spread_pm))
+        if kalshi_client:
+            spread_k = scan_spread_kalshi(kalshi_client, min_profit, kalshi_data=kalshi_data)
+            all_opportunities.extend(spread_k)
+            logger.info("Found %d Kalshi spread opportunities.", len(spread_k))
+
+    if args.mode in ("all", "predictit"):
+        predictit = extra_clients.get("predictit")
+        if predictit:
+            logger.info("--- PredictIt Scan ---")
+            pi_binary = scan_predictit_binary(predictit, min_profit)
+            all_opportunities.extend(pi_binary)
+            logger.info("Found %d PredictIt binary opportunities.", len(pi_binary))
+            pi_multi = scan_predictit_multi(predictit, min_profit)
+            all_opportunities.extend(pi_multi)
+            logger.info("Found %d PredictIt multi opportunities.", len(pi_multi))
+
+    if args.mode in ("all", "betfair"):
+        betfair = extra_clients.get("betfair")
+        if betfair:
+            logger.info("--- Betfair Scan ---")
+            bf_backall = scan_betfair_backall(betfair, min_profit)
+            all_opportunities.extend(bf_backall)
+            logger.info("Found %d Betfair back-all opportunities.", len(bf_backall))
+            bf_backlay = scan_betfair_backlay(betfair, min_profit)
+            all_opportunities.extend(bf_backlay)
+            logger.info("Found %d Betfair back-lay opportunities.", len(bf_backlay))
+
     # Filter by minimum depth if specified
     if args.min_depth > 0:
         before = len(all_opportunities)
@@ -221,9 +261,10 @@ def main():
     parser = argparse.ArgumentParser(description="Polymarket Arbitrage Scanner")
     parser.add_argument(
         "--mode",
-        choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all"],
+        choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
+                 "spread", "predictit", "betfair"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross (PM-Kalshi), kalshi, cross-all (all platform pairs)",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, predictit, betfair",
     )
     parser.add_argument(
         "--min-profit",
@@ -376,13 +417,14 @@ def main():
     betfair_client = None
     manifold_client = None
 
-    if args.mode in ("all", "cross-all"):
+    if args.mode in ("all", "cross-all", "predictit"):
         # PredictIt (public data always available)
         predictit_client = PredictItClient()
         pi_email = os.getenv("PREDICTIT_EMAIL")
         if pi_email:
             predictit_client.login()
 
+    if args.mode in ("all", "cross-all", "betfair"):
         # Betfair
         bf_api_key = os.getenv("BETFAIR_API_KEY")
         bf_user = os.getenv("BETFAIR_USERNAME")
@@ -394,6 +436,7 @@ def main():
             else:
                 logger.info("Betfair authenticated successfully.")
 
+    if args.mode in ("all", "cross-all"):
         # Manifold (public data, no auth needed for reading)
         manifold_client = ManifoldClient()
 
