@@ -1,0 +1,43 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECRAuth",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRPush",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "ecr:PutImage",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:551210489474:repository/polymarket-arb-scanner"
+    },
+    {
+      "Sid": "ECSDeploy",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:DescribeServices"
+      ],
+      "Resource": [
+        "arn:aws:ecs:us-east-1:551210489474:service/arb-scanner/arb-scanner-service",
+        "arn:aws:ecs:us-east-1:551210489474:cluster/arb-scanner"
+      ]
+    },
+    {
+      "Sid": "ECSDescribeCluster",
+      "Effect": "Allow",
+      "Action": "ecs:DescribeClusters",
+      "Resource": "arn:aws:ecs:us-east-1:551210489474:cluster/arb-scanner"
+    }
+  ]
+}
