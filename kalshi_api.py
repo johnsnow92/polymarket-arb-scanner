@@ -286,12 +286,17 @@ class KalshiClient:
         else:
             body["no_price"] = int(round(price_dollars * 100))
 
-        resp = self._request("POST", "/portfolio/orders", json_body=body)
+        try:
+            resp = self._request("POST", "/portfolio/orders", json_body=body)
+        except Exception as e:
+            logger.error("Kalshi place_order exception: %s (ticker=%s)", e, ticker)
+            return None
         if not resp:
+            logger.warning("Kalshi place_order got no response (ticker=%s body=%s)", ticker, body)
             return None
         if resp.status_code in (200, 201):
             return resp.json()
-        logger.error("Kalshi place_order failed: %s %s", resp.status_code, resp.text[:200])
+        logger.error("Kalshi place_order HTTP %s: %s (ticker=%s)", resp.status_code, resp.text[:300], ticker)
         return None
 
     def get_order_status(self, order_id: str) -> dict | None:
