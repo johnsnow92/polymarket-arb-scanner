@@ -37,6 +37,12 @@ from scans import (
     scan_cross_all,
     scan_kalshi_binary,
     scan_kalshi_multi,
+    scan_spread_polymarket,
+    scan_spread_kalshi,
+    scan_predictit_binary,
+    scan_predictit_multi,
+    scan_betfair_backall,
+    scan_betfair_backlay,
     _fetch_kalshi_data,
     capital_efficiency_score,
 )
@@ -388,11 +394,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
                 fetch_futures = {}
                 with ThreadPoolExecutor(max_workers=3) as pool:
-                    if args.mode != "kalshi":
+                    if args.mode not in ("kalshi", "predictit", "betfair"):
                         fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
                     if args.mode in ("all", "negrisk"):
                         fetch_futures["poly_events"] = pool.submit(fetch_events)
-                    if args.mode in ("all", "kalshi", "cross") and kalshi_client:
+                    if args.mode in ("all", "kalshi", "cross", "spread") and kalshi_client:
                         fetch_futures["kalshi_data"] = pool.submit(_fetch_kalshi_data, kalshi_client)
 
                     for key, future in fetch_futures.items():
@@ -472,6 +478,32 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         min_confidence=args.min_confidence,
                     )
                     all_opportunities.extend(cross_all_opps)
+
+                # Stage 4: New platform scans (spread, predictit, betfair)
+                if args.mode in ("all", "spread"):
+                    if poly_markets:
+                        spread_pm = scan_spread_polymarket(poly_markets, min_profit)
+                        all_opportunities.extend(spread_pm)
+                    if kalshi_client:
+                        spread_k = scan_spread_kalshi(
+                            kalshi_client, min_profit, kalshi_data=kalshi_data)
+                        all_opportunities.extend(spread_k)
+
+                if args.mode in ("all", "predictit"):
+                    predictit = extra_clients.get("predictit")
+                    if predictit:
+                        pi_binary = scan_predictit_binary(predictit, min_profit)
+                        all_opportunities.extend(pi_binary)
+                        pi_multi = scan_predictit_multi(predictit, min_profit)
+                        all_opportunities.extend(pi_multi)
+
+                if args.mode in ("all", "betfair"):
+                    betfair = extra_clients.get("betfair")
+                    if betfair:
+                        bf_backall = scan_betfair_backall(betfair, min_profit)
+                        all_opportunities.extend(bf_backall)
+                        bf_backlay = scan_betfair_backlay(betfair, min_profit)
+                        all_opportunities.extend(bf_backlay)
 
                 # Apply filters
                 if args.min_depth > 0:
