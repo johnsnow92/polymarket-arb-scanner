@@ -511,23 +511,18 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     manifold_client=extra_clients.get("manifold"),
                 )
 
-                # Execute opportunities concurrently
+                # Execute opportunities sequentially (balance must be rechecked between trades)
                 if all_opportunities:
                     logger.info("--- Execution Pass ---")
                     executed = 0
-                    with ThreadPoolExecutor(max_workers=3) as exec_pool:
-                        futures = {}
-                        for opp in all_opportunities:
-                            if shutdown_event.is_set():
-                                break
-                            future = exec_pool.submit(executor.execute, opp)
-                            futures[future] = opp
-                        for future in as_completed(futures):
-                            try:
-                                if future.result():
-                                    executed += 1
-                            except Exception as e:
-                                logger.error("Execution error: %s", e)
+                    for opp in all_opportunities:
+                        if shutdown_event.is_set():
+                            break
+                        try:
+                            if executor.execute(opp):
+                                executed += 1
+                        except Exception as e:
+                            logger.error("Execution error: %s", e)
                     logger.info("Executed: %d/%d", executed, len(all_opportunities))
 
                 # Rebuild opportunity index for WS-triggered execution

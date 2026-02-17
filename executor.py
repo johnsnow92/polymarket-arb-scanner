@@ -696,44 +696,79 @@ class ArbitrageExecutor:
             action="traded",
         )
 
-        # Execute legs concurrently
-        results = {}
-        with ThreadPoolExecutor(max_workers=len(legs)) as executor:
-            futures = {}
-            for i, leg in enumerate(legs):
-                trade_id = self.db.log_trade(
-                    opportunity_id=opp_id,
-                    platform=leg["platform"],
-                    side=leg.get("side", leg.get("token", "")),
-                    price=leg.get("price", 0),
-                    size=size,
-                    status="pending",
-                )
-                leg["_trade_id"] = trade_id
-                future = executor.submit(self._execute_single_leg, leg, size, opportunity)
-                futures[future] = (i, leg)
+        # Determine if legs span multiple platforms (cross-platform arbs)
+        platforms = set(leg["platform"] for leg in legs)
+        cross_platform = len(platforms) > 1
 
-            for future in as_completed(futures):
-                idx, leg = futures[future]
+        # Log all trades as pending
+        for i, leg in enumerate(legs):
+            trade_id = self.db.log_trade(
+                opportunity_id=opp_id,
+                platform=leg["platform"],
+                side=leg.get("side", leg.get("token", "")),
+                price=leg.get("price", 0),
+                size=size,
+                status="pending",
+            )
+            leg["_trade_id"] = trade_id
+
+        results = {}
+        if cross_platform:
+            # Cross-platform: execute legs concurrently (different exchanges)
+            with ThreadPoolExecutor(max_workers=len(legs)) as pool:
+                futures = {}
+                for i, leg in enumerate(legs):
+                    future = pool.submit(self._execute_single_leg, leg, size, opportunity)
+                    futures[future] = (i, leg)
+                for future in as_completed(futures):
+                    idx, leg = futures[future]
+                    try:
+                        success, order_id, fill_price = future.result()
+                        trade_id = leg["_trade_id"]
+                        if success:
+                            slippage = fill_price - leg.get("price", 0) if fill_price else 0
+                            self.db.update_trade_status(trade_id, "filled", fill_price,
+                                                        slippage=slippage)
+                            results[idx] = True
+                            logger.info(f"Leg {idx+1} FILLED: {leg['platform']} order={order_id}")
+                        else:
+                            self.db.update_trade_status(trade_id, "failed")
+                            results[idx] = False
+                            logger.error(f"Leg {idx+1} FAILED: {leg['platform']}")
+                    except Exception as e:
+                        trade_id = leg["_trade_id"]
+                        self.db.update_trade_status(trade_id, "failed")
+                        results[idx] = False
+                        logger.error(f"Leg {idx+1} ERROR: {e}")
+        else:
+            # Same-platform: execute legs sequentially, abort on first failure
+            for i, leg in enumerate(legs):
                 try:
-                    success, order_id, fill_price = future.result()
+                    success, order_id, fill_price = self._execute_single_leg(leg, size, opportunity)
                     trade_id = leg["_trade_id"]
                     if success:
-                        # Track slippage: difference between fill and expected price
                         slippage = fill_price - leg.get("price", 0) if fill_price else 0
                         self.db.update_trade_status(trade_id, "filled", fill_price,
                                                     slippage=slippage)
-                        results[idx] = True
-                        logger.info(f"Leg {idx+1} FILLED: {leg['platform']} order={order_id}")
+                        results[i] = True
+                        logger.info(f"Leg {i+1} FILLED: {leg['platform']} order={order_id}")
                     else:
                         self.db.update_trade_status(trade_id, "failed")
-                        results[idx] = False
-                        logger.error(f"Leg {idx+1} FAILED: {leg['platform']}")
+                        results[i] = False
+                        logger.error(f"Leg {i+1} FAILED: {leg['platform']}")
+                        # Abort remaining legs — no point continuing
+                        for j in range(i + 1, len(legs)):
+                            self.db.update_trade_status(legs[j]["_trade_id"], "aborted")
+                        logger.warning("Aborting remaining legs after leg %d failure.", i + 1)
+                        break
                 except Exception as e:
                     trade_id = leg["_trade_id"]
                     self.db.update_trade_status(trade_id, "failed")
-                    results[idx] = False
-                    logger.error(f"Leg {idx+1} ERROR: {e}")
+                    results[i] = False
+                    logger.error(f"Leg {i+1} ERROR: {e}")
+                    for j in range(i + 1, len(legs)):
+                        self.db.update_trade_status(legs[j]["_trade_id"], "aborted")
+                    break
 
         # Check if all legs succeeded
         all_filled = len(results) == len(legs) and all(results.values())
