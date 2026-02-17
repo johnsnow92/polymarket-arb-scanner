@@ -291,7 +291,7 @@ class KalshiClient:
         except Exception as e:
             logger.error("Kalshi place_order exception: %s (ticker=%s)", e, ticker)
             return None
-        if not resp:
+        if resp is None:
             logger.warning("Kalshi place_order got no response (ticker=%s body=%s)", ticker, body)
             return None
         if resp.status_code in (200, 201):
@@ -305,7 +305,7 @@ class KalshiClient:
         Returns dict with order details including 'status' field, or None.
         """
         resp = self._request("GET", f"/portfolio/orders/{order_id}")
-        if resp and resp.status_code == 200:
+        if resp is not None and resp.status_code == 200:
             data = resp.json()
             return data.get("order", data)
         return None
@@ -313,10 +313,10 @@ class KalshiClient:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order."""
         resp = self._request("DELETE", f"/portfolio/orders/{order_id}")
-        if resp and resp.status_code in (200, 204):
+        if resp is not None and resp.status_code in (200, 204):
             return True
         logger.warning("Kalshi cancel_order failed for %s: %s", order_id,
-                       resp.status_code if resp else 'no response')
+                       resp.status_code if resp is not None else 'no response')
         return False
 
     def get_order_book_depth(self, ticker: str) -> dict | None:
