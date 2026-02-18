@@ -490,7 +490,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     )
                     all_opportunities.extend(cross_all_opps)
 
-                # Stage 4: New platform scans (spread, predictit, betfair)
+                # Stage 4: Platform-specific scans (spread, betfair, etc.)
                 if args.mode in ("all", "spread"):
                     if poly_markets:
                         spread_pm = scan_spread_polymarket(poly_markets, min_profit)

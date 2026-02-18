@@ -21,6 +21,7 @@ from fees import (
     net_profit_cross_platform,
     net_profit_kalshi_binary,
     net_profit_kalshi_multi,
+    net_profit_triangular,
 )
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,10 @@ class ArbitrageExecutor:
                 return True  # SX Bet prices are live order book
             elif opp_type in ("MatchbookBackAll", "MatchbookBackLay"):
                 return True  # Matchbook prices are live order book
+            elif opp_type == "TriangularCross":
+                return self._revalidate_triangular(opportunity, original_profit, price_cache)
+            elif opp_type == "EventDivergence":
+                return True  # Signal-based — no stale mid-price to revalidate
             # Unknown type — proceed cautiously
             return True
         except Exception as e:
@@ -400,6 +405,96 @@ class ArbitrageExecutor:
             return False
         opp["net_profit"] = result["net_profit"]
         return True
+
+    def _revalidate_triangular(self, opp: dict, original_profit: float, price_cache: dict | None) -> bool:
+        """Revalidate a TriangularCross opportunity by re-fetching prices from both platforms."""
+        platform_a = opp.get("_platform_a", "")
+        platform_b = opp.get("_platform_b", "")
+        prices_str = opp.get("prices", "")
+
+        if not platform_a or not platform_b:
+            return False
+
+        # Parse current prices from prices string: "{platform}_Y={price} {platform}_N={price}"
+        parts = prices_str.split()
+        if len(parts) != 2:
+            return False
+
+        yes_price = no_price = None
+        for part in parts:
+            if "=" not in part:
+                return False
+            label, val = part.split("=", 1)
+            try:
+                price = float(val)
+            except ValueError:
+                return False
+            if label.endswith("_Y"):
+                yes_price = price
+            elif label.endswith("_N"):
+                no_price = price
+
+        if yes_price is None or no_price is None:
+            return False
+
+        # Re-fetch YES-side price
+        fresh_yes = self._refetch_platform_price(platform_a, opp, price_cache, "yes")
+        # Re-fetch NO-side price
+        fresh_no = self._refetch_platform_price(platform_b, opp, price_cache, "no")
+
+        # If we couldn't refetch, use the original prices
+        if fresh_yes is not None:
+            yes_price = fresh_yes
+        if fresh_no is not None:
+            no_price = fresh_no
+
+        # Recalculate profit with fresh prices
+        result = net_profit_triangular(yes_price, no_price, platform_a, platform_b)
+        threshold = self._get_revalidation_threshold(original_profit, opp)
+
+        if result["net_profit"] < threshold:
+            logger.info(f"Revalidation: triangular profit degraded {original_profit:.4f} -> {result['net_profit']:.4f}")
+            return False
+
+        # Update opportunity with fresh prices
+        opp["prices"] = f"{platform_a}_Y={yes_price:.3f} {platform_b}_N={no_price:.3f}"
+        opp["net_profit"] = result["net_profit"]
+        return True
+
+    def _refetch_platform_price(
+        self, platform: str, opp: dict, price_cache: dict | None, side: str,
+    ) -> float | None:
+        """Re-fetch a single price from a platform for revalidation.
+
+        Returns the fresh ask price, or None if unable to fetch.
+        """
+        if platform == "polymarket":
+            token_ids = opp.get("_token_ids", [])
+            idx = 0 if side == "yes" else (1 if len(token_ids) > 1 else 0)
+            if idx < len(token_ids):
+                tid = token_ids[idx]
+                cached = self._check_ws_cache(price_cache, "polymarket", tid)
+                if cached and cached.get("price") is not None:
+                    return cached["price"]
+                book = fetch_order_book(tid)
+                if book:
+                    data = get_best_bid_ask(book)
+                    return data.get("ask")
+        elif platform == "kalshi":
+            ticker = opp.get("_kalshi_ticker", "")
+            if ticker and self.kalshi_client:
+                cached = self._check_ws_cache(price_cache, "kalshi", ticker)
+                if cached and cached.get(f"{side}_price") is not None:
+                    return cached[f"{side}_price"]
+                book = self.kalshi_client.fetch_order_book(ticker)
+                if book:
+                    orderbook = book.get("orderbook", book)
+                    entries = orderbook.get(side, [])
+                    if entries:
+                        entry = entries[0]
+                        return float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
+        # For betfair/smarkets/sxbet/matchbook: live order book, skip refetch
+        return None
 
     def _per_leg_budget(self, opp_type: str, opportunity: dict, balances: dict | None) -> float | None:
         """Calculate per-leg budget based on platform balance and number of legs.
@@ -637,6 +732,12 @@ class ArbitrageExecutor:
                  "price": opportunity.get("_mb_lay_price", 0),
                  "_market_id": market_id, "_runner_id": runner_id},
             ]
+        elif opp_type == "TriangularCross":
+            # 3-way cross-platform: cheapest YES + cheapest NO across 3+ platforms
+            legs = self._build_cross_all_legs(opportunity, size)
+        elif opp_type == "EventDivergence":
+            # Single-leg directional trade based on Metaculus divergence signal
+            legs = self._build_event_divergence_legs(opportunity, size)
         elif opp_type.startswith("Cross"):
             # One leg on Polymarket, one on Kalshi
             prices_str = opportunity.get("prices", "")
@@ -754,6 +855,57 @@ class ArbitrageExecutor:
             return None
 
         return leg
+
+    def _build_event_divergence_legs(self, opportunity: dict, size: float) -> list[dict]:
+        """Build execution legs for an EventDivergence opportunity.
+
+        EventDivergence is a single-leg directional trade: buy YES or NO on
+        one platform based on Metaculus divergence signal.
+        """
+        platform = opportunity.get("_platform", "")
+        direction = opportunity.get("_direction", "")
+        prices_str = opportunity.get("prices", "")
+
+        # Extract platform price from "platform={price} metaculus={price}"
+        platform_price = None
+        for part in prices_str.split():
+            if part.startswith("platform="):
+                try:
+                    platform_price = float(part.split("=", 1)[1])
+                except ValueError:
+                    pass
+                break
+
+        if not platform or not direction or platform_price is None:
+            return []
+
+        if direction == "BUY_YES":
+            side = "yes"
+            price = platform_price
+        elif direction == "BUY_NO":
+            side = "no"
+            price = 1.0 - platform_price  # NO price is complement
+        else:
+            return []
+
+        leg = {"price": price, "side": side}
+
+        if platform == "polymarket":
+            token_ids = opportunity.get("_token_ids", [])
+            token_idx = 0 if side == "yes" else 1
+            leg["platform"] = "polymarket"
+            leg["side"] = "BUY"
+            leg["token"] = side
+            leg["_token_id"] = token_ids[token_idx] if token_idx < len(token_ids) else ""
+        elif platform == "kalshi":
+            leg["platform"] = "kalshi"
+            leg["action"] = "buy"
+            leg["_ticker"] = opportunity.get("_kalshi_ticker", "")
+        else:
+            # Unsupported platform for event divergence execution
+            return []
+
+        return [leg]
 
     def _parse_price(self, opportunity: dict, prefix: str) -> float | None:
         """Extract a price from the opportunity's prices string. Returns None on failure."""

@@ -220,7 +220,7 @@ def match_cross_platform(
         markets_a: List of market dicts from platform A.
         markets_b: List of market dicts from platform B.
         platform_a: Name of platform A (e.g. "polymarket").
-        platform_b: Name of platform B (e.g. "predictit").
+        platform_b: Name of platform B (e.g. "kalshi").
         threshold: Minimum combined score for a match.
         min_confidence: Minimum confidence tier (HIGH/MEDIUM/LOW).
 

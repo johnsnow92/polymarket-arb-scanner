@@ -97,6 +97,12 @@ class PartialFillHedger:
                 return self._hedge_kalshi(token_id, fill_price, size, max_loss, pf.get("side", "yes"))
             elif platform == "betfair":
                 return self._hedge_betfair(pf, fill_price, size, max_loss)
+            elif platform == "smarkets":
+                return self._hedge_smarkets(pf, fill_price, size, max_loss)
+            elif platform == "sxbet":
+                return self._hedge_sxbet(pf, fill_price, size, max_loss)
+            elif platform == "matchbook":
+                return self._hedge_matchbook(pf, fill_price, size, max_loss)
         except Exception as e:
             logger.warning("Hedge attempt failed for %s on %s: %s", token_id, platform, e)
 
@@ -172,3 +178,54 @@ class PartialFillHedger:
         }]
         resp = self.betfair_client.place_orders(market_id, instructions)
         return bool(resp and resp.get("status") == "SUCCESS")
+
+    def _hedge_smarkets(self, pf: dict, fill_price: float, size: float, max_loss: float) -> bool:
+        """Hedge a Smarkets position with an opposing bet."""
+        if not self.smarkets_client or not self.smarkets_client.authenticated:
+            return False
+        market_id = pf.get("_market_id", "")
+        contract_id = pf.get("_contract_id", "")
+        if not market_id:
+            return False
+        original_side = pf.get("side", "BACK")
+        hedge_side = "LAY" if original_side == "BACK" else "BACK"
+        quantity = max(1, int(size / fill_price)) if fill_price > 0 else 1
+        resp = self.smarkets_client.place_order(
+            market_id=market_id, contract_id=contract_id,
+            side=hedge_side, price=fill_price, quantity=quantity,
+        )
+        return resp is not None
+
+    def _hedge_sxbet(self, pf: dict, fill_price: float, size: float, max_loss: float) -> bool:
+        """Hedge an SX Bet position with an opposing bet."""
+        if not self.sxbet_client or not self.sxbet_client.authenticated:
+            return False
+        market_hash = pf.get("_market_hash", "")
+        outcome_id = pf.get("_outcome_id", "")
+        if not market_hash:
+            return False
+        original_side = pf.get("side", "BACK")
+        hedge_side = "LAY" if original_side == "BACK" else "BACK"
+        quantity = max(1, int(size / fill_price)) if fill_price > 0 else 1
+        resp = self.sxbet_client.place_order(
+            market_hash=market_hash, outcome_id=outcome_id,
+            side=hedge_side, price=fill_price, quantity=quantity,
+        )
+        return resp is not None
+
+    def _hedge_matchbook(self, pf: dict, fill_price: float, size: float, max_loss: float) -> bool:
+        """Hedge a Matchbook position with an opposing bet."""
+        if not self.matchbook_client or not self.matchbook_client.authenticated:
+            return False
+        market_id = pf.get("_market_id", "")
+        runner_id = pf.get("_runner_id", "")
+        if not market_id or not runner_id:
+            return False
+        original_side = pf.get("side", "back")
+        hedge_side = "lay" if original_side.lower() == "back" else "back"
+        decimal_odds = round(1.0 / fill_price, 2) if fill_price > 0 else 2.0
+        resp = self.matchbook_client.place_order(
+            market_id=market_id, runner_id=runner_id,
+            side=hedge_side, odds=decimal_odds, stake=round(size, 2),
+        )
+        return resp is not None

@@ -203,11 +203,11 @@ class TestMatchCrossPlatform:
             {"title": "Inflation to exceed 5% in 2025", "ticker": "INF-5"},
         ]
         matches = match_cross_platform(
-            markets_a, markets_b, "polymarket", "predictit", threshold=70
+            markets_a, markets_b, "polymarket", "smarkets", threshold=70
         )
         assert len(matches) >= 1
         assert matches[0]["platform_a"] == "polymarket"
-        assert matches[0]["platform_b"] == "predictit"
+        assert matches[0]["platform_b"] == "smarkets"
 
     def test_no_match_different_topics(self):
         markets_a = [
@@ -230,7 +230,7 @@ class TestMatchCrossPlatform:
             {"title": "Bitcoin to reach $100,000", "ticker": "BTC-100K"},
         ]
         matches = match_cross_platform(
-            markets_a, markets_b, "polymarket", "manifold", threshold=70
+            markets_a, markets_b, "polymarket", "matchbook", threshold=70
         )
         # Should deduplicate by platform B market
         b_ids = [m["market_b"].get("ticker") for m in matches]
@@ -339,7 +339,7 @@ class TestPartialRatioFallback:
             {"title": "Unemployment rate above 6% 2026", "ticker": "UNEMP-6"},
         ]
         matches = match_cross_platform(
-            markets_a, markets_b, "polymarket", "predictit", threshold=72
+            markets_a, markets_b, "polymarket", "smarkets", threshold=72
         )
         assert len(matches) >= 1
 

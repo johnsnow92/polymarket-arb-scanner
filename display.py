@@ -40,7 +40,9 @@ def display_results(all_opportunities: list[dict], json_output: bool = False):
         print(json.dumps(output, indent=2))
     else:
         has_cross = any("kalshi" in opp for opp in all_opportunities)
+        has_confidence = any(opp.get("confidence") for opp in all_opportunities)
         has_depth = any("_clob_depth" in opp for opp in all_opportunities)
+        has_platforms = any(opp.get("_platforms_checked") for opp in all_opportunities)
         table_data = []
         for opp in all_opportunities:
             row = [
@@ -50,7 +52,11 @@ def display_results(all_opportunities: list[dict], json_output: bool = False):
             if has_cross:
                 row.append(opp.get("kalshi", ""))
                 row.append(opp.get("match", ""))
+            if has_confidence:
                 row.append(opp.get("confidence", ""))
+            if has_platforms:
+                platforms = opp.get("_platforms_checked", [])
+                row.append(", ".join(platforms) if platforms else "")
             row.extend([
                 opp["prices"],
                 opp["total_cost"],
@@ -63,9 +69,13 @@ def display_results(all_opportunities: list[dict], json_output: bool = False):
                 row.append(f"{depth:.0f}" if depth is not None else "")
             table_data.append(row)
 
-        headers = ["Type", "Polymarket"]
+        headers = ["Type", "Market"]
         if has_cross:
-            headers.extend(["Kalshi", "Match", "Conf"])
+            headers.extend(["Kalshi", "Match"])
+        if has_confidence:
+            headers.append("Conf")
+        if has_platforms:
+            headers.append("Platforms")
         headers.extend(["Prices", "Cost", "Net Profit", "ROI", "Volume"])
         if has_depth:
             headers.append("Depth")

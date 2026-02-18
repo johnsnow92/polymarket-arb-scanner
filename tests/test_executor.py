@@ -1074,3 +1074,210 @@ class TestSequentialLegExecution:
         trades = db.get_trades_for_opportunity(1)
         assert len(trades) == 2
         assert all(t["status"] == "filled" for t in trades)
+
+
+# ---------------------------------------------------------------------------
+# _build_legs for TriangularCross
+# ---------------------------------------------------------------------------
+
+class TestBuildLegsTriangularCross:
+    def test_triangular_cross_routes_to_cross_all(self, executor):
+        """TriangularCross should use _build_cross_all_legs via same price format."""
+        opp = {
+            "type": "TriangularCross",
+            "prices": "polymarket_Y=0.350 kalshi_N=0.300",
+            "_token_ids": ["tok_yes", "tok_no"],
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_kalshi_ticker": "TICKER-TRI",
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 2
+        assert legs[0]["platform"] == "polymarket"
+        assert legs[0]["price"] == pytest.approx(0.350)
+        assert legs[0]["_token_id"] == "tok_yes"
+        assert legs[1]["platform"] == "kalshi"
+        assert legs[1]["price"] == pytest.approx(0.300)
+        assert legs[1]["_ticker"] == "TICKER-TRI"
+
+    def test_triangular_cross_betfair_smarkets(self, executor):
+        """TriangularCross with betfair YES + smarkets NO."""
+        opp = {
+            "type": "TriangularCross",
+            "prices": "betfair_Y=0.400 smarkets_N=0.250",
+            "_platform_a": "betfair",
+            "_platform_b": "smarkets",
+            "_market_id": "1.234567",
+            "_selection_id": 99999,
+            "_sm_market_id": "sm_456",
+            "_token_ids": [],
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 2
+        assert legs[0]["platform"] == "betfair"
+        assert legs[0]["price"] == pytest.approx(0.400)
+        assert legs[1]["platform"] == "smarkets"
+        assert legs[1]["price"] == pytest.approx(0.250)
+
+    def test_triangular_cross_empty_on_bad_prices(self, executor):
+        """TriangularCross with malformed prices returns empty legs."""
+        opp = {
+            "type": "TriangularCross",
+            "prices": "garbage",
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": [],
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert legs == []
+
+
+# ---------------------------------------------------------------------------
+# _build_legs for EventDivergence
+# ---------------------------------------------------------------------------
+
+class TestBuildLegsEventDivergence:
+    def test_event_divergence_buy_yes_polymarket(self, executor):
+        """EventDivergence BUY_YES on Polymarket produces one leg."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.400 metaculus=0.600",
+            "_platform": "polymarket",
+            "_direction": "BUY_YES",
+            "_token_ids": ["tok_yes", "tok_no"],
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "polymarket"
+        assert legs[0]["price"] == pytest.approx(0.400)
+        assert legs[0]["token"] == "yes"
+        assert legs[0]["_token_id"] == "tok_yes"
+
+    def test_event_divergence_buy_no_polymarket(self, executor):
+        """EventDivergence BUY_NO on Polymarket produces one leg at NO price."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.700 metaculus=0.500",
+            "_platform": "polymarket",
+            "_direction": "BUY_NO",
+            "_token_ids": ["tok_yes", "tok_no"],
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "polymarket"
+        assert legs[0]["price"] == pytest.approx(0.300)  # 1.0 - 0.7
+        assert legs[0]["token"] == "no"
+        assert legs[0]["_token_id"] == "tok_no"
+
+    def test_event_divergence_buy_yes_kalshi(self, executor):
+        """EventDivergence BUY_YES on Kalshi produces one leg."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.350 metaculus=0.550",
+            "_platform": "kalshi",
+            "_direction": "BUY_YES",
+            "_kalshi_ticker": "TICKER-ED",
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "kalshi"
+        assert legs[0]["price"] == pytest.approx(0.350)
+        assert legs[0]["side"] == "yes"
+        assert legs[0]["action"] == "buy"
+        assert legs[0]["_ticker"] == "TICKER-ED"
+
+    def test_event_divergence_missing_platform(self, executor):
+        """EventDivergence with missing _platform returns empty legs."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.400 metaculus=0.600",
+            "_platform": "",
+            "_direction": "BUY_YES",
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert legs == []
+
+    def test_event_divergence_unsupported_platform(self, executor):
+        """EventDivergence on unsupported platform returns empty legs."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.400 metaculus=0.600",
+            "_platform": "betfair",
+            "_direction": "BUY_YES",
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert legs == []
+
+
+# ---------------------------------------------------------------------------
+# _revalidate_triangular
+# ---------------------------------------------------------------------------
+
+class TestRevalidateTriangular:
+    def test_revalidate_triangular_passes(self, executor):
+        """TriangularCross revalidation passes when profit stays above threshold."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "TriangularCross",
+            "net_profit": 0.08,
+            "total_cost": "$0.7000",
+            "prices": "polymarket_Y=0.350 kalshi_N=0.350",
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok_yes", "tok_no"],
+            "_kalshi_ticker": "TICKER-TRI",
+        }
+        mock_book = {"asks": [{"price": "0.35", "size": "100"}]}
+        mock_bid_ask = {"bid": 0.34, "ask": 0.35}
+
+        with mpatch("executor.fetch_order_book", return_value=mock_book), \
+             mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
+             mpatch("executor.net_profit_triangular", return_value={"net_profit": 0.075, "gross_spread": 0.30, "fees": 0.01}):
+            result = executor._revalidate(opp, None)
+            # ROI = 0.08/0.70 = 11.4% (>5%) -> strict 90%: 0.075 >= 0.072 -> pass
+            assert result is True
+
+    def test_revalidate_triangular_degraded(self, executor):
+        """TriangularCross revalidation fails when profit drops too much."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "TriangularCross",
+            "net_profit": 0.10,
+            "total_cost": "$0.7000",
+            "prices": "polymarket_Y=0.350 kalshi_N=0.350",
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok_yes", "tok_no"],
+            "_kalshi_ticker": "TICKER-TRI",
+        }
+        mock_book = {"asks": [{"price": "0.45", "size": "100"}]}
+        mock_bid_ask = {"bid": 0.44, "ask": 0.45}
+
+        with mpatch("executor.fetch_order_book", return_value=mock_book), \
+             mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
+             mpatch("executor.net_profit_triangular", return_value={"net_profit": 0.02, "gross_spread": 0.10, "fees": 0.08}):
+            result = executor._revalidate(opp, None)
+            # ROI = 0.10/0.70 = 14.3% (>5%) -> strict 90%: 0.02 < 0.09 -> fail
+            assert result is False
+
+    def test_revalidate_triangular_missing_platforms(self, executor):
+        """TriangularCross revalidation fails with missing platform info."""
+        opp = {
+            "type": "TriangularCross",
+            "net_profit": 0.10,
+            "total_cost": "$0.7000",
+            "prices": "polymarket_Y=0.350 kalshi_N=0.350",
+            "_platform_a": "",
+            "_platform_b": "",
+        }
+        result = executor._revalidate(opp, None)
+        assert result is False
+
+    def test_revalidate_event_divergence_passes(self, executor):
+        """EventDivergence should always pass revalidation (signal-based)."""
+        opp = {
+            "type": "EventDivergence",
+            "net_profit": 0.05,
+        }
+        result = executor._revalidate(opp, None)
+        assert result is True
