@@ -508,10 +508,18 @@ class ArbitrageExecutor:
         # Determine relevant balance
         if "Kalshi" in opp_type and "Cross" not in opp_type:
             balance = balances.get("kalshi")
-        elif "Cross" in opp_type:
-            # Cross arbs have 1 leg per platform — use the smaller balance
+        elif "Cross" in opp_type or "Triangular" in opp_type:
+            # Cross/Triangular arbs have 1 leg per platform — use the smaller balance
             bal_values = [v for v in balances.values() if v is not None and v > 0]
             balance = min(bal_values) if bal_values else None
+        elif opp_type.startswith("Betfair"):
+            balance = balances.get("betfair")
+        elif opp_type.startswith("Smarkets"):
+            balance = balances.get("smarkets")
+        elif opp_type.startswith("SXBet"):
+            balance = balances.get("sxbet")
+        elif opp_type.startswith("Matchbook"):
+            balance = balances.get("matchbook")
         else:
             balance = balances.get("polymarket")
 
@@ -526,8 +534,20 @@ class ArbitrageExecutor:
             import re
             m = re.search(r'\((\d+)\)', opp_type)
             num_legs = int(m.group(1)) if m else len(opportunity.get("_token_ids", [])) or 2
-        elif "Cross" in opp_type:
+        elif "Cross" in opp_type or "Triangular" in opp_type:
             num_legs = 1  # 1 leg per platform
+        elif opp_type.endswith("BackAll"):
+            # Multi-leg: count from selection/runner IDs
+            ids_keys = ("_bf_selection_ids", "_sm_contract_ids", "_sx_outcome_ids", "_mb_runner_ids")
+            for key in ids_keys:
+                ids = opportunity.get(key, [])
+                if ids:
+                    num_legs = len(ids)
+                    break
+            else:
+                num_legs = 2
+        elif opp_type.endswith("BackLay"):
+            num_legs = 2
         else:
             num_legs = 2
 
@@ -536,13 +556,20 @@ class ArbitrageExecutor:
     def _fetch_balances(self, opp_type: str) -> dict | None:
         """Fetch balances from relevant platforms."""
         balances = {}
-        if "Kalshi" in opp_type or "Cross" in opp_type:
-            if self.kalshi_client:
-                balances["kalshi"] = self.kalshi_client.get_balance()
-        if "Kalshi" not in opp_type:
-            if self.pm_trader:
-                balances["polymarket"] = self.pm_trader.get_balance()
-        if "Cross" in opp_type:
+        needs_kalshi = "Kalshi" in opp_type or "Cross" in opp_type or "Triangular" in opp_type
+        needs_polymarket = "Kalshi" not in opp_type or "Cross" in opp_type or "Triangular" in opp_type
+        needs_exchange = (
+            "Cross" in opp_type or "Triangular" in opp_type
+            or opp_type.startswith("Betfair") or opp_type.startswith("Smarkets")
+            or opp_type.startswith("SXBet") or opp_type.startswith("Matchbook")
+            or opp_type == "EventDivergence"
+        )
+
+        if needs_kalshi and self.kalshi_client:
+            balances["kalshi"] = self.kalshi_client.get_balance()
+        if needs_polymarket and self.pm_trader:
+            balances["polymarket"] = self.pm_trader.get_balance()
+        if needs_exchange:
             if self.betfair_client and hasattr(self.betfair_client, "get_balance"):
                 bal = self.betfair_client.get_balance()
                 if bal is not None:
@@ -901,8 +928,27 @@ class ArbitrageExecutor:
             leg["platform"] = "kalshi"
             leg["action"] = "buy"
             leg["_ticker"] = opportunity.get("_kalshi_ticker", "")
+        elif platform == "betfair":
+            leg["platform"] = "betfair"
+            leg["side"] = "BACK" if direction == "BUY_YES" else "LAY"
+            leg["_market_id"] = opportunity.get("_market_id", "")
+            leg["_selection_id"] = opportunity.get("_selection_id")
+        elif platform == "smarkets":
+            leg["platform"] = "smarkets"
+            leg["side"] = "BACK" if direction == "BUY_YES" else "LAY"
+            leg["_market_id"] = opportunity.get("_sm_market_id", "")
+            leg["_contract_id"] = opportunity.get("_sm_contract_id", "")
+        elif platform == "sxbet":
+            leg["platform"] = "sxbet"
+            leg["side"] = "BACK" if direction == "BUY_YES" else "LAY"
+            leg["_market_hash"] = opportunity.get("_sx_market_hash", "")
+            leg["_outcome_id"] = opportunity.get("_sx_outcome_id", "")
+        elif platform == "matchbook":
+            leg["platform"] = "matchbook"
+            leg["side"] = "back" if direction == "BUY_YES" else "lay"
+            leg["_market_id"] = opportunity.get("_mb_market_id", "")
+            leg["_runner_id"] = opportunity.get("_mb_runner_id", "")
         else:
-            # Unsupported platform for event divergence execution
             return []
 
         return [leg]
@@ -1233,7 +1279,8 @@ class ArbitrageExecutor:
                 if results:
                     bet_id = results[0].get("betId", "")
                     leg["_order_id"] = bet_id
-                    return True, bet_id, price
+                    fill_price = self._confirm_fill_betfair(bet_id, price)
+                    return True, bet_id, fill_price
             return False, None, None
 
         elif platform == "smarkets":
@@ -1252,7 +1299,8 @@ class ArbitrageExecutor:
             if resp:
                 order_id = str(resp.get("id", resp.get("order_id", "")))
                 leg["_order_id"] = order_id
-                return True, order_id, price
+                fill_price = self._confirm_fill_smarkets(order_id, price)
+                return True, order_id, fill_price
             return False, None, None
 
         elif platform == "sxbet":
@@ -1271,7 +1319,8 @@ class ArbitrageExecutor:
             if resp:
                 order_id = str(resp.get("orderHash", resp.get("id", "")))
                 leg["_order_id"] = order_id
-                return True, order_id, price
+                fill_price = self._confirm_fill_sxbet(order_id, price)
+                return True, order_id, fill_price
             return False, None, None
 
         elif platform == "matchbook":
@@ -1291,7 +1340,8 @@ class ArbitrageExecutor:
             if resp:
                 order_id = str(resp.get("id", resp.get("offer-id", "")))
                 leg["_order_id"] = order_id
-                return True, order_id, price
+                fill_price = self._confirm_fill_matchbook(order_id, price)
+                return True, order_id, fill_price
             return False, None, None
 
         return False, None, None
@@ -1331,6 +1381,82 @@ class ArbitrageExecutor:
             time.sleep(FILL_POLL_INTERVAL)
         return expected_price
 
+    def _confirm_fill_betfair(self, bet_id: str, expected_price: float) -> float:
+        """Poll Betfair for fill confirmation. Returns actual fill price."""
+        if not self.betfair_client or not bet_id:
+            return expected_price
+        max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
+        for _ in range(max_polls):
+            status = self.betfair_client.get_order_status(bet_id)
+            if status:
+                order_status = status.get("status", "")
+                if order_status == "EXECUTION_COMPLETE":
+                    avg_price = status.get("averagePriceMatched") or status.get("priceMatched")
+                    if avg_price is not None and float(avg_price) > 1.0:
+                        return 1.0 / float(avg_price)  # decimal odds -> probability
+                    return expected_price
+                elif order_status in ("CANCELLED", "EXPIRED", "LAPSED"):
+                    return expected_price
+            time.sleep(FILL_POLL_INTERVAL)
+        return expected_price
+
+    def _confirm_fill_smarkets(self, order_id: str, expected_price: float) -> float:
+        """Poll Smarkets for fill confirmation. Returns actual fill price."""
+        if not self.smarkets_client or not order_id:
+            return expected_price
+        max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
+        for _ in range(max_polls):
+            status = self.smarkets_client.get_order_status(order_id)
+            if status:
+                order_status = status.get("state", status.get("status", ""))
+                if order_status in ("matched", "filled", "executed"):
+                    avg_price = status.get("avg_price") or status.get("price")
+                    if avg_price is not None:
+                        return float(avg_price) / 10000.0  # basis points -> probability
+                    return expected_price
+                elif order_status in ("cancelled", "expired"):
+                    return expected_price
+            time.sleep(FILL_POLL_INTERVAL)
+        return expected_price
+
+    def _confirm_fill_sxbet(self, order_id: str, expected_price: float) -> float:
+        """Poll SX Bet for fill confirmation. Returns actual fill price."""
+        if not self.sxbet_client or not order_id:
+            return expected_price
+        max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
+        for _ in range(max_polls):
+            status = self.sxbet_client.get_order_status(order_id)
+            if status:
+                order_status = status.get("status", "")
+                if order_status in ("FILLED", "MATCHED"):
+                    avg_price = status.get("avgPrice") or status.get("price")
+                    if avg_price is not None:
+                        return float(avg_price)
+                    return expected_price
+                elif order_status in ("CANCELLED", "EXPIRED"):
+                    return expected_price
+            time.sleep(FILL_POLL_INTERVAL)
+        return expected_price
+
+    def _confirm_fill_matchbook(self, order_id: str, expected_price: float) -> float:
+        """Poll Matchbook for fill confirmation. Returns actual fill price."""
+        if not self.matchbook_client or not order_id:
+            return expected_price
+        max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
+        for _ in range(max_polls):
+            status = self.matchbook_client.get_order_status(order_id)
+            if status:
+                order_status = status.get("status", "")
+                if order_status in ("matched", "filled"):
+                    avg_odds = status.get("matched-odds") or status.get("odds")
+                    if avg_odds is not None and float(avg_odds) > 1.0:
+                        return 1.0 / float(avg_odds)  # decimal odds -> probability
+                    return expected_price
+                elif order_status in ("cancelled", "expired"):
+                    return expected_price
+            time.sleep(FILL_POLL_INTERVAL)
+        return expected_price
+
     def _cancel_leg(self, leg: dict) -> bool:
         """Attempt to cancel a filled/resting order for cleanup. Returns True if successful."""
         platform = leg["platform"]
@@ -1341,6 +1467,14 @@ class ArbitrageExecutor:
             return self.pm_trader.cancel_order(order_id)
         elif platform == "kalshi" and self.kalshi_client:
             return self.kalshi_client.cancel_order(order_id)
+        elif platform == "betfair" and self.betfair_client:
+            return self.betfair_client.cancel_orders(leg.get("_market_id", ""), [order_id])
+        elif platform == "smarkets" and self.smarkets_client:
+            return self.smarkets_client.cancel_order(order_id)
+        elif platform == "sxbet" and self.sxbet_client:
+            return self.sxbet_client.cancel_order(order_id)
+        elif platform == "matchbook" and self.matchbook_client:
+            return self.matchbook_client.cancel_order(order_id)
         return False
 
     def _log_skipped(self, opportunity: dict, reason: str):

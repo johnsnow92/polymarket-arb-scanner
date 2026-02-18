@@ -1198,11 +1198,11 @@ class TestBuildLegsEventDivergence:
         assert legs == []
 
     def test_event_divergence_unsupported_platform(self, executor):
-        """EventDivergence on unsupported platform returns empty legs."""
+        """EventDivergence on truly unsupported platform returns empty legs."""
         opp = {
             "type": "EventDivergence",
             "prices": "platform=0.400 metaculus=0.600",
-            "_platform": "betfair",
+            "_platform": "some_unknown_platform",
             "_direction": "BUY_YES",
         }
         legs = executor._build_legs(opp, 5.0)
@@ -1281,3 +1281,347 @@ class TestRevalidateTriangular:
         }
         result = executor._revalidate(opp, None)
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Fill confirmation for exchange platforms
+# ---------------------------------------------------------------------------
+
+class TestFillConfirmationExchanges:
+    def test_confirm_fill_betfair_filled(self, executor):
+        """Betfair fill confirm returns price when EXECUTION_COMPLETE."""
+        mock_bf = MagicMock()
+        mock_bf.get_order_status.return_value = {
+            "status": "EXECUTION_COMPLETE",
+            "averagePriceMatched": 2.5,  # decimal odds
+        }
+        executor.betfair_client = mock_bf
+        result = executor._confirm_fill_betfair("bet123", 0.40)
+        assert result == pytest.approx(1.0 / 2.5)
+
+    def test_confirm_fill_betfair_timeout(self, ArbitrageExecutor, db, risk_manager):
+        """Betfair fill confirm returns expected_price on timeout."""
+        from unittest.mock import patch as mpatch
+        ex = ArbitrageExecutor(
+            pm_trader=MagicMock(), kalshi_client=MagicMock(),
+            db=db, risk_manager=risk_manager, dry_run=True,
+        )
+        mock_bf = MagicMock()
+        mock_bf.get_order_status.return_value = {"status": "EXECUTABLE"}
+        ex.betfair_client = mock_bf
+        with mpatch("executor.FILL_POLL_TIMEOUT", 0.01), \
+             mpatch("executor.FILL_POLL_INTERVAL", 0.005):
+            result = ex._confirm_fill_betfair("bet123", 0.40)
+        assert result == pytest.approx(0.40)
+
+    def test_confirm_fill_betfair_no_client(self, executor):
+        """Returns expected_price when no betfair client."""
+        executor.betfair_client = None
+        result = executor._confirm_fill_betfair("bet123", 0.40)
+        assert result == pytest.approx(0.40)
+
+    def test_confirm_fill_smarkets_filled(self, executor):
+        """Smarkets fill confirm returns price when matched."""
+        mock_sm = MagicMock()
+        mock_sm.get_order_status.return_value = {
+            "state": "matched",
+            "avg_price": 4000,  # basis points (40%)
+        }
+        executor.smarkets_client = mock_sm
+        result = executor._confirm_fill_smarkets("order456", 0.40)
+        assert result == pytest.approx(0.40)
+
+    def test_confirm_fill_smarkets_cancelled(self, executor):
+        """Smarkets fill confirm returns expected on cancel."""
+        mock_sm = MagicMock()
+        mock_sm.get_order_status.return_value = {"state": "cancelled"}
+        executor.smarkets_client = mock_sm
+        result = executor._confirm_fill_smarkets("order456", 0.40)
+        assert result == pytest.approx(0.40)
+
+    def test_confirm_fill_sxbet_filled(self, executor):
+        """SX Bet fill confirm returns price when FILLED."""
+        mock_sx = MagicMock()
+        mock_sx.get_order_status.return_value = {
+            "status": "FILLED",
+            "avgPrice": 0.42,
+        }
+        executor.sxbet_client = mock_sx
+        result = executor._confirm_fill_sxbet("order789", 0.40)
+        assert result == pytest.approx(0.42)
+
+    def test_confirm_fill_sxbet_no_client(self, executor):
+        """Returns expected_price when no sxbet client."""
+        executor.sxbet_client = None
+        result = executor._confirm_fill_sxbet("order789", 0.40)
+        assert result == pytest.approx(0.40)
+
+    def test_confirm_fill_matchbook_filled(self, executor):
+        """Matchbook fill confirm returns price when matched."""
+        mock_mb = MagicMock()
+        mock_mb.get_order_status.return_value = {
+            "status": "matched",
+            "matched-odds": 2.5,  # decimal odds
+        }
+        executor.matchbook_client = mock_mb
+        result = executor._confirm_fill_matchbook("offer123", 0.40)
+        assert result == pytest.approx(1.0 / 2.5)
+
+    def test_confirm_fill_matchbook_expired(self, executor):
+        """Matchbook fill confirm returns expected on expired."""
+        mock_mb = MagicMock()
+        mock_mb.get_order_status.return_value = {"status": "expired"}
+        executor.matchbook_client = mock_mb
+        result = executor._confirm_fill_matchbook("offer123", 0.40)
+        assert result == pytest.approx(0.40)
+
+
+# ---------------------------------------------------------------------------
+# Cancel leg for exchange platforms
+# ---------------------------------------------------------------------------
+
+class TestCancelLegExchanges:
+    def test_cancel_betfair(self, executor):
+        """Cancel leg on Betfair calls cancel_orders with market_id and bet_id."""
+        mock_bf = MagicMock()
+        mock_bf.cancel_orders.return_value = True
+        executor.betfair_client = mock_bf
+        leg = {"platform": "betfair", "_order_id": "bet123", "_market_id": "1.234"}
+        assert executor._cancel_leg(leg) is True
+        mock_bf.cancel_orders.assert_called_once_with("1.234", ["bet123"])
+
+    def test_cancel_smarkets(self, executor):
+        """Cancel leg on Smarkets calls cancel_order."""
+        mock_sm = MagicMock()
+        mock_sm.cancel_order.return_value = True
+        executor.smarkets_client = mock_sm
+        leg = {"platform": "smarkets", "_order_id": "order456"}
+        assert executor._cancel_leg(leg) is True
+        mock_sm.cancel_order.assert_called_once_with("order456")
+
+    def test_cancel_sxbet(self, executor):
+        """Cancel leg on SX Bet calls cancel_order."""
+        mock_sx = MagicMock()
+        mock_sx.cancel_order.return_value = True
+        executor.sxbet_client = mock_sx
+        leg = {"platform": "sxbet", "_order_id": "order789"}
+        assert executor._cancel_leg(leg) is True
+        mock_sx.cancel_order.assert_called_once_with("order789")
+
+    def test_cancel_matchbook(self, executor):
+        """Cancel leg on Matchbook calls cancel_order."""
+        mock_mb = MagicMock()
+        mock_mb.cancel_order.return_value = True
+        executor.matchbook_client = mock_mb
+        leg = {"platform": "matchbook", "_order_id": "offer123"}
+        assert executor._cancel_leg(leg) is True
+        mock_mb.cancel_order.assert_called_once_with("offer123")
+
+    def test_cancel_unknown_platform(self, executor):
+        """Cancel on unknown platform returns False."""
+        leg = {"platform": "unknown", "_order_id": "xxx"}
+        assert executor._cancel_leg(leg) is False
+
+    def test_cancel_no_order_id(self, executor):
+        """Cancel with no order_id returns False."""
+        leg = {"platform": "betfair"}
+        assert executor._cancel_leg(leg) is False
+
+
+# ---------------------------------------------------------------------------
+# _per_leg_budget for exchange platforms
+# ---------------------------------------------------------------------------
+
+class TestPerLegBudgetExchanges:
+    def test_betfair_back_all_budget(self, executor):
+        """BetfairBackAll divides betfair balance by number of selections."""
+        balances = {"betfair": 100.0}
+        opp = {"_bf_selection_ids": [1, 2, 3, 4]}
+        budget = executor._per_leg_budget("BetfairBackAll", opp, balances)
+        assert budget == pytest.approx(25.0)
+
+    def test_betfair_backlay_budget(self, executor):
+        """BetfairBackLay divides betfair balance by 2."""
+        balances = {"betfair": 50.0}
+        budget = executor._per_leg_budget("BetfairBackLay", {}, balances)
+        assert budget == pytest.approx(25.0)
+
+    def test_smarkets_backall_budget(self, executor):
+        """SmarketsBackAll uses smarkets balance."""
+        balances = {"smarkets": 60.0}
+        opp = {"_sm_contract_ids": ["c1", "c2", "c3"]}
+        budget = executor._per_leg_budget("SmarketsBackAll", opp, balances)
+        assert budget == pytest.approx(20.0)
+
+    def test_sxbet_backlay_budget(self, executor):
+        """SXBetBackLay divides sxbet balance by 2."""
+        balances = {"sxbet": 40.0}
+        budget = executor._per_leg_budget("SXBetBackLay", {}, balances)
+        assert budget == pytest.approx(20.0)
+
+    def test_matchbook_budget(self, executor):
+        """MatchbookBackAll uses matchbook balance."""
+        balances = {"matchbook": 80.0}
+        opp = {"_mb_runner_ids": [1, 2]}
+        budget = executor._per_leg_budget("MatchbookBackAll", opp, balances)
+        assert budget == pytest.approx(40.0)
+
+    def test_missing_exchange_balance_returns_none(self, executor):
+        """Returns 0.0 when exchange balance not available."""
+        balances = {"polymarket": 100.0}
+        budget = executor._per_leg_budget("BetfairBackAll", {}, balances)
+        # betfair not in balances -> balance is None -> returns 0.0
+        assert budget == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# _fetch_balances for exchange-specific arb types
+# ---------------------------------------------------------------------------
+
+class TestFetchBalancesExchangeTypes:
+    def test_betfair_type_fetches_betfair_balance(self, executor):
+        """BetfairBackAll fetches betfair balance."""
+        mock_bf = MagicMock()
+        mock_bf.get_balance.return_value = 200.0
+        executor.betfair_client = mock_bf
+        balances = executor._fetch_balances("BetfairBackAll")
+        assert "betfair" in balances
+        assert balances["betfair"] == 200.0
+
+    def test_smarkets_type_fetches_smarkets_balance(self, executor):
+        """SmarketsBackLay fetches smarkets balance."""
+        mock_sm = MagicMock()
+        mock_sm.get_balance.return_value = 150.0
+        executor.smarkets_client = mock_sm
+        balances = executor._fetch_balances("SmarketsBackLay")
+        assert "smarkets" in balances
+        assert balances["smarkets"] == 150.0
+
+    def test_sxbet_type_fetches_sxbet_balance(self, executor):
+        """SXBetBackAll fetches sxbet balance."""
+        mock_sx = MagicMock()
+        mock_sx.get_balance.return_value = 300.0
+        executor.sxbet_client = mock_sx
+        balances = executor._fetch_balances("SXBetBackAll")
+        assert "sxbet" in balances
+
+    def test_matchbook_type_fetches_matchbook_balance(self, executor):
+        """MatchbookBackAll fetches matchbook balance."""
+        mock_mb = MagicMock()
+        mock_mb.get_balance.return_value = 400.0
+        executor.matchbook_client = mock_mb
+        balances = executor._fetch_balances("MatchbookBackAll")
+        assert "matchbook" in balances
+        assert balances["matchbook"] == 400.0
+
+    def test_event_divergence_fetches_exchange_balances(self, executor):
+        """EventDivergence fetches all exchange balances."""
+        mock_bf = MagicMock()
+        mock_bf.get_balance.return_value = 100.0
+        executor.betfair_client = mock_bf
+        balances = executor._fetch_balances("EventDivergence")
+        assert "betfair" in balances
+
+
+# ---------------------------------------------------------------------------
+# EventDivergence legs for exchange platforms
+# ---------------------------------------------------------------------------
+
+class TestBuildLegsEventDivergenceExchanges:
+    def test_event_divergence_buy_yes_betfair(self, executor):
+        """EventDivergence BUY_YES on Betfair produces one BACK leg."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.400 metaculus=0.600",
+            "_platform": "betfair",
+            "_direction": "BUY_YES",
+            "_market_id": "1.234567",
+            "_selection_id": 99999,
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "betfair"
+        assert legs[0]["side"] == "BACK"
+        assert legs[0]["_market_id"] == "1.234567"
+        assert legs[0]["_selection_id"] == 99999
+
+    def test_event_divergence_buy_no_betfair(self, executor):
+        """EventDivergence BUY_NO on Betfair produces one LAY leg."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.700 metaculus=0.500",
+            "_platform": "betfair",
+            "_direction": "BUY_NO",
+            "_market_id": "1.234567",
+            "_selection_id": 99999,
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "betfair"
+        assert legs[0]["side"] == "LAY"
+
+    def test_event_divergence_buy_yes_smarkets(self, executor):
+        """EventDivergence BUY_YES on Smarkets produces one BACK leg."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.350 metaculus=0.550",
+            "_platform": "smarkets",
+            "_direction": "BUY_YES",
+            "_sm_market_id": "sm_123",
+            "_sm_contract_id": "c_456",
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "smarkets"
+        assert legs[0]["side"] == "BACK"
+        assert legs[0]["_market_id"] == "sm_123"
+        assert legs[0]["_contract_id"] == "c_456"
+
+    def test_event_divergence_buy_no_sxbet(self, executor):
+        """EventDivergence BUY_NO on SX Bet produces one LAY leg."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.700 metaculus=0.500",
+            "_platform": "sxbet",
+            "_direction": "BUY_NO",
+            "_sx_market_hash": "0xabc",
+            "_sx_outcome_id": "out1",
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "sxbet"
+        assert legs[0]["side"] == "LAY"
+        assert legs[0]["_market_hash"] == "0xabc"
+        assert legs[0]["_outcome_id"] == "out1"
+
+    def test_event_divergence_buy_yes_matchbook(self, executor):
+        """EventDivergence BUY_YES on Matchbook produces one back leg."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.400 metaculus=0.600",
+            "_platform": "matchbook",
+            "_direction": "BUY_YES",
+            "_mb_market_id": "mb_123",
+            "_mb_runner_id": "r_456",
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "matchbook"
+        assert legs[0]["side"] == "back"
+        assert legs[0]["_market_id"] == "mb_123"
+        assert legs[0]["_runner_id"] == "r_456"
+
+    def test_event_divergence_buy_no_matchbook(self, executor):
+        """EventDivergence BUY_NO on Matchbook produces one lay leg."""
+        opp = {
+            "type": "EventDivergence",
+            "prices": "platform=0.700 metaculus=0.500",
+            "_platform": "matchbook",
+            "_direction": "BUY_NO",
+            "_mb_market_id": "mb_123",
+            "_mb_runner_id": "r_456",
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 1
+        assert legs[0]["platform"] == "matchbook"
+        assert legs[0]["side"] == "lay"

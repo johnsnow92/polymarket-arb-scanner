@@ -288,6 +288,17 @@ class SmarketsClient:
             return None
         return self._request("GET", f"/orders/{order_id}/")
 
+    def get_market_status(self, market_id: str) -> dict | None:
+        """Get the current status of a market (open, settled, closed).
+
+        Args:
+            market_id: Smarkets market ID.
+
+        Returns:
+            Market dict with state info, or None on failure.
+        """
+        return self._request("GET", f"/markets/{market_id}/")
+
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an order.
 

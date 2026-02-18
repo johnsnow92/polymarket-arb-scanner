@@ -272,6 +272,17 @@ class SXBetClient:
             return None
         return self._request("GET", f"/orders/{order_id}")
 
+    def get_market_status(self, market_hash: str) -> dict | None:
+        """Get the current status of a market.
+
+        Args:
+            market_hash: SX Bet market hash.
+
+        Returns:
+            Market dict with status info, or None on failure.
+        """
+        return self._request("GET", f"/markets/{market_hash}")
+
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an order.
 

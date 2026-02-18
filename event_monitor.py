@@ -179,8 +179,19 @@ class EventMonitor:
 
             return None
 
-        # Unsupported platforms (betfair, smarkets, sxbet, matchbook)
-        # These need client API calls we don't have here
+        # Exchange platforms store prices directly on the market dict
+        # (injected by the scan layer or fetch step)
+        if platform in ("betfair", "smarkets", "sxbet", "matchbook"):
+            # Try common price field names
+            for key in ("_yes_price", "yes_price", "back_price"):
+                val = market.get(key)
+                if val is not None:
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        continue
+            return None
+
         return None
 
     def find_divergences(
@@ -310,7 +321,7 @@ class EventMonitor:
 
             direction = div["direction"]
 
-            opportunities.append({
+            opp = {
                 "type": "EventDivergence",
                 "market": market_title[:50],
                 "prices": f"platform={platform_price:.3f} metaculus={metaculus_prob:.3f}",
@@ -326,7 +337,38 @@ class EventMonitor:
                 "_divergence": divergence,
                 "_direction": direction,
                 "_clob_depth": 0,
-            })
+            }
+
+            # Attach execution metadata from the source market dict
+            source_market = div.get("market", {})
+            if platform_name == "polymarket":
+                tokens = source_market.get("tokens", [])
+                if tokens:
+                    opp["_token_ids"] = [t.get("token_id", "") for t in tokens]
+            elif platform_name == "kalshi":
+                opp["_kalshi_ticker"] = source_market.get("ticker", "")
+            elif platform_name == "betfair":
+                opp["_market_id"] = source_market.get("marketId", source_market.get("_market_id", ""))
+                runners = source_market.get("runners", [])
+                if runners:
+                    opp["_selection_id"] = runners[0].get("selectionId") or runners[0].get("id")
+            elif platform_name == "smarkets":
+                opp["_sm_market_id"] = str(source_market.get("id", ""))
+                contracts = source_market.get("contracts", [])
+                if contracts:
+                    opp["_sm_contract_id"] = str(contracts[0].get("id", ""))
+            elif platform_name == "sxbet":
+                opp["_sx_market_hash"] = source_market.get("marketHash", "")
+                outcomes = source_market.get("outcomes", [])
+                if outcomes:
+                    opp["_sx_outcome_id"] = str(outcomes[0].get("outcomeId", outcomes[0].get("id", "")))
+            elif platform_name == "matchbook":
+                opp["_mb_market_id"] = str(source_market.get("id", source_market.get("_market_id", "")))
+                runners = source_market.get("runners", [])
+                if runners:
+                    opp["_mb_runner_id"] = str(runners[0].get("id", ""))
+
+            opportunities.append(opp)
 
         return opportunities
 

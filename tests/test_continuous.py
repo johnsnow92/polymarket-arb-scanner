@@ -251,6 +251,77 @@ class TestExtractKeys:
         keys = OpportunityIndex._extract_keys(opp)
         assert keys == []
 
+    def test_extracts_betfair_market_id(self):
+        opp = {"type": "BetfairBackAll", "_bf_market_id": "1.234567"}
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("betfair", "1.234567") in keys
+
+    def test_extracts_betfair_fallback_market_id(self):
+        opp = {"type": "BetfairBackLay", "_market_id": "1.999"}
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("betfair", "1.999") in keys
+
+    def test_betfair_key_requires_betfair_type(self):
+        """Non-betfair type with _market_id should NOT produce betfair key."""
+        opp = {"type": "Binary", "_market_id": "1.999"}
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("betfair", "1.999") not in keys
+
+    def test_extracts_smarkets_market_id(self):
+        opp = {"type": "SmarketsBackAll", "_sm_market_id": "sm_123"}
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("smarkets", "sm_123") in keys
+
+    def test_extracts_sxbet_market_hash(self):
+        opp = {"type": "SXBetBackAll", "_sx_market_hash": "0xabc"}
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("sxbet", "0xabc") in keys
+
+    def test_extracts_matchbook_market_id(self):
+        opp = {"type": "MatchbookBackAll", "_mb_market_id": "mb_456"}
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("matchbook", "mb_456") in keys
+
+    def test_extracts_event_divergence_metaculus_key(self):
+        opp = {
+            "type": "EventDivergence",
+            "_platform": "polymarket",
+            "_metaculus_id": 12345,
+        }
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("polymarket", "metaculus_12345") in keys
+
+    def test_event_divergence_no_key_without_platform(self):
+        opp = {
+            "type": "EventDivergence",
+            "_platform": "",
+            "_metaculus_id": 12345,
+        }
+        keys = OpportunityIndex._extract_keys(opp)
+        assert not any(k[1].startswith("metaculus_") for k in keys)
+
+    def test_extracts_triangular_cross_keys(self):
+        opp = {
+            "type": "TriangularCross",
+            "market": "Test Market",
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+        }
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("polymarket", "Test Market") in keys
+        assert ("kalshi", "Test Market") in keys
+
+    def test_triangular_cross_skips_empty_platforms(self):
+        opp = {
+            "type": "TriangularCross",
+            "market": "Test",
+            "_platform_a": "polymarket",
+            "_platform_b": "",
+        }
+        keys = OpportunityIndex._extract_keys(opp)
+        assert ("polymarket", "Test") in keys
+        assert not any(k[0] == "" for k in keys)
+
 
 # ---------------------------------------------------------------------------
 # _recalc_profit — WS trigger profit recalculation

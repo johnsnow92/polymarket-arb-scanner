@@ -311,6 +311,17 @@ class MatchbookClient:
             return None
         return self._request("GET", f"/offers/{offer_id}")
 
+    def get_market_status(self, event_id) -> dict | None:
+        """Get event/market status for settlement detection.
+
+        Args:
+            event_id: Matchbook event ID.
+
+        Returns:
+            Event dict with status info, or None on failure.
+        """
+        return self._request("GET", f"/events/{event_id}")
+
     def cancel_order(self, offer_id) -> bool:
         """Cancel an offer/order.
 

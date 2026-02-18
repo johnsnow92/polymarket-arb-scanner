@@ -27,6 +27,7 @@ from config import (
     WS_SUBSCRIPTION_LIMIT as CONFIG_WS_SUBSCRIPTION_LIMIT,
     WS_TRIGGER_ENABLED as CONFIG_WS_TRIGGER_ENABLED,
     WS_TRIGGER_THRESHOLD as CONFIG_WS_TRIGGER_THRESHOLD,
+    HEDGE_ENABLED as CONFIG_HEDGE_ENABLED,
 )
 from scans import (
     scan_binary_internal,
@@ -118,6 +119,40 @@ class OpportunityIndex:
         for t in kalshi_tickers:
             if t:
                 keys.append(("kalshi", t))
+
+        # Betfair
+        bf_market_id = opp.get("_bf_market_id") or opp.get("_market_id", "")
+        if bf_market_id and "betfair" in opp_type.lower():
+            keys.append(("betfair", bf_market_id))
+
+        # Smarkets
+        sm_market_id = opp.get("_sm_market_id", "")
+        if sm_market_id:
+            keys.append(("smarkets", sm_market_id))
+
+        # SX Bet
+        sx_hash = opp.get("_sx_market_hash", "")
+        if sx_hash:
+            keys.append(("sxbet", sx_hash))
+
+        # Matchbook
+        mb_market_id = opp.get("_mb_market_id", "")
+        if mb_market_id:
+            keys.append(("matchbook", mb_market_id))
+
+        # EventDivergence: index by platform + metaculus question ID
+        if opp_type == "EventDivergence":
+            platform = opp.get("_platform", "")
+            metaculus_id = opp.get("_metaculus_id")
+            if platform and metaculus_id:
+                keys.append((platform, f"metaculus_{metaculus_id}"))
+
+        # TriangularCross: index by both platform keys
+        if opp_type == "TriangularCross":
+            for pkey in ("_platform_a", "_platform_b"):
+                pname = opp.get(pkey, "")
+                if pname:
+                    keys.append((pname, opp.get("market", "")))
 
         return keys
 
@@ -221,11 +256,13 @@ def check_settlements(
                     logger.warning("SX Bet settlement check failed for position %s: %s", pos['id'], e)
             elif platform == "matchbook" and matchbook_client:
                 try:
-                    market_data = matchbook_client.get_order_status(market_id) if hasattr(matchbook_client, "get_order_status") else None
-                    if market_data and market_data.get("status") in ("settled", "closed"):
-                        realized = _calc_realized_pnl(db, pos)
-                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
-                        settled += 1
+                    market_data = matchbook_client.get_market_status(market_id) if hasattr(matchbook_client, "get_market_status") else None
+                    if market_data:
+                        event_status = market_data.get("status", "")
+                        if event_status in ("settled", "closed", "resulted"):
+                            realized = _calc_realized_pnl(db, pos)
+                            db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                            settled += 1
                 except Exception as e:
                     logger.warning("Matchbook settlement check failed for position %s: %s", pos['id'], e)
         except Exception as e:
@@ -379,6 +416,20 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         sxbet_client=extra_clients.get("sxbet"),
         matchbook_client=extra_clients.get("matchbook"),
     )
+
+    # Initialize partial fill hedger for continuous mode
+    hedger = None
+    if CONFIG_HEDGE_ENABLED:
+        from hedger import PartialFillHedger
+        hedger = PartialFillHedger(
+            pm_trader=pm_trader,
+            kalshi_client=kalshi_client,
+            betfair_client=extra_clients.get("betfair"),
+            smarkets_client=extra_clients.get("smarkets"),
+            sxbet_client=extra_clients.get("sxbet"),
+            matchbook_client=extra_clients.get("matchbook"),
+            db=db,
+        )
 
     # Initialize WebSocket feed manager
     feed_manager = FeedManager(
@@ -630,6 +681,13 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         except Exception as e:
                             logger.error("Execution error: %s", e)
                     logger.info("Executed: %d/%d", executed, len(all_opportunities))
+
+                # Process any pending hedges from partial fills
+                if hedger:
+                    try:
+                        hedger.process_pending_hedges()
+                    except Exception as e:
+                        logger.warning("Hedger processing failed: %s", e)
 
                 # Rebuild opportunity index for WS-triggered execution
                 opp_index.rebuild(all_opportunities)
