@@ -11,15 +11,9 @@ from db import TradeDB
 from risk_manager import RiskManager
 from polymarket_api import get_clob_prices, fetch_order_book, get_best_bid_ask, PolymarketTrader
 from kalshi_api import KalshiClient
-from predictit_api import PredictItClient
 from betfair_api import BetfairClient
-from manifold_api import ManifoldClient
 from smarkets_api import SmarketsClient
 from sxbet_api import SXBetClient
-from forecastex_api import ForecastExClient
-from opinion_api import OpinionClient
-from drift_api import DriftClient
-from limitless_api import LimitlessClient
 from fees import (
     net_profit_binary_internal,
     net_profit_negrisk_internal,
@@ -44,15 +38,9 @@ class ArbitrageExecutor:
         exec_mode: str = "semi-auto",
         max_trade_size: float = 5.0,
         price_cache: dict | None = None,
-        predictit_client: PredictItClient | None = None,
         betfair_client: BetfairClient | None = None,
-        manifold_client: ManifoldClient | None = None,
         smarkets_client: SmarketsClient | None = None,
         sxbet_client: SXBetClient | None = None,
-        forecastex_client: ForecastExClient | None = None,
-        opinion_client: OpinionClient | None = None,
-        drift_client: DriftClient | None = None,
-        limitless_client: LimitlessClient | None = None,
         revalidation_adaptive: bool = True,
         revalidation_min_floor: float = 0.003,
         dynamic_sizing: bool = False,
@@ -60,15 +48,9 @@ class ArbitrageExecutor:
     ):
         self.pm_trader = pm_trader
         self.kalshi_client = kalshi_client
-        self.predictit_client = predictit_client
         self.betfair_client = betfair_client
-        self.manifold_client = manifold_client
         self.smarkets_client = smarkets_client
         self.sxbet_client = sxbet_client
-        self.forecastex_client = forecastex_client
-        self.opinion_client = opinion_client
-        self.drift_client = drift_client
-        self.limitless_client = limitless_client
         self.db = db
         self.risk = risk_manager
         self.dry_run = dry_run
@@ -173,22 +155,12 @@ class ArbitrageExecutor:
                 return self._revalidate_kalshi_multi(opportunity, original_profit)
             elif opp_type.startswith("Spread"):
                 return True  # Spread prices are live order book — no mid-price staleness
-            elif opp_type in ("PIBinary",) or opp_type.startswith("PIMulti"):
-                return True  # PredictIt prices are from public API, revalidation not critical
             elif opp_type in ("BetfairBackAll", "BetfairBackLay"):
                 return True  # Betfair prices are live order book
             elif opp_type in ("SmarketsBackAll", "SmarketsBackLay"):
                 return True  # Smarkets prices are live order book
             elif opp_type in ("SXBetBackAll", "SXBetBackLay"):
                 return True  # SX Bet prices are live order book
-            elif opp_type == "ForecastExBinary":
-                return True  # ForecastEx prices from live API
-            elif opp_type in ("OpinionBinary",) or opp_type.startswith("OpinionMulti"):
-                return True  # Opinion prices from live API
-            elif opp_type == "DriftBinary":
-                return True  # Drift prices from live API
-            elif opp_type == "LimitlessBinary":
-                return True  # Limitless prices from live API
             # Unknown type — proceed cautiously
             return True
         except Exception as e:
@@ -463,18 +435,10 @@ class ArbitrageExecutor:
             if self.pm_trader:
                 balances["polymarket"] = self.pm_trader.get_balance()
         if "Cross" in opp_type:
-            if self.predictit_client and hasattr(self.predictit_client, "get_balance"):
-                bal = self.predictit_client.get_balance()
-                if bal is not None:
-                    balances["predictit"] = bal
             if self.betfair_client and hasattr(self.betfair_client, "get_balance"):
                 bal = self.betfair_client.get_balance()
                 if bal is not None:
                     balances["betfair"] = bal
-            if self.manifold_client and hasattr(self.manifold_client, "get_balance"):
-                bal = self.manifold_client.get_balance()
-                if bal is not None:
-                    balances["manifold"] = bal
             if self.smarkets_client and hasattr(self.smarkets_client, "get_balance"):
                 bal = self.smarkets_client.get_balance()
                 if bal is not None:
@@ -483,22 +447,6 @@ class ArbitrageExecutor:
                 bal = self.sxbet_client.get_balance()
                 if bal is not None:
                     balances["sxbet"] = bal
-            if self.forecastex_client and hasattr(self.forecastex_client, "get_balance"):
-                bal = self.forecastex_client.get_balance()
-                if bal is not None:
-                    balances["forecastex"] = bal
-            if self.opinion_client and hasattr(self.opinion_client, "get_balance"):
-                bal = self.opinion_client.get_balance()
-                if bal is not None:
-                    balances["opinion"] = bal
-            if self.drift_client and hasattr(self.drift_client, "get_balance"):
-                bal = self.drift_client.get_balance()
-                if bal is not None:
-                    balances["drift"] = bal
-            if self.limitless_client and hasattr(self.limitless_client, "get_balance"):
-                bal = self.limitless_client.get_balance()
-                if bal is not None:
-                    balances["limitless"] = bal
         return balances if balances else None
 
     def _build_legs(self, opportunity: dict, size: float) -> list[dict]:
@@ -588,25 +536,6 @@ class ArbitrageExecutor:
                     {"platform": "kalshi", "side": side, "action": "sell",
                      "price": sell_price, "_ticker": ticker},
                 ]
-        elif opp_type == "PIBinary":
-            contract_id = opportunity.get("_contract_id")
-            yes_price = opportunity.get("_pi_yes", 0)
-            no_price = opportunity.get("_pi_no", 0)
-            legs = [
-                {"platform": "predictit", "side": "yes", "price": yes_price,
-                 "_contract_id": contract_id},
-                {"platform": "predictit", "side": "no", "price": no_price,
-                 "_contract_id": contract_id},
-            ]
-        elif opp_type.startswith("PIMulti"):
-            legs = [
-                {"platform": "predictit", "side": "yes", "price": price,
-                 "_contract_id": cid}
-                for cid, price in zip(
-                    opportunity.get("_pi_contract_ids", []),
-                    opportunity.get("_pi_prices", []),
-                )
-            ]
         elif opp_type == "BetfairBackAll":
             legs = [
                 {"platform": "betfair", "side": "BACK",
@@ -669,48 +598,6 @@ class ArbitrageExecutor:
                  "price": opportunity.get("_sx_lay_price", 0),
                  "_market_hash": opportunity.get("_sx_market_hash", ""),
                  "_outcome_id": opportunity.get("_sx_outcome_id")},
-            ]
-        elif opp_type == "ForecastExBinary":
-            # ForecastEx: both legs are BUY (can't sell contracts)
-            market_id = opportunity.get("_fx_market_id", "")
-            legs = [
-                {"platform": "forecastex", "side": "yes", "action": "buy",
-                 "price": opportunity.get("_fx_yes", 0), "_market_id": market_id},
-                {"platform": "forecastex", "side": "no", "action": "buy",
-                 "price": opportunity.get("_fx_no", 0), "_market_id": market_id},
-            ]
-        elif opp_type == "OpinionBinary":
-            market_id = opportunity.get("_opinion_market_id", "")
-            legs = [
-                {"platform": "opinion", "side": "yes",
-                 "price": opportunity.get("_opinion_yes", 0), "_market_id": market_id},
-                {"platform": "opinion", "side": "no",
-                 "price": opportunity.get("_opinion_no", 0), "_market_id": market_id},
-            ]
-        elif opp_type.startswith("OpinionMulti"):
-            legs = [
-                {"platform": "opinion", "side": "yes", "price": price,
-                 "_market_id": mid}
-                for mid, price in zip(
-                    opportunity.get("_opinion_market_ids", []),
-                    opportunity.get("_opinion_prices", []),
-                )
-            ]
-        elif opp_type == "DriftBinary":
-            market_id = opportunity.get("_drift_market_id", "")
-            legs = [
-                {"platform": "drift", "side": "yes",
-                 "price": opportunity.get("_drift_yes", 0), "_market_id": market_id},
-                {"platform": "drift", "side": "no",
-                 "price": opportunity.get("_drift_no", 0), "_market_id": market_id},
-            ]
-        elif opp_type == "LimitlessBinary":
-            market_id = opportunity.get("_limitless_market_id", "")
-            legs = [
-                {"platform": "limitless", "side": "yes",
-                 "price": opportunity.get("_limitless_yes", 0), "_market_id": market_id},
-                {"platform": "limitless", "side": "no",
-                 "price": opportunity.get("_limitless_no", 0), "_market_id": market_id},
             ]
         elif opp_type.startswith("Cross"):
             # One leg on Polymarket, one on Kalshi
@@ -807,19 +694,11 @@ class ArbitrageExecutor:
             leg["side"] = side
             leg["action"] = "buy"
             leg["_ticker"] = opportunity.get("_kalshi_ticker", "")
-        elif platform_name == "predictit":
-            leg["platform"] = "predictit"
-            leg["side"] = side
-            leg["_contract_id"] = opportunity.get("_contract_id")
         elif platform_name == "betfair":
             leg["platform"] = "betfair"
             leg["side"] = side
             leg["_market_id"] = opportunity.get("_market_id", "")
             leg["_selection_id"] = opportunity.get("_selection_id")
-        elif platform_name == "manifold":
-            leg["platform"] = "manifold"
-            leg["side"] = side
-            leg["_market_id"] = opportunity.get("_manifold_market_id", "")
         elif platform_name == "smarkets":
             leg["platform"] = "smarkets"
             leg["side"] = side
@@ -828,23 +707,6 @@ class ArbitrageExecutor:
             leg["platform"] = "sxbet"
             leg["side"] = side
             leg["_market_hash"] = opportunity.get("_sx_market_hash", "")
-        elif platform_name == "forecastex":
-            leg["platform"] = "forecastex"
-            leg["side"] = side
-            leg["action"] = "buy"  # ForecastEx: can only BUY
-            leg["_market_id"] = opportunity.get("_fx_market_id", "")
-        elif platform_name == "opinion":
-            leg["platform"] = "opinion"
-            leg["side"] = side
-            leg["_market_id"] = opportunity.get("_opinion_market_id", "")
-        elif platform_name == "drift":
-            leg["platform"] = "drift"
-            leg["side"] = side
-            leg["_market_id"] = opportunity.get("_drift_market_id", "")
-        elif platform_name == "limitless":
-            leg["platform"] = "limitless"
-            leg["side"] = side
-            leg["_market_id"] = opportunity.get("_limitless_market_id", "")
         else:
             return None
 
@@ -1048,14 +910,9 @@ class ArbitrageExecutor:
                 hedger = PartialFillHedger(
                     pm_trader=self.pm_trader,
                     kalshi_client=self.kalshi_client,
-                    predictit_client=self.predictit_client,
                     betfair_client=self.betfair_client,
                     smarkets_client=self.smarkets_client,
                     sxbet_client=self.sxbet_client,
-                    forecastex_client=self.forecastex_client,
-                    opinion_client=self.opinion_client,
-                    drift_client=self.drift_client,
-                    limitless_client=self.limitless_client,
                     db=self.db,
                 )
                 for i, leg in enumerate(legs):
@@ -1154,24 +1011,6 @@ class ArbitrageExecutor:
                                side, ticker, price, count)
             return False, None, None
 
-        elif platform == "predictit":
-            if not self.predictit_client or not self.predictit_client.authenticated:
-                return False, None, None
-            contract_id = leg.get("_contract_id")
-            if not contract_id:
-                return False, None, None
-            side = leg.get("side", "yes")
-            quantity = max(1, int(size / price)) if price > 0 else 1
-            resp = self.predictit_client.place_order(
-                contract_id=contract_id, side=side,
-                price=price, quantity=quantity,
-            )
-            if resp:
-                order_id = str(resp.get("id", resp.get("orderId", "")))
-                leg["_order_id"] = order_id
-                return True, order_id, price
-            return False, None, None
-
         elif platform == "betfair":
             if not self.betfair_client or not self.betfair_client.authenticated:
                 return False, None, None
@@ -1199,22 +1038,6 @@ class ArbitrageExecutor:
                     bet_id = results[0].get("betId", "")
                     leg["_order_id"] = bet_id
                     return True, bet_id, price
-            return False, None, None
-
-        elif platform == "manifold":
-            if not self.manifold_client or not self.manifold_client.api_key:
-                return False, None, None
-            market_id = leg.get("_market_id", "")
-            if not market_id:
-                return False, None, None
-            outcome = "YES" if leg.get("side", "").lower() in ("yes", "buy") else "NO"
-            resp = self.manifold_client.place_bet(
-                market_id=market_id, outcome=outcome, amount=size,
-            )
-            if resp:
-                bet_id = str(resp.get("id", resp.get("betId", "")))
-                leg["_order_id"] = bet_id
-                return True, bet_id, price
             return False, None, None
 
         elif platform == "smarkets":
@@ -1251,78 +1074,6 @@ class ArbitrageExecutor:
             )
             if resp:
                 order_id = str(resp.get("orderHash", resp.get("id", "")))
-                leg["_order_id"] = order_id
-                return True, order_id, price
-            return False, None, None
-
-        elif platform == "forecastex":
-            if not self.forecastex_client or not self.forecastex_client.authenticated:
-                return False, None, None
-            market_id = leg.get("_market_id", "")
-            if not market_id:
-                return False, None, None
-            side = leg.get("side", "yes")
-            quantity = max(1, int(size / price)) if price > 0 else 1
-            resp = self.forecastex_client.place_order(
-                contract_id=market_id, side=side,
-                price=price, quantity=quantity,
-            )
-            if resp:
-                order_id = str(resp.get("orderId", resp.get("id", "")))
-                leg["_order_id"] = order_id
-                return True, order_id, price
-            return False, None, None
-
-        elif platform == "opinion":
-            if not self.opinion_client:
-                return False, None, None
-            market_id = leg.get("_market_id", "")
-            if not market_id:
-                return False, None, None
-            side = leg.get("side", "yes")
-            quantity = max(1, int(size / price)) if price > 0 else 1
-            resp = self.opinion_client.place_order(
-                market_id=market_id, side=side,
-                price=price, quantity=quantity,
-            )
-            if resp:
-                order_id = str(resp.get("orderId", resp.get("id", "")))
-                leg["_order_id"] = order_id
-                return True, order_id, price
-            return False, None, None
-
-        elif platform == "drift":
-            if not self.drift_client:
-                return False, None, None
-            market_id = leg.get("_market_id", "")
-            if not market_id:
-                return False, None, None
-            side = leg.get("side", "yes")
-            quantity = max(1, int(size / price)) if price > 0 else 1
-            resp = self.drift_client.place_order(
-                market_id=market_id, side=side,
-                price=price, quantity=quantity,
-            )
-            if resp:
-                order_id = str(resp.get("orderId", resp.get("id", "")))
-                leg["_order_id"] = order_id
-                return True, order_id, price
-            return False, None, None
-
-        elif platform == "limitless":
-            if not self.limitless_client:
-                return False, None, None
-            market_id = leg.get("_market_id", "")
-            if not market_id:
-                return False, None, None
-            side = leg.get("side", "yes")
-            quantity = max(1, int(size / price)) if price > 0 else 1
-            resp = self.limitless_client.place_order(
-                market_id=market_id, side=side,
-                price=price, quantity=quantity,
-            )
-            if resp:
-                order_id = str(resp.get("orderId", resp.get("id", "")))
                 leg["_order_id"] = order_id
                 return True, order_id, price
             return False, None, None

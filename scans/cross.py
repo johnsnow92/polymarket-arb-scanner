@@ -9,15 +9,9 @@ from matcher import match_markets_to_events, match_cross_platform, detect_invert
 from config import FUZZY_MATCH_THRESHOLD
 from fees import (
     net_profit_cross_platform,
-    net_profit_cross_predictit,
     net_profit_cross_betfair,
-    net_profit_cross_manifold,
     net_profit_cross_smarkets,
     net_profit_cross_sxbet,
-    net_profit_cross_forecastex,
-    net_profit_cross_opinion,
-    net_profit_cross_drift,
-    net_profit_cross_limitless,
 )
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
@@ -27,15 +21,9 @@ logger = logging.getLogger(__name__)
 # Fee function lookup for cross-platform pairs
 _CROSS_FEE_FUNCS = {
     ("polymarket", "kalshi"): net_profit_cross_platform,
-    ("polymarket", "predictit"): net_profit_cross_predictit,
     ("polymarket", "betfair"): net_profit_cross_betfair,
-    ("polymarket", "manifold"): net_profit_cross_manifold,
     ("polymarket", "smarkets"): net_profit_cross_smarkets,
     ("polymarket", "sxbet"): net_profit_cross_sxbet,
-    ("polymarket", "forecastex"): net_profit_cross_forecastex,
-    ("polymarket", "opinion"): net_profit_cross_opinion,
-    ("polymarket", "drift"): net_profit_cross_drift,
-    ("polymarket", "limitless"): net_profit_cross_limitless,
 }
 
 
@@ -273,29 +261,15 @@ def _attach_exec_metadata(opp: dict, market: dict, platform: str, suffix: str):
         opp["_token_ids"] = _extract_token_ids(market)
     elif platform == "kalshi":
         opp["_kalshi_ticker"] = market.get("ticker", "")
-    elif platform == "predictit":
-        contracts = market.get("contracts", [])
-        if contracts:
-            opp["_contract_id"] = contracts[0].get("id")
     elif platform == "betfair":
         opp["_market_id"] = market.get("marketId", "")
         runners = market.get("runners", [])
         if runners:
             opp["_selection_id"] = runners[0].get("selectionId")
-    elif platform == "manifold":
-        opp["_manifold_market_id"] = market.get("id", market.get("slug", ""))
     elif platform == "smarkets":
         opp["_sm_market_id"] = market.get("id", "")
     elif platform == "sxbet":
         opp["_sx_market_hash"] = market.get("marketHash", market.get("id", ""))
-    elif platform == "forecastex":
-        opp["_fx_market_id"] = str(market.get("id", market.get("contractId", market.get("conid", ""))))
-    elif platform == "opinion":
-        opp["_opinion_market_id"] = market.get("id", market.get("marketId", ""))
-    elif platform == "drift":
-        opp["_drift_market_id"] = market.get("id", market.get("marketId", market.get("publicKey", "")))
-    elif platform == "limitless":
-        opp["_limitless_market_id"] = market.get("id", market.get("marketId", ""))
 
 
 def scan_cross_all(

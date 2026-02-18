@@ -19,9 +19,9 @@ def mock_external_modules():
     """Mock external API modules that may not be installed."""
     mock_modules = {}
     for mod_name in [
-        "polymarket_api", "kalshi_api", "predictit_api",
-        "betfair_api", "manifold_api", "ws_feeds", "db",
-        "risk_manager", "executor",
+        "polymarket_api", "kalshi_api",
+        "betfair_api", "smarkets_api", "sxbet_api",
+        "ws_feeds", "db", "risk_manager", "executor",
     ]:
         if mod_name not in sys.modules:
             mock_modules[mod_name] = MagicMock()
@@ -281,7 +281,7 @@ class TestScanCrossAll:
 
         # Mock matcher to return empty matches
         with patch("scans.cross.match_cross_platform", return_value=[]):
-            result = scanner.scan_cross_all([], {"predictit": (MagicMock(), [{"id": 1}])}, min_profit=0.001)
+            result = scanner.scan_cross_all([], {"betfair": (MagicMock(), [{"id": 1}])}, min_profit=0.001)
         assert result == []
 
 
@@ -410,13 +410,6 @@ class TestScanCrossAllWithMetadata:
         scanner._attach_exec_metadata(opp, market, "polymarket", "a")
         assert opp["_token_ids"] == ["tok_yes", "tok_no"]
 
-    def test_predictit_gets_contract_id(self):
-        scanner = _import_scanner()
-        opp = {}
-        market = {"contracts": [{"id": 12345}, {"id": 67890}]}
-        scanner._attach_exec_metadata(opp, market, "predictit", "b")
-        assert opp["_contract_id"] == 12345
-
     def test_betfair_gets_market_id_and_selection_id(self):
         scanner = _import_scanner()
         opp = {}
@@ -427,20 +420,6 @@ class TestScanCrossAllWithMetadata:
         scanner._attach_exec_metadata(opp, market, "betfair", "b")
         assert opp["_market_id"] == "1.234567890"
         assert opp["_selection_id"] == 98765
-
-    def test_manifold_gets_manifold_market_id(self):
-        scanner = _import_scanner()
-        opp = {}
-        market = {"id": "manifold_abc_123", "slug": "some-market-slug"}
-        scanner._attach_exec_metadata(opp, market, "manifold", "b")
-        assert opp["_manifold_market_id"] == "manifold_abc_123"
-
-    def test_manifold_falls_back_to_slug(self):
-        scanner = _import_scanner()
-        opp = {}
-        market = {"slug": "fallback-slug"}
-        scanner._attach_exec_metadata(opp, market, "manifold", "b")
-        assert opp["_manifold_market_id"] == "fallback-slug"
 
     def test_kalshi_gets_kalshi_ticker(self):
         scanner = _import_scanner()
@@ -455,13 +434,6 @@ class TestScanCrossAllWithMetadata:
         market = {"clobTokenIds": ""}
         scanner._attach_exec_metadata(opp, market, "polymarket", "a")
         assert opp["_token_ids"] == []
-
-    def test_predictit_no_contracts(self):
-        scanner = _import_scanner()
-        opp = {}
-        market = {"contracts": []}
-        scanner._attach_exec_metadata(opp, market, "predictit", "b")
-        assert "_contract_id" not in opp
 
     def test_betfair_no_runners(self):
         scanner = _import_scanner()
@@ -514,101 +486,6 @@ class TestSettlementChecks:
         positions = db.get_open_positions()
         return db, positions[0]
 
-    def test_predictit_settlement_closed(self):
-        scanner = _import_scanner()
-        db, pos = self._make_db_with_position("predictit", market_identifier="9999")
-
-        mock_pi_client = MagicMock()
-        mock_pi_client.fetch_market.return_value = {"status": "Closed"}
-
-        scanner._check_settlements(
-            db, None, None,
-            predictit_client=mock_pi_client,
-        )
-
-        positions = db.get_open_positions()
-        assert len(positions) == 0, "PredictIt position should be settled after Closed status"
-
-        # Verify settled status in DB
-        all_positions = db.conn.execute("SELECT * FROM positions WHERE id = ?", (pos["id"],)).fetchone()
-        assert all_positions["status"] == "settled"
-
-    def test_manifold_settlement_resolved(self):
-        scanner = _import_scanner()
-        db, pos = self._make_db_with_position("manifold", market_identifier="mkt_abc")
-
-        mock_manifold_client = MagicMock()
-        mock_manifold_client.fetch_market.return_value = {"isResolved": True}
-
-        scanner._check_settlements(
-            db, None, None,
-            manifold_client=mock_manifold_client,
-        )
-
-        positions = db.get_open_positions()
-        assert len(positions) == 0, "Manifold position should be settled after isResolved=True"
-
-        all_positions = db.conn.execute("SELECT * FROM positions WHERE id = ?", (pos["id"],)).fetchone()
-        assert all_positions["status"] == "settled"
-
-    def test_predictit_stays_open_when_not_resolved(self):
-        scanner = _import_scanner()
-        db, pos = self._make_db_with_position("predictit", market_identifier="8888")
-
-        mock_pi_client = MagicMock()
-        mock_pi_client.fetch_market.return_value = {"status": "Open"}
-
-        scanner._check_settlements(
-            db, None, None,
-            predictit_client=mock_pi_client,
-        )
-
-        positions = db.get_open_positions()
-        assert len(positions) == 1, "PredictIt position should stay open when status is Open"
-        assert positions[0]["id"] == pos["id"]
-
-    def test_predictit_stays_open_when_client_is_none(self):
-        scanner = _import_scanner()
-        db, pos = self._make_db_with_position("predictit", market_identifier="7777")
-
-        scanner._check_settlements(
-            db, None, None,
-            predictit_client=None,
-        )
-
-        positions = db.get_open_positions()
-        assert len(positions) == 1, "PredictIt position should stay open when client is None"
-        assert positions[0]["id"] == pos["id"]
-
-    def test_manifold_stays_open_when_not_resolved(self):
-        scanner = _import_scanner()
-        db, pos = self._make_db_with_position("manifold", market_identifier="mkt_xyz")
-
-        mock_manifold_client = MagicMock()
-        mock_manifold_client.fetch_market.return_value = {"isResolved": False}
-
-        scanner._check_settlements(
-            db, None, None,
-            manifold_client=mock_manifold_client,
-        )
-
-        positions = db.get_open_positions()
-        assert len(positions) == 1, "Manifold position should stay open when isResolved=False"
-
-    def test_predictit_resolved_status(self):
-        scanner = _import_scanner()
-        db, pos = self._make_db_with_position("predictit", market_identifier="5555")
-
-        mock_pi_client = MagicMock()
-        mock_pi_client.fetch_market.return_value = {"status": "Resolved"}
-
-        scanner._check_settlements(
-            db, None, None,
-            predictit_client=mock_pi_client,
-        )
-
-        positions = db.get_open_positions()
-        assert len(positions) == 0, "PredictIt position should be settled after Resolved status"
 
 
 # ============================================================

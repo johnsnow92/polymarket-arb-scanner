@@ -12,14 +12,9 @@ from scans.cross import (
 )
 from scans.kalshi import scan_kalshi_binary, scan_kalshi_multi, _fetch_kalshi_data
 from scans.spread import scan_spread_polymarket, scan_spread_kalshi
-from scans.predictit import scan_predictit_binary, scan_predictit_multi
 from scans.betfair import scan_betfair_backall, scan_betfair_backlay
 from scans.smarkets import scan_smarkets_backall, scan_smarkets_backlay
 from scans.sxbet import scan_sxbet_backall, scan_sxbet_backlay
-from scans.forecastex import scan_forecastex_binary
-from scans.opinion import scan_opinion_binary, scan_opinion_multi
-from scans.drift import scan_drift_binary
-from scans.limitless import scan_limitless_binary
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, capital_efficiency_score
 
 __all__ = [
@@ -31,19 +26,12 @@ __all__ = [
     "scan_kalshi_multi",
     "scan_spread_polymarket",
     "scan_spread_kalshi",
-    "scan_predictit_binary",
-    "scan_predictit_multi",
     "scan_betfair_backall",
     "scan_betfair_backlay",
     "scan_smarkets_backall",
     "scan_smarkets_backlay",
     "scan_sxbet_backall",
     "scan_sxbet_backlay",
-    "scan_forecastex_binary",
-    "scan_opinion_binary",
-    "scan_opinion_multi",
-    "scan_drift_binary",
-    "scan_limitless_binary",
     "_refine_binary_with_clob",
     "_refine_negrisk_with_clob",
     "_refine_cross_with_clob",

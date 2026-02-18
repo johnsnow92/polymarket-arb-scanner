@@ -15,12 +15,8 @@ from fees import (
     net_profit_kalshi_binary,
     net_profit_kalshi_multi,
     net_profit_cross_platform,
-    predictit_fee,
-    net_profit_cross_predictit,
     betfair_commission,
     net_profit_cross_betfair,
-    manifold_fee,
-    net_profit_cross_manifold,
 )
 
 
@@ -258,20 +254,6 @@ class TestNetProfitCrossPlatform:
 
 
 # ---------------------------------------------------------------------------
-# predictit_fee
-# ---------------------------------------------------------------------------
-
-class TestPredictitFee:
-    def test_zero_for_losses(self):
-        assert predictit_fee(-5.0) == 0.0
-        assert predictit_fee(0.0) == 0.0
-
-    def test_ten_percent_for_gains(self):
-        assert predictit_fee(10.0) == pytest.approx(1.0)
-        assert predictit_fee(0.50) == pytest.approx(0.05)
-
-
-# ---------------------------------------------------------------------------
 # betfair_commission
 # ---------------------------------------------------------------------------
 
@@ -286,47 +268,6 @@ class TestBetfairCommission:
     def test_configurable_rate(self):
         assert betfair_commission(10.0, 0.02) == pytest.approx(0.20)
         assert betfair_commission(10.0, 0.10) == pytest.approx(1.00)
-
-
-# ---------------------------------------------------------------------------
-# manifold_fee
-# ---------------------------------------------------------------------------
-
-class TestManifoldFee:
-    def test_always_zero(self):
-        assert manifold_fee(0.0) == 0.0
-        assert manifold_fee(100.0) == 0.0
-        assert manifold_fee(-50.0) == 0.0
-
-
-# ---------------------------------------------------------------------------
-# net_profit_cross_predictit
-# ---------------------------------------------------------------------------
-
-class TestNetProfitCrossPredictit:
-    def test_positive_spread(self):
-        result = net_profit_cross_predictit(0.30, 0.30, "yes", "no")
-        assert result["gross_spread"] == pytest.approx(0.40)
-        assert result["net_profit"] > 0
-
-    def test_negative_spread(self):
-        result = net_profit_cross_predictit(0.60, 0.50, "yes", "no")
-        assert result["gross_spread"] < 0
-        assert result["fees"] == 0
-
-    def test_worst_case_fees(self):
-        from config import POLYGON_GAS_ESTIMATE
-        poly_price, pi_price = 0.30, 0.30
-        poly_win_fee = polymarket_fee(poly_price, 1.0)
-        pi_win_fee = predictit_fee(1.0 - pi_price)
-        expected_worst = max(poly_win_fee, pi_win_fee) + POLYGON_GAS_ESTIMATE
-        result = net_profit_cross_predictit(poly_price, pi_price, "yes", "no")
-        assert result["fees"] == pytest.approx(expected_worst)
-
-    def test_no_spread(self):
-        result = net_profit_cross_predictit(0.50, 0.50, "yes", "no")
-        assert result["gross_spread"] == pytest.approx(0.0)
-        assert result["net_profit"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -358,36 +299,6 @@ class TestNetProfitCrossBetfair:
         result_custom = net_profit_cross_betfair(0.30, 0.30, "yes", "no", commission_rate=0.02)
         # Lower commission rate should yield higher net profit
         assert result_custom["net_profit"] >= result_default["net_profit"]
-
-
-# ---------------------------------------------------------------------------
-# net_profit_cross_manifold
-# ---------------------------------------------------------------------------
-
-class TestNetProfitCrossManifold:
-    def test_positive_spread(self):
-        result = net_profit_cross_manifold(0.30, 0.30, "yes", "no")
-        assert result["gross_spread"] == pytest.approx(0.40)
-        assert result["net_profit"] > 0
-
-    def test_negative_spread(self):
-        result = net_profit_cross_manifold(0.60, 0.50, "yes", "no")
-        assert result["gross_spread"] < 0
-        assert result["fees"] == 0
-
-    def test_only_pm_fees_apply(self):
-        from config import POLYGON_GAS_ESTIMATE
-        # When Manifold wins, no fees at all; when PM wins, only PM 2% fee
-        poly_price, mf_price = 0.30, 0.30
-        pm_fee = polymarket_fee(poly_price, 1.0)
-        result = net_profit_cross_manifold(poly_price, mf_price, "yes", "no")
-        # worst case is PM winning -> pm_fee vs manifold winning -> 0, plus gas
-        assert result["fees"] == pytest.approx(pm_fee + POLYGON_GAS_ESTIMATE)
-
-    def test_no_spread(self):
-        result = net_profit_cross_manifold(0.50, 0.50, "yes", "no")
-        assert result["gross_spread"] == pytest.approx(0.0)
-        assert result["net_profit"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -424,22 +335,10 @@ class TestGasFeeDeduction:
         # Gas should be included in fees
         assert result["fees"] >= POLYGON_GAS_ESTIMATE
 
-    def test_cross_predictit_includes_gas(self):
-        """Cross-platform (PM vs PredictIt) should subtract 1x gas."""
-        from config import POLYGON_GAS_ESTIMATE
-        result = net_profit_cross_predictit(0.30, 0.30, "yes", "no")
-        assert result["fees"] >= POLYGON_GAS_ESTIMATE
-
     def test_cross_betfair_includes_gas(self):
         """Cross-platform (PM vs Betfair) should subtract 1x gas."""
         from config import POLYGON_GAS_ESTIMATE
         result = net_profit_cross_betfair(0.30, 0.30, "yes", "no")
-        assert result["fees"] >= POLYGON_GAS_ESTIMATE
-
-    def test_cross_manifold_includes_gas(self):
-        """Cross-platform (PM vs Manifold) should subtract 1x gas."""
-        from config import POLYGON_GAS_ESTIMATE
-        result = net_profit_cross_manifold(0.30, 0.30, "yes", "no")
         assert result["fees"] >= POLYGON_GAS_ESTIMATE
 
     def test_zero_gas_preserves_old_behavior(self):

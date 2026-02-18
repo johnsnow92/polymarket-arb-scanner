@@ -22,15 +22,9 @@ from polymarket_api import (
     PolymarketTrader,
 )
 from kalshi_api import KalshiClient
-from predictit_api import PredictItClient
 from betfair_api import BetfairClient
-from manifold_api import ManifoldClient
 from smarkets_api import SmarketsClient
 from sxbet_api import SXBetClient
-from forecastex_api import ForecastExClient
-from opinion_api import OpinionClient
-from drift_api import DriftClient
-from limitless_api import LimitlessClient
 from db import TradeDB
 from risk_manager import RiskManager
 from executor import ArbitrageExecutor
@@ -49,19 +43,12 @@ from scans import (
     capital_efficiency_score,
     scan_spread_polymarket,
     scan_spread_kalshi,
-    scan_predictit_binary,
-    scan_predictit_multi,
     scan_betfair_backall,
     scan_betfair_backlay,
     scan_smarkets_backall,
     scan_smarkets_backlay,
     scan_sxbet_backall,
     scan_sxbet_backlay,
-    scan_forecastex_binary,
-    scan_opinion_binary,
-    scan_opinion_multi,
-    scan_drift_binary,
-    scan_limitless_binary,
 )
 from config import (
     DEFAULT_MIN_PROFIT,
@@ -104,8 +91,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
 
     fetch_futures = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
-        if args.mode not in ("kalshi", "predictit", "betfair",
-                              "smarkets", "sxbet", "forecastex", "opinion", "drift", "limitless"):
+        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet"):
             fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
         if args.mode in ("all", "negrisk"):
             fetch_futures["poly_events"] = pool.submit(fetch_events)
@@ -152,8 +138,6 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                 logger.error("Scan %s failed: %s", key, e)
 
     # Stage 3: Cross-platform scans (need data from stages above)
-    # Pass pre-loaded Kalshi events to avoid duplicate fetch
-    # kalshi_data is a tuple (events, markets_by_event, event_titles) from _fetch_kalshi_data
     kalshi_events_preloaded = kalshi_data[0] if kalshi_data else None
 
     if args.mode in ("all", "cross"):
@@ -173,9 +157,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         for name, client in extra_clients.items():
             if client:
                 logger.info("Fetching %s markets...", name)
-                if name == "predictit":
-                    markets = client.fetch_all_markets()
-                elif name == "betfair":
+                if name == "betfair":
                     events = client.list_events()
                     markets = []
                     for ev in events[:50]:  # Limit for performance
@@ -184,9 +166,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                         if ev_id:
                             mkt_list = client.list_markets(ev_id)
                             markets.extend(mkt_list)
-                elif name == "manifold":
-                    markets = client.fetch_markets(limit=500)
-                elif name in ("smarkets", "sxbet", "forecastex", "opinion", "drift", "limitless"):
+                elif name in ("smarkets", "sxbet"):
                     markets = client.fetch_all_markets()
                 else:
                     markets = []
@@ -201,7 +181,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         all_opportunities.extend(cross_all_opps)
         logger.info("Found %d cross-all opportunities.", len(cross_all_opps))
 
-    # Stage 4: New platform scans (spread, predictit, betfair)
+    # Stage 4: Platform-specific scans
     if args.mode in ("all", "spread"):
         logger.info("--- Spread Scan ---")
         if poly_markets:
@@ -212,17 +192,6 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             spread_k = scan_spread_kalshi(kalshi_client, min_profit, kalshi_data=kalshi_data)
             all_opportunities.extend(spread_k)
             logger.info("Found %d Kalshi spread opportunities.", len(spread_k))
-
-    if args.mode in ("all", "predictit"):
-        predictit = extra_clients.get("predictit")
-        if predictit:
-            logger.info("--- PredictIt Scan ---")
-            pi_binary = scan_predictit_binary(predictit, min_profit)
-            all_opportunities.extend(pi_binary)
-            logger.info("Found %d PredictIt binary opportunities.", len(pi_binary))
-            pi_multi = scan_predictit_multi(predictit, min_profit)
-            all_opportunities.extend(pi_multi)
-            logger.info("Found %d PredictIt multi opportunities.", len(pi_multi))
 
     if args.mode in ("all", "betfair"):
         betfair = extra_clients.get("betfair")
@@ -256,41 +225,6 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             sx_backlay = scan_sxbet_backlay(sxbet, min_profit)
             all_opportunities.extend(sx_backlay)
             logger.info("Found %d SX Bet back-lay opportunities.", len(sx_backlay))
-
-    if args.mode in ("all", "forecastex"):
-        forecastex = extra_clients.get("forecastex")
-        if forecastex:
-            logger.info("--- ForecastEx Scan ---")
-            fx_binary = scan_forecastex_binary(forecastex, min_profit)
-            all_opportunities.extend(fx_binary)
-            logger.info("Found %d ForecastEx binary opportunities.", len(fx_binary))
-
-    if args.mode in ("all", "opinion"):
-        opinion = extra_clients.get("opinion")
-        if opinion:
-            logger.info("--- Opinion Scan ---")
-            op_binary = scan_opinion_binary(opinion, min_profit)
-            all_opportunities.extend(op_binary)
-            logger.info("Found %d Opinion binary opportunities.", len(op_binary))
-            op_multi = scan_opinion_multi(opinion, min_profit)
-            all_opportunities.extend(op_multi)
-            logger.info("Found %d Opinion multi opportunities.", len(op_multi))
-
-    if args.mode in ("all", "drift"):
-        drift = extra_clients.get("drift")
-        if drift:
-            logger.info("--- Drift Scan ---")
-            dr_binary = scan_drift_binary(drift, min_profit)
-            all_opportunities.extend(dr_binary)
-            logger.info("Found %d Drift binary opportunities.", len(dr_binary))
-
-    if args.mode in ("all", "limitless"):
-        limitless = extra_clients.get("limitless")
-        if limitless:
-            logger.info("--- Limitless Scan ---")
-            ll_binary = scan_limitless_binary(limitless, min_profit)
-            all_opportunities.extend(ll_binary)
-            logger.info("Found %d Limitless binary opportunities.", len(ll_binary))
 
     # Filter by minimum depth if specified
     if args.min_depth > 0:
@@ -337,10 +271,9 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
-                 "spread", "predictit", "betfair",
-                 "smarkets", "sxbet", "forecastex", "opinion", "drift", "limitless"],
+                 "spread", "betfair", "smarkets", "sxbet"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, predictit, betfair, smarkets, sxbet, forecastex, opinion, drift, limitless",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet",
     )
     parser.add_argument(
         "--min-profit",
@@ -489,19 +422,11 @@ def main():
             logger.warning("Polymarket trader init failed: %s", e)
 
     # Initialize additional platform clients
-    predictit_client = None
     betfair_client = None
-    manifold_client = None
-
-    if args.mode in ("all", "cross-all", "predictit"):
-        # PredictIt (public data always available)
-        predictit_client = PredictItClient()
-        pi_email = os.getenv("PREDICTIT_EMAIL")
-        if pi_email:
-            predictit_client.login()
+    smarkets_client = None
+    sxbet_client = None
 
     if args.mode in ("all", "cross-all", "betfair"):
-        # Betfair
         bf_api_key = os.getenv("BETFAIR_API_KEY")
         bf_user = os.getenv("BETFAIR_USERNAME")
         if bf_api_key and bf_user:
@@ -511,18 +436,6 @@ def main():
                 logger.warning("Betfair auth failed.")
             else:
                 logger.info("Betfair authenticated successfully.")
-
-    if args.mode in ("all", "cross-all"):
-        # Manifold (public data, no auth needed for reading)
-        manifold_client = ManifoldClient()
-
-    # Initialize new platform clients
-    smarkets_client = None
-    sxbet_client = None
-    forecastex_client = None
-    opinion_client = None
-    drift_client = None
-    limitless_client = None
 
     if args.mode in ("all", "cross-all", "smarkets"):
         sm_api_key = os.getenv("SMARKETS_API_KEY")
@@ -544,28 +457,6 @@ def main():
             else:
                 logger.info("SX Bet authenticated successfully.")
 
-    if args.mode in ("all", "cross-all", "forecastex"):
-        ibkr_user = os.getenv("IBKR_USERNAME")
-        if ibkr_user:
-            forecastex_client = ForecastExClient()
-            if not forecastex_client.login():
-                forecastex_client = None
-                logger.warning("ForecastEx auth failed.")
-            else:
-                logger.info("ForecastEx authenticated successfully.")
-
-    if args.mode in ("all", "cross-all", "opinion"):
-        # Opinion: public data available without auth
-        opinion_client = OpinionClient()
-
-    if args.mode in ("all", "cross-all", "drift"):
-        # Drift: public data available without auth
-        drift_client = DriftClient()
-
-    if args.mode in ("all", "cross-all", "limitless"):
-        # Limitless: public data available without auth
-        limitless_client = LimitlessClient()
-
     # Price cache updated by WebSocket feeds (shared with executor for revalidation)
     price_cache = {}
 
@@ -578,15 +469,9 @@ def main():
         exec_mode=exec_mode,
         max_trade_size=max_trade,
         price_cache=price_cache,
-        predictit_client=predictit_client,
         betfair_client=betfair_client,
-        manifold_client=manifold_client,
         smarkets_client=smarkets_client,
         sxbet_client=sxbet_client,
-        forecastex_client=forecastex_client,
-        opinion_client=opinion_client,
-        drift_client=drift_client,
-        limitless_client=limitless_client,
         revalidation_adaptive=CONFIG_REVALIDATION_ADAPTIVE,
         revalidation_min_floor=CONFIG_REVALIDATION_MIN_FLOOR,
         dynamic_sizing=CONFIG_DYNAMIC_SIZING,
@@ -594,15 +479,9 @@ def main():
     )
 
     extra_clients = {
-        "predictit": predictit_client,
         "betfair": betfair_client,
-        "manifold": manifold_client,
         "smarkets": smarkets_client,
         "sxbet": sxbet_client,
-        "forecastex": forecastex_client,
-        "opinion": opinion_client,
-        "drift": drift_client,
-        "limitless": limitless_client,
     }
 
     # Initialize webhook notifier

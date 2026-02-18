@@ -12,7 +12,7 @@ from risk_manager import RiskManager
 
 
 # We need to mock the imports that executor.py uses before importing it
-# because some modules (predictit_api, betfair_api, manifold_api) may not exist.
+# because some modules (betfair_api, etc.) may not exist.
 # Patch them in sys.modules before importing executor.
 
 @pytest.fixture(autouse=True)
@@ -20,8 +20,8 @@ def mock_external_modules():
     """Mock external API modules that may not be installed."""
     mock_modules = {}
     for mod_name in [
-        "polymarket_api", "kalshi_api", "predictit_api",
-        "betfair_api", "manifold_api",
+        "polymarket_api", "kalshi_api",
+        "betfair_api", "smarkets_api", "sxbet_api",
     ]:
         if mod_name not in sys.modules:
             mock_modules[mod_name] = MagicMock()
@@ -565,22 +565,22 @@ class TestCrossRevalidationStrategy:
 # ---------------------------------------------------------------------------
 
 class TestBuildCrossAllLegs:
-    def test_polymarket_predictit_legs(self, executor):
-        """Polymarket + PredictIt: should produce 2 legs with correct platforms."""
+    def test_polymarket_smarkets_legs(self, executor):
+        """Polymarket + Smarkets: should produce 2 legs with correct platforms."""
         opp = {
             "type": "Cross",
-            "prices": "polymarket_Y=0.400 predictit_N=0.300",
+            "prices": "polymarket_Y=0.400 smarkets_N=0.300",
             "_token_ids": ["tok_yes", "tok_no"],
             "_platform_a": "polymarket",
-            "_platform_b": "predictit",
-            "_contract_id": "contract_123",
+            "_platform_b": "smarkets",
+            "_sm_market_id": "sm_123",
         }
         legs = executor._build_cross_all_legs(opp, 5.0)
         assert len(legs) == 2
         assert legs[0]["platform"] == "polymarket"
         assert legs[0]["price"] == pytest.approx(0.400)
         assert legs[0]["_token_id"] == "tok_yes"
-        assert legs[1]["platform"] == "predictit"
+        assert legs[1]["platform"] == "smarkets"
         assert legs[1]["price"] == pytest.approx(0.300)
         assert legs[1]["side"] == "no"
 
@@ -604,15 +604,15 @@ class TestBuildCrossAllLegs:
         assert legs[1]["_market_id"] == "1.234567"
         assert legs[1]["_selection_id"] == 98765
 
-    def test_polymarket_manifold_legs(self, executor):
-        """Polymarket + Manifold: should use _manifold_market_id."""
+    def test_polymarket_sxbet_legs(self, executor):
+        """Polymarket + SX Bet: should use _sx_market_hash."""
         opp = {
             "type": "Cross",
-            "prices": "polymarket_N=0.350 manifold_Y=0.400",
+            "prices": "polymarket_N=0.350 sxbet_Y=0.400",
             "_token_ids": ["tok_yes", "tok_no"],
             "_platform_a": "polymarket",
-            "_platform_b": "manifold",
-            "_manifold_market_id": "manifold_abc",
+            "_platform_b": "sxbet",
+            "_sx_market_hash": "0xabc123",
         }
         legs = executor._build_cross_all_legs(opp, 5.0)
         assert len(legs) == 2
@@ -620,9 +620,9 @@ class TestBuildCrossAllLegs:
         assert legs[0]["price"] == pytest.approx(0.350)
         assert legs[0]["token"] == "no"
         assert legs[0]["_token_id"] == "tok_no"
-        assert legs[1]["platform"] == "manifold"
+        assert legs[1]["platform"] == "sxbet"
         assert legs[1]["price"] == pytest.approx(0.400)
-        assert legs[1]["_market_id"] == "manifold_abc"
+        assert legs[1]["_market_hash"] == "0xabc123"
 
     def test_malformed_prices_returns_empty(self, executor):
         """Malformed prices string should return empty legs."""
@@ -631,7 +631,7 @@ class TestBuildCrossAllLegs:
             "prices": "garbage data here with no equals",
             "_token_ids": ["tok_yes", "tok_no"],
             "_platform_a": "polymarket",
-            "_platform_b": "predictit",
+            "_platform_b": "smarkets",
         }
         legs = executor._build_cross_all_legs(opp, 5.0)
         assert legs == []
@@ -640,7 +640,7 @@ class TestBuildCrossAllLegs:
         """Without _platform_a/_platform_b, _build_legs falls through to standard Cross handler."""
         opp = {
             "type": "Cross",
-            "prices": "polymarket_Y=0.400 predictit_N=0.300",
+            "prices": "polymarket_Y=0.400 smarkets_N=0.300",
             "_token_ids": ["tok_yes", "tok_no"],
             # No _platform_a or _platform_b
         }
@@ -655,16 +655,16 @@ class TestBuildCrossAllLegs:
 # ---------------------------------------------------------------------------
 
 class TestFetchBalances:
-    def test_cross_fetches_predictit_balance(self, executor):
-        """Cross-type opp should call get_balance on predictit client."""
-        mock_predictit = MagicMock()
-        mock_predictit.get_balance.return_value = 500.0
-        executor.predictit_client = mock_predictit
+    def test_cross_fetches_smarkets_balance(self, executor):
+        """Cross-type opp should call get_balance on smarkets client."""
+        mock_smarkets = MagicMock()
+        mock_smarkets.get_balance.return_value = 500.0
+        executor.smarkets_client = mock_smarkets
 
         balances = executor._fetch_balances("Cross")
-        assert "predictit" in balances
-        assert balances["predictit"] == 500.0
-        mock_predictit.get_balance.assert_called_once()
+        assert "smarkets" in balances
+        assert balances["smarkets"] == 500.0
+        mock_smarkets.get_balance.assert_called_once()
 
     def test_cross_fetches_betfair_balance(self, executor):
         """Cross-type opp should call get_balance on betfair client."""
@@ -677,46 +677,46 @@ class TestFetchBalances:
         assert balances["betfair"] == 1000.0
         mock_betfair.get_balance.assert_called_once()
 
-    def test_cross_fetches_manifold_balance(self, executor):
-        """Cross-type opp should call get_balance on manifold client."""
-        mock_manifold = MagicMock()
-        mock_manifold.get_balance.return_value = 250.0
-        executor.manifold_client = mock_manifold
+    def test_cross_fetches_sxbet_balance(self, executor):
+        """Cross-type opp should call get_balance on sxbet client."""
+        mock_sxbet = MagicMock()
+        mock_sxbet.get_balance.return_value = 250.0
+        executor.sxbet_client = mock_sxbet
 
         balances = executor._fetch_balances("Cross")
-        assert "manifold" in balances
-        assert balances["manifold"] == 250.0
-        mock_manifold.get_balance.assert_called_once()
+        assert "sxbet" in balances
+        assert balances["sxbet"] == 250.0
+        mock_sxbet.get_balance.assert_called_once()
 
     def test_cross_fetches_all_platform_balances(self, executor):
         """Cross-type should fetch from all available platform clients."""
-        mock_predictit = MagicMock()
-        mock_predictit.get_balance.return_value = 500.0
         mock_betfair = MagicMock()
         mock_betfair.get_balance.return_value = 1000.0
-        mock_manifold = MagicMock()
-        mock_manifold.get_balance.return_value = 250.0
+        mock_smarkets = MagicMock()
+        mock_smarkets.get_balance.return_value = 500.0
+        mock_sxbet = MagicMock()
+        mock_sxbet.get_balance.return_value = 250.0
 
-        executor.predictit_client = mock_predictit
         executor.betfair_client = mock_betfair
-        executor.manifold_client = mock_manifold
+        executor.smarkets_client = mock_smarkets
+        executor.sxbet_client = mock_sxbet
 
         balances = executor._fetch_balances("Cross")
-        assert balances["predictit"] == 500.0
         assert balances["betfair"] == 1000.0
-        assert balances["manifold"] == 250.0
+        assert balances["smarkets"] == 500.0
+        assert balances["sxbet"] == 250.0
 
     def test_non_cross_does_not_fetch_extra_platforms(self, executor):
-        """Non-Cross opp types should not fetch predictit/betfair/manifold balances."""
-        mock_predictit = MagicMock()
-        mock_predictit.get_balance.return_value = 500.0
-        executor.predictit_client = mock_predictit
+        """Non-Cross opp types should not fetch betfair/smarkets/sxbet balances."""
+        mock_betfair = MagicMock()
+        mock_betfair.get_balance.return_value = 500.0
+        executor.betfair_client = mock_betfair
 
         balances = executor._fetch_balances("Binary")
         # Binary only fetches polymarket
-        mock_predictit.get_balance.assert_not_called()
+        mock_betfair.get_balance.assert_not_called()
         if balances:
-            assert "predictit" not in balances
+            assert "betfair" not in balances
 
 
 # ---------------------------------------------------------------------------

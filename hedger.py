@@ -16,26 +16,16 @@ class PartialFillHedger:
         self,
         pm_trader=None,
         kalshi_client=None,
-        predictit_client=None,
         betfair_client=None,
         smarkets_client=None,
         sxbet_client=None,
-        forecastex_client=None,
-        opinion_client=None,
-        drift_client=None,
-        limitless_client=None,
         db: TradeDB = None,
     ):
         self.pm_trader = pm_trader
         self.kalshi_client = kalshi_client
-        self.predictit_client = predictit_client
         self.betfair_client = betfair_client
         self.smarkets_client = smarkets_client
         self.sxbet_client = sxbet_client
-        self.forecastex_client = forecastex_client
-        self.opinion_client = opinion_client
-        self.drift_client = drift_client
-        self.limitless_client = limitless_client
         self.db = db
 
     def queue_hedge(
@@ -103,8 +93,6 @@ class PartialFillHedger:
                 return self._hedge_polymarket(token_id, fill_price, size, max_loss)
             elif platform == "kalshi":
                 return self._hedge_kalshi(token_id, fill_price, size, max_loss, pf.get("side", "yes"))
-            elif platform == "predictit":
-                return self._hedge_predictit(token_id, fill_price, size, max_loss, pf.get("side", "yes"))
             elif platform == "betfair":
                 return self._hedge_betfair(pf, fill_price, size, max_loss)
         except Exception as e:
@@ -156,22 +144,6 @@ class PartialFillHedger:
         count = max(1, int(size / bid)) if bid > 0 else 1
         resp = self.kalshi_client.place_order(ticker=ticker, side=side, action="sell",
                                                count=count, price_dollars=bid)
-        return resp is not None
-
-    def _hedge_predictit(self, contract_id: str, fill_price: float, size: float, max_loss: float, side: str) -> bool:
-        """Sell a PredictIt position."""
-        if not self.predictit_client or not self.predictit_client.authenticated:
-            return False
-        # PredictIt doesn't have a live order book we can query for bid
-        # Use fill_price - max_loss as the sell price floor
-        sell_price = fill_price - max_loss
-        if sell_price <= 0.01:
-            return False
-        quantity = max(1, int(size / fill_price)) if fill_price > 0 else 1
-        resp = self.predictit_client.place_order(
-            contract_id=int(contract_id), side="sell",
-            price=sell_price, quantity=quantity,
-        )
         return resp is not None
 
     def _hedge_betfair(self, pf: dict, fill_price: float, size: float, max_loss: float) -> bool:
