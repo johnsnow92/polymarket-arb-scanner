@@ -16,6 +16,7 @@ from scans.betfair import scan_betfair_backall, scan_betfair_backlay
 from scans.smarkets import scan_smarkets_backall, scan_smarkets_backlay
 from scans.sxbet import scan_sxbet_backall, scan_sxbet_backlay
 from scans.matchbook import scan_matchbook_backall, scan_matchbook_backlay
+from scans.triangular import scan_triangular
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, capital_efficiency_score
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "scan_sxbet_backlay",
     "scan_matchbook_backall",
     "scan_matchbook_backlay",
+    "scan_triangular",
     "_refine_binary_with_clob",
     "_refine_negrisk_with_clob",
     "_refine_cross_with_clob",

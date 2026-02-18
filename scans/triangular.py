@@ -1,0 +1,312 @@
+"""Triangular cross-platform arbitrage scans (3-way mispricings).
+
+For a binary market (YES/NO) on platforms A, B, C:
+- Find the cheapest YES across all 3 platforms
+- Find the cheapest NO across all 3 platforms
+- If cheapest_YES + cheapest_NO < 1.0, guaranteed profit regardless of outcome
+
+This extends 2-way cross-platform arbs by considering all platforms simultaneously.
+The best YES might be on platform A while the best NO is on platform C -- a pair that
+sequential pairwise scanning would miss.
+"""
+
+import logging
+from itertools import combinations
+
+from polymarket_api import parse_outcome_prices
+from matcher import match_cross_platform, _get_title
+from config import FUZZY_MATCH_THRESHOLD
+from fees import net_profit_triangular
+from scans.helpers import filter_dust, _extract_token_ids
+
+logger = logging.getLogger(__name__)
+
+
+def _get_market_prices(market: dict, platform: str, client=None) -> tuple[float | None, float | None]:
+    """Extract YES/NO prices for a market on any platform.
+
+    Args:
+        market: Market dict from the platform API.
+        platform: Platform name (e.g. "polymarket", "kalshi", "betfair").
+        client: Platform client instance (required for non-Polymarket platforms).
+
+    Returns:
+        Tuple of (yes_price, no_price), or (None, None) if unavailable.
+    """
+    if platform == "polymarket":
+        prices = parse_outcome_prices(market)
+        if prices and len(prices) >= 2:
+            return prices[0], prices[1]
+        return None, None
+
+    # All other platforms use client.get_market_price(market) -> (yes, no)
+    if client is not None:
+        try:
+            result = client.get_market_price(market)
+            if result and len(result) == 2:
+                return result[0], result[1]
+        except Exception as exc:
+            logger.debug("Failed to get price from %s: %s", platform, exc)
+
+    return None, None
+
+
+def _group_cross_matches(all_matches: list[dict]) -> dict[str, dict]:
+    """Group pairwise matches into multi-platform groups.
+
+    Takes the output of multiple pairwise ``match_cross_platform()`` calls and
+    groups them so that the same market across 3+ platforms is collected into a
+    single entry.
+
+    Uses a union-find approach: if market X on platform A matches market Y on
+    platform B, and market Y on platform B matches market Z on platform C, then
+    X, Y, Z are all the same market.
+
+    Args:
+        all_matches: List of match dicts from ``match_cross_platform()``.
+
+    Returns:
+        Dict keyed by canonical title, valued by dicts of
+        ``{platform_name: market_dict}``.  Only groups with 3+ platforms are
+        returned.
+    """
+    # parent[key] -> canonical parent key  (union-find)
+    parent: dict[str, str] = {}
+    # key -> (platform, market_dict, title)
+    key_info: dict[str, tuple[str, dict, str]] = {}
+
+    def _make_key(platform: str, market: dict) -> str:
+        """Create a unique key for a (platform, market) pair."""
+        market_id = (
+            market.get("conditionId", "")
+            or market.get("ticker", "")
+            or market.get("event_ticker", "")
+            or market.get("marketHash", "")
+            or market.get("id", "")
+            or _get_title(market)
+        )
+        return f"{platform}::{market_id}"
+
+    def _find(key: str) -> str:
+        while parent.get(key, key) != key:
+            parent[key] = parent.get(parent[key], parent[key])
+            key = parent[key]
+        return key
+
+    def _union(a: str, b: str):
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for match in all_matches:
+        pa = match["platform_a"]
+        pb = match["platform_b"]
+        ma = match["market_a"]
+        mb = match["market_b"]
+
+        key_a = _make_key(pa, ma)
+        key_b = _make_key(pb, mb)
+
+        key_info[key_a] = (pa, ma, match.get("title_a", _get_title(ma)))
+        key_info[key_b] = (pb, mb, match.get("title_b", _get_title(mb)))
+
+        parent.setdefault(key_a, key_a)
+        parent.setdefault(key_b, key_b)
+        _union(key_a, key_b)
+
+    # Collect groups
+    groups: dict[str, dict[str, dict]] = {}
+    group_titles: dict[str, str] = {}
+
+    for key, (platform, market, title) in key_info.items():
+        root = _find(key)
+        if root not in groups:
+            groups[root] = {}
+            group_titles[root] = title
+        groups[root][platform] = market
+
+    # Filter to 3+ platforms
+    return {
+        group_titles[root]: platforms_dict
+        for root, platforms_dict in groups.items()
+        if len(platforms_dict) >= 3
+    }
+
+
+def _attach_exec_metadata(opp: dict, market: dict, platform: str):
+    """Attach platform-specific execution metadata to a triangular opportunity."""
+    if platform == "polymarket":
+        opp["_token_ids"] = _extract_token_ids(market)
+    elif platform == "kalshi":
+        opp["_kalshi_ticker"] = market.get("ticker", "")
+    elif platform == "betfair":
+        opp["_market_id"] = market.get("marketId", "")
+        runners = market.get("runners", [])
+        if runners:
+            opp["_selection_id"] = runners[0].get("selectionId")
+    elif platform == "smarkets":
+        opp["_sm_market_id"] = market.get("id", "")
+    elif platform == "sxbet":
+        opp["_sx_market_hash"] = market.get("marketHash", market.get("id", ""))
+    elif platform == "matchbook":
+        opp["_mb_market_id"] = market.get("id", "")
+        runners = market.get("runners", [])
+        if runners:
+            opp["_mb_runner_id"] = runners[0].get("id")
+
+
+def scan_triangular(
+    platform_markets: dict[str, list],
+    platform_clients: dict[str, object],
+    min_profit: float,
+    min_confidence: str = "LOW",
+) -> list[dict]:
+    """Scan for triangular (3+ platform) arbitrage opportunities.
+
+    For each market that appears on 3+ platforms, finds the cheapest YES
+    and cheapest NO across ALL platforms. If their sum < 1.0, it's a
+    guaranteed profit regardless of outcome.
+
+    This extends the 2-way cross-platform logic by considering all platforms
+    simultaneously rather than in pairs.
+
+    Args:
+        platform_markets: Dict mapping platform name to list of market dicts.
+            Example: {"polymarket": [...], "kalshi": [...], "betfair": [...]}
+        platform_clients: Dict mapping platform name to client instance.
+            Example: {"kalshi": kalshi_client, "betfair": bf_client}
+            Polymarket does not require a client (uses parse_outcome_prices).
+        min_profit: Minimum net profit threshold to include an opportunity.
+        min_confidence: Minimum confidence tier for fuzzy matching.
+
+    Returns:
+        List of opportunity dicts sorted by net_profit descending.
+    """
+    opportunities = []
+
+    # Need at least 3 platforms to find triangular arbs
+    active_platforms = {name: mkts for name, mkts in platform_markets.items() if mkts}
+    platforms = list(active_platforms.keys())
+
+    if len(platforms) < 3:
+        logger.info(
+            "Triangular scan requires 3+ platforms, only %d active: %s. Skipping.",
+            len(platforms),
+            ", ".join(platforms),
+        )
+        return opportunities
+
+    logger.info(
+        "Triangular scan: matching across %d platforms: %s",
+        len(platforms),
+        ", ".join(platforms),
+    )
+
+    # Step 1: Run pairwise matching across all platform pairs
+    all_matches = []
+    for pa, pb in combinations(platforms, 2):
+        markets_a = active_platforms[pa]
+        markets_b = active_platforms[pb]
+        if not markets_a or not markets_b:
+            continue
+
+        logger.debug("Matching %s (%d) vs %s (%d)...", pa, len(markets_a), pb, len(markets_b))
+        matched = match_cross_platform(
+            markets_a,
+            markets_b,
+            pa,
+            pb,
+            threshold=FUZZY_MATCH_THRESHOLD,
+            min_confidence=min_confidence,
+        )
+        all_matches.extend(matched)
+        logger.debug("Found %d matches between %s and %s", len(matched), pa, pb)
+
+    if not all_matches:
+        logger.info("No pairwise matches found across platforms.")
+        return opportunities
+
+    # Step 2: Group into multi-platform groups (3+ platforms)
+    multi_groups = _group_cross_matches(all_matches)
+    logger.info("Found %d markets appearing on 3+ platforms.", len(multi_groups))
+
+    if not multi_groups:
+        return opportunities
+
+    # Step 3: For each multi-platform market, find cheapest YES and NO
+    for market_title, platforms_dict in multi_groups.items():
+        platform_prices = {}
+
+        for platform_name, market in platforms_dict.items():
+            client = platform_clients.get(platform_name)
+            yes_price, no_price = _get_market_prices(market, platform_name, client)
+            if yes_price is not None and no_price is not None:
+                platform_prices[platform_name] = {
+                    "yes": yes_price,
+                    "no": no_price,
+                    "market": market,
+                }
+
+        # Need prices from at least 3 platforms
+        if len(platform_prices) < 3:
+            continue
+
+        # Find cheapest YES and cheapest NO across all platforms
+        best_yes_platform = min(platform_prices, key=lambda p: platform_prices[p]["yes"])
+        best_no_platform = min(platform_prices, key=lambda p: platform_prices[p]["no"])
+
+        best_yes = platform_prices[best_yes_platform]["yes"]
+        best_no = platform_prices[best_no_platform]["no"]
+        total_cost = best_yes + best_no
+
+        # Only profitable if total cost < 1.0
+        if total_cost >= 1.0:
+            continue
+
+        # Calculate net profit with fees
+        result = net_profit_triangular(
+            best_yes,
+            best_no,
+            best_yes_platform,
+            best_no_platform,
+        )
+
+        if result["net_profit"] < min_profit:
+            continue
+
+        net_profit = result["net_profit"]
+        net_roi = (net_profit / total_cost * 100) if total_cost > 0 else 0.0
+        platforms_list = sorted(platform_prices.keys())
+
+        opp = {
+            "type": "TriangularCross",
+            "market": market_title[:50],
+            "prices": f"{best_yes_platform}_Y={best_yes:.3f} {best_no_platform}_N={best_no:.3f}",
+            "total_cost": f"${total_cost:.4f}",
+            "gross_spread": f"{result['gross_spread']:.4f}",
+            "fees": f"${result['fees']:.4f}",
+            "net_profit": net_profit,
+            "net_roi": f"{net_roi:.2f}%",
+            "confidence": min_confidence,
+            "_platform_a": best_yes_platform,
+            "_platform_b": best_no_platform,
+            "_platforms_checked": platforms_list,
+            "_clob_depth": 0,
+        }
+
+        # Attach execution metadata for the YES-side platform
+        yes_market = platform_prices[best_yes_platform]["market"]
+        _attach_exec_metadata(opp, yes_market, best_yes_platform)
+
+        # Attach execution metadata for the NO-side platform (suffix to avoid key collisions)
+        no_market = platform_prices[best_no_platform]["market"]
+        _attach_exec_metadata(opp, no_market, best_no_platform)
+
+        opportunities.append(opp)
+
+    # Filter dust and sort by net_profit descending
+    opportunities = filter_dust(opportunities)
+    opportunities.sort(key=lambda o: o.get("net_profit", 0), reverse=True)
+
+    logger.info("Triangular scan complete: %d opportunities found.", len(opportunities))
+    return opportunities

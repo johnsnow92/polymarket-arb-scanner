@@ -45,6 +45,7 @@ from scans import (
     scan_sxbet_backlay,
     scan_matchbook_backall,
     scan_matchbook_backlay,
+    scan_triangular,
     _fetch_kalshi_data,
     capital_efficiency_score,
 )
@@ -309,7 +310,8 @@ def _get_market_lock(market: str) -> threading.Lock:
 
 def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                    kalshi_private_key_path, executor, db, price_cache,
-                   extra_clients=None, notifier=None, pm_trader=None):
+                   extra_clients=None, notifier=None, pm_trader=None,
+                   event_monitor=None):
     """Continuous mode: periodic re-scans with WebSocket price feeds."""
     extra_clients = extra_clients or {}
     rescan_interval = getattr(args, 'interval', None) or CONFIG_RESCAN_INTERVAL
@@ -405,7 +407,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
                 fetch_futures = {}
                 with ThreadPoolExecutor(max_workers=3) as pool:
-                    if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook"):
+                    if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "triangular"):
                         fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
                     if args.mode in ("all", "negrisk"):
                         fetch_futures["poly_events"] = pool.submit(fetch_events)
@@ -529,6 +531,52 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         all_opportunities.extend(mb_backall)
                         mb_backlay = scan_matchbook_backlay(matchbook, min_profit)
                         all_opportunities.extend(mb_backlay)
+
+                if args.mode in ("all", "event") and event_monitor:
+                    platform_markets_for_event = {}
+                    if poly_markets:
+                        platform_markets_for_event["polymarket"] = poly_markets
+                    if kalshi_data and kalshi_data[0]:
+                        platform_markets_for_event["kalshi"] = kalshi_data[0]
+                    if platform_markets_for_event:
+                        event_opps = event_monitor.scan_event_divergences(
+                            platform_markets_for_event, min_profit=min_profit)
+                        all_opportunities.extend(event_opps)
+
+                if args.mode in ("all", "triangular"):
+                    platform_markets_for_tri = {}
+                    platform_clients_for_tri = {}
+                    if poly_markets:
+                        platform_markets_for_tri["polymarket"] = poly_markets
+                    if kalshi_data and kalshi_data[0]:
+                        platform_markets_for_tri["kalshi"] = kalshi_data[0]
+                        platform_clients_for_tri["kalshi"] = kalshi_client
+                    for name, client in extra_clients.items():
+                        if client:
+                            try:
+                                if name == "betfair":
+                                    events = client.list_events()
+                                    markets = []
+                                    for ev in events[:50]:
+                                        ev_data = ev.get("event", {})
+                                        ev_id = ev_data.get("id", "")
+                                        if ev_id:
+                                            mkt_list = client.list_markets(ev_id)
+                                            markets.extend(mkt_list)
+                                elif name in ("smarkets", "sxbet", "matchbook"):
+                                    markets = client.fetch_all_markets()
+                                else:
+                                    markets = []
+                                if markets:
+                                    platform_markets_for_tri[name] = markets
+                                    platform_clients_for_tri[name] = client
+                            except Exception as e:
+                                logger.warning("Triangular: failed to fetch %s: %s", name, e)
+                    tri_opps = scan_triangular(
+                        platform_markets_for_tri, platform_clients_for_tri, min_profit,
+                        min_confidence=args.min_confidence,
+                    )
+                    all_opportunities.extend(tri_opps)
 
                 # Apply filters
                 if args.min_depth > 0:

@@ -28,6 +28,7 @@ from sxbet_api import SXBetClient
 from matchbook_api import MatchbookClient
 from metaculus_api import MetaculusClient
 from gas_monitor import GasMonitor
+from event_monitor import EventMonitor
 from db import TradeDB
 from risk_manager import RiskManager
 from executor import ArbitrageExecutor
@@ -54,6 +55,7 @@ from scans import (
     scan_sxbet_backlay,
     scan_matchbook_backall,
     scan_matchbook_backlay,
+    scan_triangular,
 )
 from config import (
     DEFAULT_MIN_PROFIT,
@@ -77,6 +79,8 @@ from config import (
     POLYGON_RPC_URL as CONFIG_POLYGON_RPC_URL,
     DYNAMIC_FEE_ENABLED as CONFIG_DYNAMIC_FEE,
     GAS_PRICE_CACHE_TTL as CONFIG_GAS_CACHE_TTL,
+    EVENT_DIVERGENCE_THRESHOLD as CONFIG_EVENT_DIVERGENCE,
+    EVENT_MONITOR_ENABLED as CONFIG_EVENT_MONITOR,
 )
 
 # Load .env from project dir first, then ~/.claude/.env as fallback
@@ -85,7 +89,7 @@ load_dotenv(os.path.expanduser("~/.claude/.env"))
 
 
 def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=None,
-                 notifier=None):
+                 notifier=None, event_monitor=None):
     """One-shot scan mode with parallel data fetching and optional execution."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -99,7 +103,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
 
     fetch_futures = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
-        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook"):
+        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "triangular"):
             fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
         if args.mode in ("all", "negrisk"):
             fetch_futures["poly_events"] = pool.submit(fetch_events)
@@ -245,6 +249,56 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             all_opportunities.extend(mb_backlay)
             logger.info("Found %d Matchbook back-lay opportunities.", len(mb_backlay))
 
+    if args.mode in ("all", "event") and event_monitor:
+        logger.info("--- Event Divergence Scan ---")
+        platform_markets_for_event = {}
+        if poly_markets:
+            platform_markets_for_event["polymarket"] = poly_markets
+        if kalshi_data and kalshi_data[0]:
+            platform_markets_for_event["kalshi"] = kalshi_data[0]
+        if platform_markets_for_event:
+            event_opps = event_monitor.scan_event_divergences(
+                platform_markets_for_event, min_profit=min_profit)
+            all_opportunities.extend(event_opps)
+            logger.info("Found %d event divergence opportunities.", len(event_opps))
+
+    if args.mode in ("all", "triangular"):
+        logger.info("--- Triangular Cross-Platform Scan ---")
+        platform_markets_for_tri = {}
+        platform_clients_for_tri = {}
+        if poly_markets:
+            platform_markets_for_tri["polymarket"] = poly_markets
+        if kalshi_data and kalshi_data[0]:
+            platform_markets_for_tri["kalshi"] = kalshi_data[0]
+            platform_clients_for_tri["kalshi"] = kalshi_client
+        for name, client in extra_clients.items():
+            if client:
+                try:
+                    if name == "betfair":
+                        events = client.list_events()
+                        markets = []
+                        for ev in events[:50]:
+                            ev_data = ev.get("event", {})
+                            ev_id = ev_data.get("id", "")
+                            if ev_id:
+                                mkt_list = client.list_markets(ev_id)
+                                markets.extend(mkt_list)
+                    elif name in ("smarkets", "sxbet", "matchbook"):
+                        markets = client.fetch_all_markets()
+                    else:
+                        markets = []
+                    if markets:
+                        platform_markets_for_tri[name] = markets
+                        platform_clients_for_tri[name] = client
+                except Exception as e:
+                    logger.warning("Triangular: failed to fetch %s markets: %s", name, e)
+        tri_opps = scan_triangular(
+            platform_markets_for_tri, platform_clients_for_tri, min_profit,
+            min_confidence=args.min_confidence,
+        )
+        all_opportunities.extend(tri_opps)
+        logger.info("Found %d triangular opportunities.", len(tri_opps))
+
     # Filter by minimum depth if specified
     if args.min_depth > 0:
         before = len(all_opportunities)
@@ -290,9 +344,10 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
-                 "spread", "betfair", "smarkets", "sxbet", "matchbook"],
+                 "spread", "betfair", "smarkets", "sxbet", "matchbook",
+                 "event", "triangular"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, event, triangular",
     )
     parser.add_argument(
         "--min-profit",
@@ -507,6 +562,15 @@ def main():
         )
         logger.info("Dynamic fee arbitrage enabled (GasMonitor active).")
 
+    # Initialize EventMonitor for Metaculus divergence signals
+    event_monitor = None
+    if CONFIG_EVENT_MONITOR and metaculus_client:
+        event_monitor = EventMonitor(
+            metaculus_client=metaculus_client,
+            divergence_threshold=CONFIG_EVENT_DIVERGENCE,
+        )
+        logger.info("Event-driven speed trading enabled (EventMonitor active).")
+
     # Price cache updated by WebSocket feeds (shared with executor for revalidation)
     price_cache = {}
 
@@ -551,10 +615,11 @@ def main():
     if args.continuous:
         run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                        kalshi_private_key_path, executor, db, price_cache,
-                       extra_clients, notifier=notifier, pm_trader=pm_trader)
+                       extra_clients, notifier=notifier, pm_trader=pm_trader,
+                       event_monitor=event_monitor)
     else:
         _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients,
-                     notifier=notifier)
+                     notifier=notifier, event_monitor=event_monitor)
 
     if dashboard_server:
         dashboard_server.shutdown()

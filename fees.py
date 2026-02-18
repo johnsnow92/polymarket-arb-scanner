@@ -509,6 +509,85 @@ def net_profit_cross_matchbook(
     }
 
 
+def net_profit_triangular(
+    yes_price: float,
+    no_price: float,
+    yes_platform: str,
+    no_platform: str,
+) -> dict:
+    """Calculate net profit for a triangular (3+ platform) cross-platform arbitrage.
+
+    Buys YES on yes_platform and NO on no_platform. One position always wins $1.00.
+    Fee calculation picks the worst-case fee scenario for each platform's fee model.
+
+    Args:
+        yes_price: Price of the YES contract on the best-YES platform.
+        no_price: Price of the NO contract on the best-NO platform.
+        yes_platform: Name of the platform where YES is bought.
+        no_platform: Name of the platform where NO is bought.
+
+    Returns:
+        Dict with gross_spread, fees, and net_profit.
+    """
+    total_cost = yes_price + no_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Compute worst-case fees for the YES-side platform
+    yes_fee = _platform_win_fee(yes_price, yes_platform)
+    # Compute worst-case fees for the NO-side platform
+    no_fee = _platform_win_fee(no_price, no_platform)
+
+    # Entry fees (paid regardless of outcome)
+    yes_entry = _platform_entry_fee(yes_price, yes_platform)
+    no_entry = _platform_entry_fee(no_price, no_platform)
+    entry_fees = yes_entry + no_entry
+
+    # If YES wins: YES-side win fee + NO-side entry fee
+    case_yes_wins = yes_fee + entry_fees
+    # If NO wins: NO-side win fee + YES-side entry fee
+    case_no_wins = no_fee + entry_fees
+
+    worst_fees = max(case_yes_wins, case_no_wins)
+
+    # Gas: Polygon gas for any Polymarket leg
+    gas = 0.0
+    if yes_platform == "polymarket" or no_platform == "polymarket":
+        gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+def _platform_win_fee(price: float, platform: str) -> float:
+    """Calculate the winner fee for a platform (fee charged when position pays out $1)."""
+    if platform == "polymarket":
+        return polymarket_fee(price, 1.0)
+    elif platform == "kalshi":
+        # Kalshi taker fee is an entry fee, not a win fee
+        return 0.0
+    elif platform == "betfair":
+        return betfair_commission(1.0 - price)
+    elif platform == "smarkets":
+        return smarkets_commission(1.0 - price)
+    # sxbet, matchbook: 0% commission
+    return 0.0
+
+
+def _platform_entry_fee(price: float, platform: str) -> float:
+    """Calculate the entry fee for a platform (fee charged when placing the trade)."""
+    if platform == "kalshi":
+        return kalshi_taker_fee(price)
+    # Other platforms charge on winnings, not at entry
+    return 0.0
+
+
 def net_profit_cross_sxbet(
     poly_price: float,
     sx_price: float,

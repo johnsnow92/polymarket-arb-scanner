@@ -36,6 +36,7 @@ from scans.betfair import scan_betfair_backall, scan_betfair_backlay  # noqa: F4
 from scans.smarkets import scan_smarkets_backall, scan_smarkets_backlay  # noqa: F401
 from scans.sxbet import scan_sxbet_backall, scan_sxbet_backlay  # noqa: F401
 from scans.matchbook import scan_matchbook_backall, scan_matchbook_backlay  # noqa: F401
+from scans.triangular import scan_triangular  # noqa: F401
 from display import display_results as _display_results  # noqa: F401
 from continuous import check_settlements as _check_settlements, run_continuous as _run_continuous  # noqa: F401
 from cli import main, _run_oneshot  # noqa: F401
