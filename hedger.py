@@ -18,12 +18,24 @@ class PartialFillHedger:
         kalshi_client=None,
         predictit_client=None,
         betfair_client=None,
+        smarkets_client=None,
+        sxbet_client=None,
+        forecastex_client=None,
+        opinion_client=None,
+        drift_client=None,
+        limitless_client=None,
         db: TradeDB = None,
     ):
         self.pm_trader = pm_trader
         self.kalshi_client = kalshi_client
         self.predictit_client = predictit_client
         self.betfair_client = betfair_client
+        self.smarkets_client = smarkets_client
+        self.sxbet_client = sxbet_client
+        self.forecastex_client = forecastex_client
+        self.opinion_client = opinion_client
+        self.drift_client = drift_client
+        self.limitless_client = limitless_client
         self.db = db
 
     def queue_hedge(

@@ -2,7 +2,13 @@
 
 import math
 
-from config import KALSHI_FEE_CAP_CENTS, POLYGON_GAS_ESTIMATE
+from config import (
+    KALSHI_FEE_CAP_CENTS,
+    POLYGON_GAS_ESTIMATE,
+    BNB_GAS_ESTIMATE,
+    SOLANA_GAS_ESTIMATE,
+    BASE_GAS_ESTIMATE,
+)
 
 
 def polymarket_fee(buy_price: float, sell_price: float = 1.0) -> float:
@@ -452,4 +458,421 @@ def net_profit_betfair_backlay(back_price: float, lay_price: float, commission_r
         "gross_spread": gross,
         "fees": fee,
         "net_profit": gross - fee,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Smarkets fee calculations
+# ---------------------------------------------------------------------------
+
+def smarkets_commission(net_winnings: float, commission_rate: float = 0.02) -> float:
+    """Smarkets charges 2% commission on net winnings.
+
+    The rate is fixed at 2% for most users (lower than Betfair's 5% default).
+    """
+    if net_winnings <= 0:
+        return 0.0
+    return net_winnings * commission_rate
+
+
+def net_profit_smarkets_backall(implied_probs: list[float], commission_rate: float = 0.02) -> dict:
+    """Calculate net profit for a Smarkets back-all arbitrage.
+
+    Back all runners. Sum of implied probabilities < 1.0 means under-round book.
+    Exactly one runner wins; commission on net winnings.
+    """
+    total_cost = sum(implied_probs)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    # Winner pays out $1. Commission on net winnings (1 - cost of winning bet).
+    cheapest = min(implied_probs)
+    net_winnings = 1.0 - cheapest
+    fee = smarkets_commission(net_winnings, commission_rate)
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fee,
+        "net_profit": gross_spread - fee,
+    }
+
+
+def net_profit_smarkets_backlay(back_price: float, lay_price: float, commission_rate: float = 0.02) -> dict:
+    """Calculate net profit for a Smarkets back-lay arbitrage on same runner.
+
+    Back at back_price, lay at lay_price. Profit when back < lay (crossed book).
+    back_price and lay_price are in implied probability (0-1) terms.
+    """
+    if lay_price <= back_price:
+        return {"gross_spread": 0, "fees": 0, "net_profit": 0}
+
+    gross = lay_price - back_price
+    fee = smarkets_commission(gross, commission_rate)
+
+    return {
+        "gross_spread": gross,
+        "fees": fee,
+        "net_profit": gross - fee,
+    }
+
+
+def net_profit_cross_smarkets(
+    poly_price: float,
+    sm_price: float,
+    poly_side: str,
+    sm_side: str,
+    commission_rate: float = 0.02,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs Smarkets.
+
+    poly_side/sm_side: 'yes' or 'no' -- what we're buying on each platform.
+    One of the two positions will win $1.00, the other $0.00.
+    """
+    total_cost = poly_price + sm_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Case 1 (Poly wins): PM 2% winner fee + no Smarkets commission (SM side lost)
+    case1_fees = polymarket_fee(poly_price, 1.0)
+
+    # Case 2 (Smarkets wins): Smarkets commission on net winnings + no PM fee
+    sm_win_profit = 1.0 - sm_price
+    case2_fees = smarkets_commission(sm_win_profit, commission_rate)
+
+    # Use worst-case fees + Polygon gas for the PM leg
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# SX Bet fee calculations
+# ---------------------------------------------------------------------------
+
+def net_profit_sxbet_backall(implied_probs: list[float]) -> dict:
+    """Calculate net profit for SX Bet back-all arbitrage.
+
+    SX Bet has 0% commission on API trades -- no commission on winnings.
+    """
+    total_cost = sum(implied_probs)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": 0,
+        "net_profit": gross_spread,
+    }
+
+
+def net_profit_sxbet_backlay(back_price: float, lay_price: float) -> dict:
+    """Calculate net profit for SX Bet back-lay arbitrage. 0% fees."""
+    if lay_price <= back_price:
+        return {"gross_spread": 0, "fees": 0, "net_profit": 0}
+
+    gross = lay_price - back_price
+    return {
+        "gross_spread": gross,
+        "fees": 0,
+        "net_profit": gross,
+    }
+
+
+def net_profit_cross_sxbet(
+    poly_price: float,
+    sx_price: float,
+    poly_side: str,
+    sx_side: str,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs SX Bet.
+
+    poly_side/sx_side: 'yes' or 'no' -- what we're buying on each platform.
+    One of the two positions will win $1.00, the other $0.00.
+    """
+    total_cost = poly_price + sx_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Case 1 (Poly wins): PM 2% winner fee
+    case1_fees = polymarket_fee(poly_price, 1.0)
+    # Case 2 (SX Bet wins): no fees on either side
+    case2_fees = 0.0
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Opinion fee calculations (BNB Chain)
+# ---------------------------------------------------------------------------
+
+def net_profit_opinion_binary(yes_price: float, no_price: float) -> dict:
+    """Calculate net profit for an Opinion binary arbitrage.
+
+    Opinion has ~0% trading fees. Only BNB gas costs.
+    """
+    total_cost = yes_price + no_price
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    gas = BNB_GAS_ESTIMATE * 2  # Two transactions
+    return {
+        "gross_spread": gross_spread,
+        "fees": gas,
+        "net_profit": gross_spread - gas,
+    }
+
+
+def net_profit_opinion_multi(yes_prices: list[float]) -> dict:
+    """Calculate net profit for an Opinion multi-outcome arbitrage."""
+    total_cost = sum(yes_prices)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    gas = BNB_GAS_ESTIMATE * len(yes_prices)
+    return {
+        "gross_spread": gross_spread,
+        "fees": gas,
+        "net_profit": gross_spread - gas,
+    }
+
+
+def net_profit_cross_opinion(
+    poly_price: float,
+    op_price: float,
+    poly_side: str,
+    op_side: str,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs Opinion."""
+    total_cost = poly_price + op_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    case1_fees = polymarket_fee(poly_price, 1.0)
+    case2_fees = 0  # Opinion has no winner fee
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE + BNB_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Drift BET fee calculations (Solana)
+# ---------------------------------------------------------------------------
+
+def net_profit_drift_binary(yes_price: float, no_price: float) -> dict:
+    """Calculate net profit for a Drift BET binary arbitrage.
+
+    Drift has ~0% trading fees. Only SOL gas costs.
+    """
+    total_cost = yes_price + no_price
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    gas = SOLANA_GAS_ESTIMATE * 2
+    return {
+        "gross_spread": gross_spread,
+        "fees": gas,
+        "net_profit": gross_spread - gas,
+    }
+
+
+def net_profit_cross_drift(
+    poly_price: float,
+    drift_price: float,
+    poly_side: str,
+    drift_side: str,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs Drift."""
+    total_cost = poly_price + drift_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    case1_fees = polymarket_fee(poly_price, 1.0)
+    case2_fees = 0
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE + SOLANA_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Limitless fee calculations (Base Chain)
+# ---------------------------------------------------------------------------
+
+def limitless_dynamic_fee(profit: float, days_to_resolution: float = 7.0) -> float:
+    """Limitless dynamic fee: 0.03%-3% based on time to resolution.
+
+    Shorter resolution = lower fee. Longer = higher.
+    Scale: <1 day = 0.03%, 1-7 days = ~0.5%, 7-30 days = ~1.5%, 30+ days = 3%
+    """
+    if profit <= 0:
+        return 0.0
+
+    if days_to_resolution <= 1:
+        rate = 0.0003
+    elif days_to_resolution <= 7:
+        rate = 0.0003 + (days_to_resolution - 1) * (0.005 - 0.0003) / 6
+    elif days_to_resolution <= 30:
+        rate = 0.005 + (days_to_resolution - 7) * (0.015 - 0.005) / 23
+    else:
+        rate = min(0.03, 0.015 + (days_to_resolution - 30) * 0.0005)
+
+    return profit * rate
+
+
+def net_profit_limitless_binary(yes_price: float, no_price: float, days_to_resolution: float = 7.0) -> dict:
+    """Calculate net profit for a Limitless binary arbitrage.
+
+    Limitless has dynamic fees based on days to resolution + Base gas.
+    """
+    total_cost = yes_price + no_price
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    fee = limitless_dynamic_fee(gross_spread, days_to_resolution)
+    gas = BASE_GAS_ESTIMATE * 2
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fee + gas,
+        "net_profit": gross_spread - fee - gas,
+    }
+
+
+def net_profit_cross_limitless(
+    poly_price: float,
+    lim_price: float,
+    poly_side: str,
+    lim_side: str,
+    days_to_resolution: float = 7.0,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs Limitless."""
+    total_cost = poly_price + lim_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    case1_fees = polymarket_fee(poly_price, 1.0)
+    case2_fees = limitless_dynamic_fee(1.0 - lim_price, days_to_resolution)
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE + BASE_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ForecastEx (IBKR) fee calculations
+# ---------------------------------------------------------------------------
+
+def forecastex_commission(num_contracts: int = 2, commission_per_contract: float = 0.01) -> float:
+    """ForecastEx/IBKR commission: flat fee per contract.
+
+    Default $0.01 per contract. Both legs pay commission.
+    """
+    return num_contracts * commission_per_contract
+
+
+def net_profit_forecastex_binary(yes_price: float, no_price: float, commission_per_contract: float = 0.01) -> dict:
+    """Calculate net profit for a ForecastEx binary arbitrage.
+
+    Buy YES + Buy NO (can't sell contracts — must buy opposing side).
+    Both legs pay IBKR commission.
+    """
+    total_cost = yes_price + no_price
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    # Commission on both legs
+    fees = forecastex_commission(2, commission_per_contract)
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fees,
+        "net_profit": gross_spread - fees,
+    }
+
+
+def net_profit_cross_forecastex(
+    poly_price: float,
+    fx_price: float,
+    poly_side: str,
+    fx_side: str,
+    commission_per_contract: float = 0.01,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs ForecastEx."""
+    total_cost = poly_price + fx_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Case 1 (Poly wins): PM 2% winner fee + IBKR commission on FX leg
+    case1_fees = polymarket_fee(poly_price, 1.0) + forecastex_commission(1, commission_per_contract)
+
+    # Case 2 (ForecastEx wins): IBKR commission on FX leg (PM side lost, no PM fee)
+    case2_fees = forecastex_commission(1, commission_per_contract)
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE  # Only PM side has gas
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
     }

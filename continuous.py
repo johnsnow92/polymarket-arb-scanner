@@ -43,6 +43,15 @@ from scans import (
     scan_predictit_multi,
     scan_betfair_backall,
     scan_betfair_backlay,
+    scan_smarkets_backall,
+    scan_smarkets_backlay,
+    scan_sxbet_backall,
+    scan_sxbet_backlay,
+    scan_forecastex_binary,
+    scan_opinion_binary,
+    scan_opinion_multi,
+    scan_drift_binary,
+    scan_limitless_binary,
     _fetch_kalshi_data,
     capital_efficiency_score,
 )
@@ -143,6 +152,12 @@ def check_settlements(
     predictit_client=None,
     betfair_client=None,
     manifold_client=None,
+    smarkets_client=None,
+    sxbet_client=None,
+    forecastex_client=None,
+    opinion_client=None,
+    drift_client=None,
+    limitless_client=None,
 ):
     """Check open positions for settlement and update P&L."""
     open_positions = db.get_open_positions()
@@ -217,6 +232,60 @@ def check_settlements(
                         settled += 1
                 except Exception as e:
                     logger.warning("Manifold settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "smarkets" and smarkets_client:
+                try:
+                    market_data = smarkets_client.get_market_status(market_id) if hasattr(smarkets_client, "get_market_status") else None
+                    if market_data and market_data.get("state") in ("settled", "closed"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("Smarkets settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "sxbet" and sxbet_client:
+                try:
+                    market_data = sxbet_client.get_market_status(market_id) if hasattr(sxbet_client, "get_market_status") else None
+                    if market_data and market_data.get("status") in ("SETTLED", "CLOSED"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("SX Bet settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "forecastex" and forecastex_client:
+                try:
+                    market_data = forecastex_client.get_market_status(market_id) if hasattr(forecastex_client, "get_market_status") else None
+                    if market_data and market_data.get("status") in ("settled", "expired"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("ForecastEx settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "opinion" and opinion_client:
+                try:
+                    market_data = opinion_client.get_market_status(market_id) if hasattr(opinion_client, "get_market_status") else None
+                    if market_data and market_data.get("resolved"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("Opinion settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "drift" and drift_client:
+                try:
+                    market_data = drift_client.get_market_status(market_id) if hasattr(drift_client, "get_market_status") else None
+                    if market_data and market_data.get("resolved"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("Drift settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "limitless" and limitless_client:
+                try:
+                    market_data = limitless_client.get_market_status(market_id) if hasattr(limitless_client, "get_market_status") else None
+                    if market_data and market_data.get("resolved"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("Limitless settlement check failed for position %s: %s", pos['id'], e)
         except Exception as e:
             logger.warning("Settlement check failed for position %s: %s", pos['id'], e)
 
@@ -365,6 +434,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         predictit_client=extra_clients.get("predictit"),
         betfair_client=extra_clients.get("betfair"),
         manifold_client=extra_clients.get("manifold"),
+        smarkets_client=extra_clients.get("smarkets"),
+        sxbet_client=extra_clients.get("sxbet"),
+        forecastex_client=extra_clients.get("forecastex"),
+        opinion_client=extra_clients.get("opinion"),
+        drift_client=extra_clients.get("drift"),
+        limitless_client=extra_clients.get("limitless"),
     )
 
     # Initialize WebSocket feed manager
@@ -394,7 +469,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
                 fetch_futures = {}
                 with ThreadPoolExecutor(max_workers=3) as pool:
-                    if args.mode not in ("kalshi", "predictit", "betfair"):
+                    if args.mode not in ("kalshi", "predictit", "betfair",
+                                         "smarkets", "sxbet", "forecastex", "opinion", "drift", "limitless"):
                         fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
                     if args.mode in ("all", "negrisk"):
                         fetch_futures["poly_events"] = pool.submit(fetch_events)
@@ -466,6 +542,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                                             markets.extend(mkt_list)
                                 elif name == "manifold":
                                     markets = client.fetch_markets(limit=500)
+                                elif name in ("smarkets", "sxbet", "forecastex", "opinion", "drift", "limitless"):
+                                    markets = client.fetch_all_markets()
                                 else:
                                     markets = []
                                 if markets:
@@ -505,6 +583,48 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         bf_backlay = scan_betfair_backlay(betfair, min_profit)
                         all_opportunities.extend(bf_backlay)
 
+                if args.mode in ("all", "smarkets"):
+                    smarkets = extra_clients.get("smarkets")
+                    if smarkets:
+                        sm_backall = scan_smarkets_backall(smarkets, min_profit)
+                        all_opportunities.extend(sm_backall)
+                        sm_backlay = scan_smarkets_backlay(smarkets, min_profit)
+                        all_opportunities.extend(sm_backlay)
+
+                if args.mode in ("all", "sxbet"):
+                    sxbet = extra_clients.get("sxbet")
+                    if sxbet:
+                        sx_backall = scan_sxbet_backall(sxbet, min_profit)
+                        all_opportunities.extend(sx_backall)
+                        sx_backlay = scan_sxbet_backlay(sxbet, min_profit)
+                        all_opportunities.extend(sx_backlay)
+
+                if args.mode in ("all", "forecastex"):
+                    forecastex = extra_clients.get("forecastex")
+                    if forecastex:
+                        fx_binary = scan_forecastex_binary(forecastex, min_profit)
+                        all_opportunities.extend(fx_binary)
+
+                if args.mode in ("all", "opinion"):
+                    opinion = extra_clients.get("opinion")
+                    if opinion:
+                        op_binary = scan_opinion_binary(opinion, min_profit)
+                        all_opportunities.extend(op_binary)
+                        op_multi = scan_opinion_multi(opinion, min_profit)
+                        all_opportunities.extend(op_multi)
+
+                if args.mode in ("all", "drift"):
+                    drift = extra_clients.get("drift")
+                    if drift:
+                        dr_binary = scan_drift_binary(drift, min_profit)
+                        all_opportunities.extend(dr_binary)
+
+                if args.mode in ("all", "limitless"):
+                    limitless = extra_clients.get("limitless")
+                    if limitless:
+                        ll_binary = scan_limitless_binary(limitless, min_profit)
+                        all_opportunities.extend(ll_binary)
+
                 # Apply filters
                 if args.min_depth > 0:
                     all_opportunities = [
@@ -541,6 +661,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     predictit_client=extra_clients.get("predictit"),
                     betfair_client=extra_clients.get("betfair"),
                     manifold_client=extra_clients.get("manifold"),
+                    smarkets_client=extra_clients.get("smarkets"),
+                    sxbet_client=extra_clients.get("sxbet"),
+                    forecastex_client=extra_clients.get("forecastex"),
+                    opinion_client=extra_clients.get("opinion"),
+                    drift_client=extra_clients.get("drift"),
+                    limitless_client=extra_clients.get("limitless"),
                 )
 
                 # Execute opportunities sequentially (balance must be rechecked between trades)

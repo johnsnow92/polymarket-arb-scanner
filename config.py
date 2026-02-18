@@ -95,6 +95,9 @@ HEDGE_MAX_SPREAD_LOSS_PCT = float(os.getenv("HEDGE_MAX_SPREAD_LOSS_PCT", "0.15")
 # Betfair commission rate (2-5%, default 5% for new users)
 BETFAIR_COMMISSION_RATE = float(os.getenv("BETFAIR_COMMISSION_RATE", "0.05"))
 
+# Smarkets commission rate (fixed 2% for most users)
+SMARKETS_COMMISSION_RATE = float(os.getenv("SMARKETS_COMMISSION_RATE", "0.02"))
+
 # Proxy configuration
 POLYMARKET_PROXY_URL = os.getenv("POLYMARKET_PROXY_URL")
 KALSHI_PROXY_URL = os.getenv("KALSHI_PROXY_URL")
@@ -110,6 +113,30 @@ BETFAIR_USERNAME = os.getenv("BETFAIR_USERNAME")
 BETFAIR_PASSWORD = os.getenv("BETFAIR_PASSWORD")
 BETFAIR_API_KEY = os.getenv("BETFAIR_API_KEY")
 MANIFOLD_API_KEY = os.getenv("MANIFOLD_API_KEY")
+
+# Smarkets
+SMARKETS_API_KEY = os.getenv("SMARKETS_API_KEY")
+
+# ForecastEx / IBKR
+IBKR_USERNAME = os.getenv("IBKR_USERNAME")
+IBKR_PASSWORD = os.getenv("IBKR_PASSWORD")
+IBKR_COMMISSION = float(os.getenv("IBKR_COMMISSION", "0.01"))
+
+# Opinion (BNB Chain)
+OPINION_PRIVATE_KEY = os.getenv("OPINION_PRIVATE_KEY")
+BNB_GAS_ESTIMATE = float(os.getenv("BNB_GAS_ESTIMATE", "0.01"))
+
+# Drift BET (Solana)
+DRIFT_PRIVATE_KEY = os.getenv("DRIFT_PRIVATE_KEY")
+SOLANA_GAS_ESTIMATE = float(os.getenv("SOLANA_GAS_ESTIMATE", "0.001"))
+
+# Limitless (Base Chain)
+LIMITLESS_PRIVATE_KEY = os.getenv("LIMITLESS_PRIVATE_KEY")
+BASE_GAS_ESTIMATE = float(os.getenv("BASE_GAS_ESTIMATE", "0.001"))
+
+# SX Bet
+SXBET_API_KEY = os.getenv("SXBET_API_KEY")
+SXBET_PRIVATE_KEY = os.getenv("SXBET_PRIVATE_KEY")
 
 # Notifications
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Slack/Discord/generic URL

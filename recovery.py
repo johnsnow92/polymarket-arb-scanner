@@ -18,6 +18,12 @@ def reconcile_orphaned_positions(
     predictit_client=None,
     betfair_client=None,
     manifold_client=None,
+    smarkets_client=None,
+    sxbet_client=None,
+    forecastex_client=None,
+    opinion_client=None,
+    drift_client=None,
+    limitless_client=None,
 ):
     """Check for orphaned positions and pending trades from a previous crash.
 
@@ -33,7 +39,9 @@ def reconcile_orphaned_positions(
     if pending_trades:
         logger.info("Found %d pending trades from previous session — reconciling...", len(pending_trades))
         _reconcile_pending_trades(db, pending_trades, kalshi_client, pm_trader,
-                                 predictit_client, betfair_client, manifold_client)
+                                 predictit_client, betfair_client, manifold_client,
+                                 smarkets_client, sxbet_client, forecastex_client,
+                                 opinion_client, drift_client, limitless_client)
 
     # 2. Check for open positions with no recent activity
     open_positions = db.get_open_positions()
@@ -51,6 +59,12 @@ def _reconcile_pending_trades(
     predictit_client=None,
     betfair_client=None,
     manifold_client=None,
+    smarkets_client=None,
+    sxbet_client=None,
+    forecastex_client=None,
+    opinion_client=None,
+    drift_client=None,
+    limitless_client=None,
 ):
     """Attempt to determine the actual status of pending trades."""
     resolved = 0
@@ -73,6 +87,12 @@ def _reconcile_pending_trades(
             predictit_client=predictit_client,
             betfair_client=betfair_client,
             manifold_client=manifold_client,
+            smarkets_client=smarkets_client,
+            sxbet_client=sxbet_client,
+            forecastex_client=forecastex_client,
+            opinion_client=opinion_client,
+            drift_client=drift_client,
+            limitless_client=limitless_client,
         )
 
         if status == "filled":
@@ -105,6 +125,12 @@ def _check_order_status(
     predictit_client=None,
     betfair_client=None,
     manifold_client=None,
+    smarkets_client=None,
+    sxbet_client=None,
+    forecastex_client=None,
+    opinion_client=None,
+    drift_client=None,
+    limitless_client=None,
 ) -> str:
     """Query a platform API for the status of an order.
 
@@ -162,6 +188,70 @@ def _check_order_status(
             if resp:
                 # Manifold bets are filled immediately
                 return "filled"
+            return "unknown"
+
+        elif platform == "smarkets" and smarkets_client:
+            resp = smarkets_client.get_order_status(order_id)
+            if resp:
+                s = resp.get("state", resp.get("status", ""))
+                if s in ("matched", "settled", "filled"):
+                    return "filled"
+                elif s in ("cancelled", "expired"):
+                    return "canceled"
+                elif s in ("live", "open"):
+                    return "pending"
+            return "unknown"
+
+        elif platform == "sxbet" and sxbet_client:
+            resp = sxbet_client.get_order_status(order_id)
+            if resp:
+                s = resp.get("status", "")
+                if s in ("FILLED", "matched"):
+                    return "filled"
+                elif s in ("CANCELLED", "EXPIRED"):
+                    return "canceled"
+                elif s in ("OPEN", "PENDING"):
+                    return "pending"
+            return "unknown"
+
+        elif platform == "forecastex" and forecastex_client:
+            resp = forecastex_client.get_order_status(order_id)
+            if resp:
+                s = resp.get("status", resp.get("orderStatus", ""))
+                if s in ("Filled", "filled"):
+                    return "filled"
+                elif s in ("Cancelled", "cancelled"):
+                    return "canceled"
+            return "unknown"
+
+        elif platform == "opinion" and opinion_client:
+            resp = opinion_client.get_order_status(order_id)
+            if resp:
+                s = resp.get("status", "")
+                if s in ("filled", "matched"):
+                    return "filled"
+                elif s in ("cancelled", "expired"):
+                    return "canceled"
+            return "unknown"
+
+        elif platform == "drift" and drift_client:
+            resp = drift_client.get_order_status(order_id)
+            if resp:
+                s = resp.get("status", "")
+                if s in ("filled", "matched"):
+                    return "filled"
+                elif s in ("cancelled", "expired"):
+                    return "canceled"
+            return "unknown"
+
+        elif platform == "limitless" and limitless_client:
+            resp = limitless_client.get_order_status(order_id)
+            if resp:
+                s = resp.get("status", "")
+                if s in ("filled", "matched"):
+                    return "filled"
+                elif s in ("cancelled", "expired"):
+                    return "canceled"
             return "unknown"
 
     except Exception as e:

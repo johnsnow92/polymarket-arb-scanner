@@ -12,6 +12,12 @@ from fees import (
     net_profit_cross_predictit,
     net_profit_cross_betfair,
     net_profit_cross_manifold,
+    net_profit_cross_smarkets,
+    net_profit_cross_sxbet,
+    net_profit_cross_forecastex,
+    net_profit_cross_opinion,
+    net_profit_cross_drift,
+    net_profit_cross_limitless,
 )
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
@@ -24,6 +30,12 @@ _CROSS_FEE_FUNCS = {
     ("polymarket", "predictit"): net_profit_cross_predictit,
     ("polymarket", "betfair"): net_profit_cross_betfair,
     ("polymarket", "manifold"): net_profit_cross_manifold,
+    ("polymarket", "smarkets"): net_profit_cross_smarkets,
+    ("polymarket", "sxbet"): net_profit_cross_sxbet,
+    ("polymarket", "forecastex"): net_profit_cross_forecastex,
+    ("polymarket", "opinion"): net_profit_cross_opinion,
+    ("polymarket", "drift"): net_profit_cross_drift,
+    ("polymarket", "limitless"): net_profit_cross_limitless,
 }
 
 
@@ -272,6 +284,18 @@ def _attach_exec_metadata(opp: dict, market: dict, platform: str, suffix: str):
             opp["_selection_id"] = runners[0].get("selectionId")
     elif platform == "manifold":
         opp["_manifold_market_id"] = market.get("id", market.get("slug", ""))
+    elif platform == "smarkets":
+        opp["_sm_market_id"] = market.get("id", "")
+    elif platform == "sxbet":
+        opp["_sx_market_hash"] = market.get("marketHash", market.get("id", ""))
+    elif platform == "forecastex":
+        opp["_fx_market_id"] = str(market.get("id", market.get("contractId", market.get("conid", ""))))
+    elif platform == "opinion":
+        opp["_opinion_market_id"] = market.get("id", market.get("marketId", ""))
+    elif platform == "drift":
+        opp["_drift_market_id"] = market.get("id", market.get("marketId", market.get("publicKey", "")))
+    elif platform == "limitless":
+        opp["_limitless_market_id"] = market.get("id", market.get("marketId", ""))
 
 
 def scan_cross_all(
