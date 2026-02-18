@@ -43,6 +43,8 @@ from scans import (
     scan_smarkets_backlay,
     scan_sxbet_backall,
     scan_sxbet_backlay,
+    scan_matchbook_backall,
+    scan_matchbook_backlay,
     _fetch_kalshi_data,
     capital_efficiency_score,
 )
@@ -143,6 +145,7 @@ def check_settlements(
     betfair_client=None,
     smarkets_client=None,
     sxbet_client=None,
+    matchbook_client=None,
 ):
     """Check open positions for settlement and update P&L."""
     open_positions = db.get_open_positions()
@@ -215,6 +218,15 @@ def check_settlements(
                         settled += 1
                 except Exception as e:
                     logger.warning("SX Bet settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "matchbook" and matchbook_client:
+                try:
+                    market_data = matchbook_client.get_order_status(market_id) if hasattr(matchbook_client, "get_order_status") else None
+                    if market_data and market_data.get("status") in ("settled", "closed"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("Matchbook settlement check failed for position %s: %s", pos['id'], e)
         except Exception as e:
             logger.warning("Settlement check failed for position %s: %s", pos['id'], e)
 
@@ -363,6 +375,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         betfair_client=extra_clients.get("betfair"),
         smarkets_client=extra_clients.get("smarkets"),
         sxbet_client=extra_clients.get("sxbet"),
+        matchbook_client=extra_clients.get("matchbook"),
     )
 
     # Initialize WebSocket feed manager
@@ -392,8 +405,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
                 fetch_futures = {}
                 with ThreadPoolExecutor(max_workers=3) as pool:
-                    if args.mode not in ("kalshi", "predictit", "betfair",
-                                         "smarkets", "sxbet", "forecastex", "opinion", "drift", "limitless"):
+                    if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook"):
                         fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
                     if args.mode in ("all", "negrisk"):
                         fetch_futures["poly_events"] = pool.submit(fetch_events)
@@ -452,9 +464,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     for name, client in extra_clients.items():
                         if client:
                             try:
-                                if name == "predictit":
-                                    markets = client.fetch_all_markets()
-                                elif name == "betfair":
+                                if name == "betfair":
                                     events = client.list_events()
                                     markets = []
                                     for ev in events[:50]:
@@ -463,9 +473,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                                         if ev_id:
                                             mkt_list = client.list_markets(ev_id)
                                             markets.extend(mkt_list)
-                                elif name == "manifold":
-                                    markets = client.fetch_markets(limit=500)
-                                elif name in ("smarkets", "sxbet", "forecastex", "opinion", "drift", "limitless"):
+                                elif name in ("smarkets", "sxbet", "matchbook"):
                                     markets = client.fetch_all_markets()
                                 else:
                                     markets = []
@@ -514,6 +522,14 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         sx_backlay = scan_sxbet_backlay(sxbet, min_profit)
                         all_opportunities.extend(sx_backlay)
 
+                if args.mode in ("all", "matchbook"):
+                    matchbook = extra_clients.get("matchbook")
+                    if matchbook:
+                        mb_backall = scan_matchbook_backall(matchbook, min_profit)
+                        all_opportunities.extend(mb_backall)
+                        mb_backlay = scan_matchbook_backlay(matchbook, min_profit)
+                        all_opportunities.extend(mb_backlay)
+
                 # Apply filters
                 if args.min_depth > 0:
                     all_opportunities = [
@@ -550,6 +566,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     betfair_client=extra_clients.get("betfair"),
                     smarkets_client=extra_clients.get("smarkets"),
                     sxbet_client=extra_clients.get("sxbet"),
+                    matchbook_client=extra_clients.get("matchbook"),
                 )
 
                 # Execute opportunities sequentially (balance must be rechecked between trades)

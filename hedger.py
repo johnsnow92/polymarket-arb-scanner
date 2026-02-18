@@ -19,6 +19,7 @@ class PartialFillHedger:
         betfair_client=None,
         smarkets_client=None,
         sxbet_client=None,
+        matchbook_client=None,
         db: TradeDB = None,
     ):
         self.pm_trader = pm_trader
@@ -26,6 +27,7 @@ class PartialFillHedger:
         self.betfair_client = betfair_client
         self.smarkets_client = smarkets_client
         self.sxbet_client = sxbet_client
+        self.matchbook_client = matchbook_client
         self.db = db
 
     def queue_hedge(

@@ -14,6 +14,7 @@ from kalshi_api import KalshiClient
 from betfair_api import BetfairClient
 from smarkets_api import SmarketsClient
 from sxbet_api import SXBetClient
+from matchbook_api import MatchbookClient
 from fees import (
     net_profit_binary_internal,
     net_profit_negrisk_internal,
@@ -41,6 +42,8 @@ class ArbitrageExecutor:
         betfair_client: BetfairClient | None = None,
         smarkets_client: SmarketsClient | None = None,
         sxbet_client: SXBetClient | None = None,
+        matchbook_client: MatchbookClient | None = None,
+        gas_monitor=None,
         revalidation_adaptive: bool = True,
         revalidation_min_floor: float = 0.003,
         dynamic_sizing: bool = False,
@@ -51,6 +54,8 @@ class ArbitrageExecutor:
         self.betfair_client = betfair_client
         self.smarkets_client = smarkets_client
         self.sxbet_client = sxbet_client
+        self.matchbook_client = matchbook_client
+        self.gas_monitor = gas_monitor
         self.db = db
         self.risk = risk_manager
         self.dry_run = dry_run
@@ -89,6 +94,12 @@ class ArbitrageExecutor:
         if not allowed:
             logger.info(f"{prefix}Risk blocked: {reason}")
             self._log_skipped(opportunity, f"risk:{reason}")
+            return False
+
+        # 2b. Dynamic fee check (GasMonitor)
+        if self.gas_monitor and not self.gas_monitor.should_execute(opportunity):
+            logger.info(f"{prefix}Dynamic fee check: profit below gas-aware threshold")
+            self._log_skipped(opportunity, "gas_threshold")
             return False
 
         # 3. Size calculation
@@ -161,6 +172,8 @@ class ArbitrageExecutor:
                 return True  # Smarkets prices are live order book
             elif opp_type in ("SXBetBackAll", "SXBetBackLay"):
                 return True  # SX Bet prices are live order book
+            elif opp_type in ("MatchbookBackAll", "MatchbookBackLay"):
+                return True  # Matchbook prices are live order book
             # Unknown type — proceed cautiously
             return True
         except Exception as e:
@@ -447,6 +460,10 @@ class ArbitrageExecutor:
                 bal = self.sxbet_client.get_balance()
                 if bal is not None:
                     balances["sxbet"] = bal
+            if self.matchbook_client and hasattr(self.matchbook_client, "get_balance"):
+                bal = self.matchbook_client.get_balance()
+                if bal is not None:
+                    balances["matchbook"] = bal
         return balances if balances else None
 
     def _build_legs(self, opportunity: dict, size: float) -> list[dict]:
@@ -599,6 +616,27 @@ class ArbitrageExecutor:
                  "_market_hash": opportunity.get("_sx_market_hash", ""),
                  "_outcome_id": opportunity.get("_sx_outcome_id")},
             ]
+        elif opp_type == "MatchbookBackAll":
+            legs = [
+                {"platform": "matchbook", "side": "BACK",
+                 "price": price, "_market_id": opportunity.get("_mb_market_id", ""),
+                 "_runner_id": rid}
+                for rid, price in zip(
+                    opportunity.get("_mb_runner_ids", []),
+                    opportunity.get("_mb_prices", []),
+                )
+            ]
+        elif opp_type == "MatchbookBackLay":
+            market_id = opportunity.get("_mb_market_id", "")
+            runner_id = opportunity.get("_mb_runner_id")
+            legs = [
+                {"platform": "matchbook", "side": "BACK",
+                 "price": opportunity.get("_mb_back_price", 0),
+                 "_market_id": market_id, "_runner_id": runner_id},
+                {"platform": "matchbook", "side": "LAY",
+                 "price": opportunity.get("_mb_lay_price", 0),
+                 "_market_id": market_id, "_runner_id": runner_id},
+            ]
         elif opp_type.startswith("Cross"):
             # One leg on Polymarket, one on Kalshi
             prices_str = opportunity.get("prices", "")
@@ -707,6 +745,11 @@ class ArbitrageExecutor:
             leg["platform"] = "sxbet"
             leg["side"] = side
             leg["_market_hash"] = opportunity.get("_sx_market_hash", "")
+        elif platform_name == "matchbook":
+            leg["platform"] = "matchbook"
+            leg["side"] = side
+            leg["_market_id"] = opportunity.get("_mb_market_id", "")
+            leg["_runner_id"] = opportunity.get("_mb_runner_id")
         else:
             return None
 
@@ -913,6 +956,7 @@ class ArbitrageExecutor:
                     betfair_client=self.betfair_client,
                     smarkets_client=self.smarkets_client,
                     sxbet_client=self.sxbet_client,
+                    matchbook_client=self.matchbook_client,
                     db=self.db,
                 )
                 for i, leg in enumerate(legs):
@@ -1074,6 +1118,26 @@ class ArbitrageExecutor:
             )
             if resp:
                 order_id = str(resp.get("orderHash", resp.get("id", "")))
+                leg["_order_id"] = order_id
+                return True, order_id, price
+            return False, None, None
+
+        elif platform == "matchbook":
+            if not self.matchbook_client or not self.matchbook_client.authenticated:
+                return False, None, None
+            market_id = leg.get("_market_id", "")
+            runner_id = leg.get("_runner_id", "")
+            if not market_id or not runner_id:
+                return False, None, None
+            side = leg.get("side", "BACK").lower()
+            # Convert probability price to decimal odds
+            decimal_odds = round(1.0 / price, 2) if price > 0 else 2.0
+            resp = self.matchbook_client.place_order(
+                market_id=market_id, runner_id=runner_id,
+                side=side, odds=decimal_odds, stake=round(size, 2),
+            )
+            if resp:
+                order_id = str(resp.get("id", resp.get("offer-id", "")))
                 leg["_order_id"] = order_id
                 return True, order_id, price
             return False, None, None

@@ -25,6 +25,9 @@ from kalshi_api import KalshiClient
 from betfair_api import BetfairClient
 from smarkets_api import SmarketsClient
 from sxbet_api import SXBetClient
+from matchbook_api import MatchbookClient
+from metaculus_api import MetaculusClient
+from gas_monitor import GasMonitor
 from db import TradeDB
 from risk_manager import RiskManager
 from executor import ArbitrageExecutor
@@ -49,6 +52,8 @@ from scans import (
     scan_smarkets_backlay,
     scan_sxbet_backall,
     scan_sxbet_backlay,
+    scan_matchbook_backall,
+    scan_matchbook_backlay,
 )
 from config import (
     DEFAULT_MIN_PROFIT,
@@ -69,6 +74,9 @@ from config import (
     DYNAMIC_SIZING_ENABLED as CONFIG_DYNAMIC_SIZING,
     SIZING_AGGRESSIVENESS as CONFIG_SIZING_AGGRESSIVENESS,
     setup_logging,
+    POLYGON_RPC_URL as CONFIG_POLYGON_RPC_URL,
+    DYNAMIC_FEE_ENABLED as CONFIG_DYNAMIC_FEE,
+    GAS_PRICE_CACHE_TTL as CONFIG_GAS_CACHE_TTL,
 )
 
 # Load .env from project dir first, then ~/.claude/.env as fallback
@@ -91,7 +99,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
 
     fetch_futures = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
-        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet"):
+        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook"):
             fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
         if args.mode in ("all", "negrisk"):
             fetch_futures["poly_events"] = pool.submit(fetch_events)
@@ -166,7 +174,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                         if ev_id:
                             mkt_list = client.list_markets(ev_id)
                             markets.extend(mkt_list)
-                elif name in ("smarkets", "sxbet"):
+                elif name in ("smarkets", "sxbet", "matchbook"):
                     markets = client.fetch_all_markets()
                 else:
                     markets = []
@@ -226,6 +234,17 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             all_opportunities.extend(sx_backlay)
             logger.info("Found %d SX Bet back-lay opportunities.", len(sx_backlay))
 
+    if args.mode in ("all", "matchbook"):
+        matchbook = extra_clients.get("matchbook")
+        if matchbook:
+            logger.info("--- Matchbook Scan ---")
+            mb_backall = scan_matchbook_backall(matchbook, min_profit)
+            all_opportunities.extend(mb_backall)
+            logger.info("Found %d Matchbook back-all opportunities.", len(mb_backall))
+            mb_backlay = scan_matchbook_backlay(matchbook, min_profit)
+            all_opportunities.extend(mb_backlay)
+            logger.info("Found %d Matchbook back-lay opportunities.", len(mb_backlay))
+
     # Filter by minimum depth if specified
     if args.min_depth > 0:
         before = len(all_opportunities)
@@ -271,9 +290,9 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
-                 "spread", "betfair", "smarkets", "sxbet"],
+                 "spread", "betfair", "smarkets", "sxbet", "matchbook"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook",
     )
     parser.add_argument(
         "--min-profit",
@@ -457,6 +476,37 @@ def main():
             else:
                 logger.info("SX Bet authenticated successfully.")
 
+    matchbook_client = None
+    if args.mode in ("all", "cross-all", "matchbook"):
+        mb_user = os.getenv("MATCHBOOK_USERNAME")
+        mb_pass = os.getenv("MATCHBOOK_PASSWORD")
+        if mb_user and mb_pass:
+            matchbook_client = MatchbookClient()
+            if not matchbook_client.login():
+                matchbook_client = None
+                logger.warning("Matchbook auth failed.")
+            else:
+                logger.info("Matchbook authenticated successfully.")
+
+    # Initialize Metaculus client (read-only signal source)
+    metaculus_client = None
+    mc_key = os.getenv("METACULUS_API_KEY")
+    if mc_key or True:  # Public API works without key
+        metaculus_client = MetaculusClient()
+        if metaculus_client.login(api_key=mc_key):
+            logger.info("Metaculus client initialized%s.", " (with API key)" if mc_key else " (public)")
+        else:
+            metaculus_client = None
+
+    # Initialize GasMonitor for dynamic fee thresholds
+    gas_monitor = None
+    if CONFIG_DYNAMIC_FEE:
+        gas_monitor = GasMonitor(
+            polygon_rpc_url=CONFIG_POLYGON_RPC_URL,
+            cache_ttl=CONFIG_GAS_CACHE_TTL,
+        )
+        logger.info("Dynamic fee arbitrage enabled (GasMonitor active).")
+
     # Price cache updated by WebSocket feeds (shared with executor for revalidation)
     price_cache = {}
 
@@ -472,6 +522,8 @@ def main():
         betfair_client=betfair_client,
         smarkets_client=smarkets_client,
         sxbet_client=sxbet_client,
+        matchbook_client=matchbook_client,
+        gas_monitor=gas_monitor,
         revalidation_adaptive=CONFIG_REVALIDATION_ADAPTIVE,
         revalidation_min_floor=CONFIG_REVALIDATION_MIN_FLOOR,
         dynamic_sizing=CONFIG_DYNAMIC_SIZING,
@@ -482,6 +534,7 @@ def main():
         "betfair": betfair_client,
         "smarkets": smarkets_client,
         "sxbet": sxbet_client,
+        "matchbook": matchbook_client,
     }
 
     # Initialize webhook notifier

@@ -18,6 +18,7 @@ def reconcile_orphaned_positions(
     betfair_client=None,
     smarkets_client=None,
     sxbet_client=None,
+    matchbook_client=None,
 ):
     """Check for orphaned positions and pending trades from a previous crash.
 
@@ -33,7 +34,8 @@ def reconcile_orphaned_positions(
     if pending_trades:
         logger.info("Found %d pending trades from previous session — reconciling...", len(pending_trades))
         _reconcile_pending_trades(db, pending_trades, kalshi_client, pm_trader,
-                                 betfair_client, smarkets_client, sxbet_client)
+                                 betfair_client, smarkets_client, sxbet_client,
+                                 matchbook_client)
 
     # 2. Check for open positions with no recent activity
     open_positions = db.get_open_positions()
@@ -51,6 +53,7 @@ def _reconcile_pending_trades(
     betfair_client=None,
     smarkets_client=None,
     sxbet_client=None,
+    matchbook_client=None,
 ):
     """Attempt to determine the actual status of pending trades."""
     resolved = 0
@@ -73,6 +76,7 @@ def _reconcile_pending_trades(
             betfair_client=betfair_client,
             smarkets_client=smarkets_client,
             sxbet_client=sxbet_client,
+            matchbook_client=matchbook_client,
         )
 
         if status == "filled":
@@ -105,6 +109,7 @@ def _check_order_status(
     betfair_client=None,
     smarkets_client=None,
     sxbet_client=None,
+    matchbook_client=None,
 ) -> str:
     """Query a platform API for the status of an order.
 
@@ -168,6 +173,18 @@ def _check_order_status(
                 elif s in ("CANCELLED", "EXPIRED"):
                     return "canceled"
                 elif s in ("OPEN", "PENDING"):
+                    return "pending"
+            return "unknown"
+
+        elif platform == "matchbook" and matchbook_client:
+            resp = matchbook_client.get_order_status(order_id)
+            if resp:
+                s = resp.get("status", "")
+                if s in ("matched", "settled"):
+                    return "filled"
+                elif s in ("cancelled", "expired"):
+                    return "canceled"
+                elif s in ("open", "unmatched"):
                     return "pending"
             return "unknown"
 

@@ -121,23 +121,23 @@ class TestCheckOrderStatus:
         result = _check_order_status("kalshi", "abc", kalshi_client=kalshi)
         assert result == "canceled"
 
-    def test_predictit_filled(self):
-        pi = MagicMock()
-        pi.get_order_status.return_value = {"status": "Filled"}
-        result = _check_order_status("predictit", "123", predictit_client=pi)
+    def test_matchbook_matched(self):
+        mb = MagicMock()
+        mb.get_order_status.return_value = {"status": "matched"}
+        result = _check_order_status("matchbook", "123", matchbook_client=mb)
         assert result == "filled"
 
-    def test_predictit_completed(self):
-        pi = MagicMock()
-        pi.get_order_status.return_value = {"tradeStatus": "Completed"}
-        result = _check_order_status("predictit", "123", predictit_client=pi)
-        assert result == "filled"
-
-    def test_predictit_cancelled(self):
-        pi = MagicMock()
-        pi.get_order_status.return_value = {"status": "Cancelled"}
-        result = _check_order_status("predictit", "123", predictit_client=pi)
+    def test_matchbook_cancelled(self):
+        mb = MagicMock()
+        mb.get_order_status.return_value = {"status": "cancelled"}
+        result = _check_order_status("matchbook", "123", matchbook_client=mb)
         assert result == "canceled"
+
+    def test_matchbook_open(self):
+        mb = MagicMock()
+        mb.get_order_status.return_value = {"status": "open"}
+        result = _check_order_status("matchbook", "123", matchbook_client=mb)
+        assert result == "pending"
 
     def test_betfair_execution_complete(self):
         bf = MagicMock()
@@ -157,16 +157,16 @@ class TestCheckOrderStatus:
         result = _check_order_status("betfair", "abc", betfair_client=bf)
         assert result == "canceled"
 
-    def test_manifold_filled(self):
-        mf = MagicMock()
-        mf.get_order_status.return_value = {"id": "bet123"}
-        result = _check_order_status("manifold", "abc", manifold_client=mf)
+    def test_matchbook_settled(self):
+        mb = MagicMock()
+        mb.get_order_status.return_value = {"status": "settled"}
+        result = _check_order_status("matchbook", "abc", matchbook_client=mb)
         assert result == "filled"
 
-    def test_manifold_no_response(self):
-        mf = MagicMock()
-        mf.get_order_status.return_value = None
-        result = _check_order_status("manifold", "abc", manifold_client=mf)
+    def test_matchbook_no_response(self):
+        mb = MagicMock()
+        mb.get_order_status.return_value = None
+        result = _check_order_status("matchbook", "abc", matchbook_client=mb)
         assert result == "unknown"
 
     def test_exception_returns_unknown(self):

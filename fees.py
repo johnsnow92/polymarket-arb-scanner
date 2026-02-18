@@ -440,6 +440,75 @@ def net_profit_sxbet_backlay(back_price: float, lay_price: float) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Matchbook fee calculations (0% commission on prediction markets)
+# ---------------------------------------------------------------------------
+
+def net_profit_matchbook_backall(implied_probs: list[float]) -> dict:
+    """Calculate net profit for Matchbook back-all arbitrage.
+
+    Matchbook has 0% commission on prediction markets — pure overround arb.
+    """
+    total_cost = sum(implied_probs)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": 0,
+        "net_profit": gross_spread,
+    }
+
+
+def net_profit_matchbook_backlay(back_price: float, lay_price: float) -> dict:
+    """Calculate net profit for Matchbook back-lay arbitrage. 0% commission."""
+    if lay_price <= back_price:
+        return {"gross_spread": 0, "fees": 0, "net_profit": 0}
+
+    gross = lay_price - back_price
+    return {
+        "gross_spread": gross,
+        "fees": 0,
+        "net_profit": gross,
+    }
+
+
+def net_profit_cross_matchbook(
+    poly_price: float,
+    mb_price: float,
+    poly_side: str,
+    mb_side: str,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs Matchbook.
+
+    poly_side/mb_side: 'yes' or 'no' -- what we're buying on each platform.
+    One of the two positions will win $1.00, the other $0.00.
+    Matchbook has 0% commission.
+    """
+    total_cost = poly_price + mb_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Case 1 (Poly wins): PM 2% winner fee
+    case1_fees = polymarket_fee(poly_price, 1.0)
+    # Case 2 (Matchbook wins): no fees on either side
+    case2_fees = 0.0
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
 def net_profit_cross_sxbet(
     poly_price: float,
     sx_price: float,

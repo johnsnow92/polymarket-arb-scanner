@@ -118,6 +118,22 @@ SMARKETS_API_KEY = os.getenv("SMARKETS_API_KEY")
 SXBET_API_KEY = os.getenv("SXBET_API_KEY")
 SXBET_PRIVATE_KEY = os.getenv("SXBET_PRIVATE_KEY")
 
+# Matchbook
+MATCHBOOK_USERNAME = os.getenv("MATCHBOOK_USERNAME")
+MATCHBOOK_PASSWORD = os.getenv("MATCHBOOK_PASSWORD")
+
+# Metaculus (read-only signal source, works without API key)
+METACULUS_API_KEY = os.getenv("METACULUS_API_KEY")
+
+# Dynamic fee arbitrage (GasMonitor)
+POLYGON_RPC_URL = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+DYNAMIC_FEE_ENABLED = os.getenv("DYNAMIC_FEE_ENABLED", "false").lower() == "true"
+GAS_PRICE_CACHE_TTL = float(os.getenv("GAS_PRICE_CACHE_TTL", "15.0"))
+
+# Event-driven trading (Metaculus divergence signals)
+EVENT_DIVERGENCE_THRESHOLD = float(os.getenv("EVENT_DIVERGENCE_THRESHOLD", "0.10"))
+EVENT_MONITOR_ENABLED = os.getenv("EVENT_MONITOR_ENABLED", "false").lower() == "true"
+
 # Notifications
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Slack/Discord/generic URL
 WEBHOOK_MIN_PROFIT = float(os.getenv("WEBHOOK_MIN_PROFIT", "0.01"))

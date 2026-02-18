@@ -12,6 +12,7 @@ from fees import (
     net_profit_cross_betfair,
     net_profit_cross_smarkets,
     net_profit_cross_sxbet,
+    net_profit_cross_matchbook,
 )
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
@@ -24,6 +25,7 @@ _CROSS_FEE_FUNCS = {
     ("polymarket", "betfair"): net_profit_cross_betfair,
     ("polymarket", "smarkets"): net_profit_cross_smarkets,
     ("polymarket", "sxbet"): net_profit_cross_sxbet,
+    ("polymarket", "matchbook"): net_profit_cross_matchbook,
 }
 
 
@@ -270,6 +272,11 @@ def _attach_exec_metadata(opp: dict, market: dict, platform: str, suffix: str):
         opp["_sm_market_id"] = market.get("id", "")
     elif platform == "sxbet":
         opp["_sx_market_hash"] = market.get("marketHash", market.get("id", ""))
+    elif platform == "matchbook":
+        opp["_mb_market_id"] = market.get("id", "")
+        runners = market.get("runners", [])
+        if runners:
+            opp["_mb_runner_id"] = runners[0].get("id")
 
 
 def scan_cross_all(
