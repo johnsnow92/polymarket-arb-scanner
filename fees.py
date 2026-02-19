@@ -509,6 +509,160 @@ def net_profit_cross_matchbook(
     }
 
 
+# ---------------------------------------------------------------------------
+# Gemini Predictions fee calculations
+# Fee formula: min(P, 1-P) * quantity * fee_rate per contract
+# Default: 5% taker (IOC), 1% maker (GTC)
+# ---------------------------------------------------------------------------
+
+def gemini_fee(price: float, fee_rate: float = 0.05) -> float:
+    """Calculate Gemini fee for a single contract.
+
+    Formula: min(P, 1-P) * fee_rate.
+    Default 5% is the taker rate (IOC orders).
+    """
+    if price <= 0 or price >= 1:
+        return 0.0
+    return min(price, 1.0 - price) * fee_rate
+
+
+def net_profit_gemini_binary(yes_price: float, no_price: float, fee_rate: float = 0.05) -> dict:
+    """Calculate net profit for a Gemini binary arbitrage.
+
+    Buy YES + NO. One always pays $1.00.
+    Each leg pays Gemini fee at entry: min(P, 1-P) * fee_rate.
+    """
+    total_cost = yes_price + no_price
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    fees = gemini_fee(yes_price, fee_rate) + gemini_fee(no_price, fee_rate)
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fees,
+        "net_profit": gross_spread - fees,
+    }
+
+
+def net_profit_gemini_multi(yes_prices: list[float], fee_rate: float = 0.05) -> dict:
+    """Calculate net profit for a Gemini categorical (multi-outcome) arbitrage.
+
+    Buy YES on each outcome. Exactly one pays $1.00.
+    Each leg pays Gemini fee at entry.
+    """
+    total_cost = sum(yes_prices)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    fees = sum(gemini_fee(p, fee_rate) for p in yes_prices)
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fees,
+        "net_profit": gross_spread - fees,
+    }
+
+
+def net_profit_cross_gemini(
+    poly_price: float,
+    gm_price: float,
+    poly_side: str,
+    gm_side: str,
+    fee_rate: float = 0.05,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs Gemini.
+
+    poly_side/gm_side: 'yes' or 'no' -- what we're buying on each platform.
+    One of the two positions will win $1.00, the other $0.00.
+    Gemini charges min(P, 1-P) * fee_rate per contract at entry.
+    """
+    total_cost = poly_price + gm_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Gemini entry fee (always paid)
+    gm_entry_fee = gemini_fee(gm_price, fee_rate)
+
+    # Case 1 (Poly wins): PM 2% winner fee + Gemini entry fee
+    case1_fees = polymarket_fee(poly_price, 1.0) + gm_entry_fee
+    # Case 2 (Gemini wins): Gemini entry fee only (PM side lost, no fee)
+    case2_fees = gm_entry_fee
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# IBKR ForecastEx fee calculations ($0.00 commission)
+# ---------------------------------------------------------------------------
+
+def net_profit_ibkr_binary(yes_price: float, no_price: float) -> dict:
+    """Calculate net profit for an IBKR ForecastEx binary arbitrage.
+
+    BUY YES + BUY NO (both are buy orders). One pays $1, other $0.
+    IBKR has $0.00 commission on ForecastEx.
+    """
+    total_cost = yes_price + no_price
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": 0,
+        "net_profit": gross_spread,
+    }
+
+
+def net_profit_cross_ibkr(
+    poly_price: float,
+    ibkr_price: float,
+    poly_side: str,
+    ibkr_side: str,
+) -> dict:
+    """Calculate net profit for cross-platform arbitrage: Polymarket vs IBKR.
+
+    poly_side/ibkr_side: 'yes' or 'no' -- what we're buying on each platform.
+    One of the two positions will win $1.00, the other $0.00.
+    IBKR has $0.00 commission.
+    """
+    total_cost = poly_price + ibkr_price
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Case 1 (Poly wins): PM 2% winner fee
+    case1_fees = polymarket_fee(poly_price, 1.0)
+    # Case 2 (IBKR wins): no fees on either side
+    case2_fees = 0.0
+
+    worst_fees = max(case1_fees, case2_fees)
+    gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": worst_fees + gas,
+        "net_profit": gross_spread - worst_fees - gas,
+    }
+
+
 def net_profit_triangular(
     yes_price: float,
     no_price: float,
@@ -576,7 +730,7 @@ def _platform_win_fee(price: float, platform: str) -> float:
         return betfair_commission(1.0 - price)
     elif platform == "smarkets":
         return smarkets_commission(1.0 - price)
-    # sxbet, matchbook: 0% commission
+    # sxbet, matchbook, gemini (entry fee), ibkr: no win fee
     return 0.0
 
 
@@ -584,6 +738,8 @@ def _platform_entry_fee(price: float, platform: str) -> float:
     """Calculate the entry fee for a platform (fee charged when placing the trade)."""
     if platform == "kalshi":
         return kalshi_taker_fee(price)
+    elif platform == "gemini":
+        return gemini_fee(price)
     # Other platforms charge on winnings, not at entry
     return 0.0
 

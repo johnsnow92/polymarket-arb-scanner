@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python CLI tool that scans for arbitrage opportunities across prediction markets. Supports one-shot scans, continuous mode with WebSocket feeds, and automated trade execution. Deployed to AWS ECS Fargate via GitHub Actions CI/CD.
 
-**Platforms**: Polymarket, Kalshi, Betfair, Smarkets, SX Bet, Matchbook (+ Metaculus as read-only signal source)
+**Platforms**: Polymarket, Kalshi, Betfair, Smarkets, SX Bet, Matchbook, Gemini Predictions, IBKR ForecastEx (+ Metaculus as read-only signal source)
 
 **Strategies**:
-- **Binary/NegRisk internal** — same-platform overround arbs on Polymarket and Kalshi
+- **Binary/NegRisk internal** — same-platform overround arbs on Polymarket, Kalshi, Gemini, and IBKR
 - **Back-all/Back-lay** — exchange-specific arbs on Betfair, Smarkets, SX Bet, Matchbook
 - **Cross-platform** — 2-way mispricings between any pair of platforms
 - **Triangular** — 3-way mispricings where cheapest YES + cheapest NO across 3+ platforms < 1.0
@@ -29,7 +29,7 @@ python scanner.py
 python scanner.py --continuous --interval 60
 
 # Specific modes: binary, negrisk, cross, kalshi, cross-all, spread,
-#   betfair, smarkets, sxbet, matchbook, event, triangular
+#   betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular
 python scanner.py --mode kalshi
 python scanner.py --mode cross-all
 python scanner.py --mode event        # Metaculus divergence signals
@@ -62,7 +62,7 @@ The codebase has three layers and a thin orchestration shell:
 1. **Parallel fetch** — ThreadPoolExecutor fetches Polymarket markets, events, and Kalshi data simultaneously
 2. **Parallel scan** — ThreadPoolExecutor runs binary, negrisk, kalshi_binary, kalshi_multi scans
 3. **Sequential cross-platform** — cross/cross-all scans run after (they need data from step 1)
-4. **Platform-specific scans** — spread, betfair, smarkets, sxbet, matchbook back-all/back-lay
+4. **Platform-specific scans** — spread, betfair, smarkets, sxbet, matchbook back-all/back-lay, gemini binary/multi, ibkr binary
 5. **Advanced strategies** — event divergence (Metaculus signals), triangular (3-way cross-platform)
 6. **Sort by capital efficiency** — `capital_efficiency_score()` ranks by ROI * depth
 7. **Display + Execute** — results shown, then executor runs on each opportunity
@@ -89,6 +89,8 @@ Scan modules:
 - `cross.py` — 2-way cross-platform (all platform pairs)
 - `spread.py` — Polymarket/Kalshi bid-ask spreads
 - `betfair.py`, `smarkets.py`, `sxbet.py`, `matchbook.py` — exchange back-all/back-lay
+- `gemini.py` — Gemini binary + multi-outcome (0% fees promo)
+- `ibkr.py` — IBKR ForecastEx binary only (BUY-only, $0.00 commission)
 - `triangular.py` — 3-way cross-platform (union-find grouping of pairwise matches)
 - `helpers.py` — shared utilities (token IDs, CLOB fetch, scoring)
 
@@ -112,18 +114,21 @@ Each `*_api.py` wraps a platform's REST API with auth, retries (`tenacity`), and
 - **Smarkets**: API key session
 - **SX Bet**: API key session
 - **Matchbook**: Username/password session auth (0% commission on predictions)
+- **Gemini Predictions**: HMAC-SHA384 signed headers (API key + secret), 0% fees during promo, full buy+sell
+- **IBKR ForecastEx**: TWS API via `ib_insync` (IB Gateway socket), BUY-only (no sell), LMT-only, $0.00 commission, 5s order rate limit
 - **Metaculus**: Public REST API (optional API key), read-only signal source
 
 ### Supporting Modules
 
 - `matcher.py` — Fuzzy title matching with `thefuzz` for cross-platform market pairing
 - `fees.py` — Net profit calculators accounting for platform-specific fee structures (including `net_profit_triangular` for 3-way arbs)
+- `hedger.py` — Partial fill hedger: sells filled legs when the other side fails (all trading platforms except IBKR — BUY-only)
 - `gas_monitor.py` — Real-time Polygon gas price monitoring, dynamic fee thresholds replacing static MIN_NET_ROI
 - `event_monitor.py` — Metaculus divergence signal detection (fuzzy-matches platform markets to Metaculus questions)
 - `metaculus_api.py` — Read-only Metaculus client for community probability forecasts
 - `notifier.py` — Async webhook alerts (auto-detects Slack/Discord/generic format)
 - `dashboard.py` — Lightweight HTTP server exposing `/status` JSON endpoint
-- `recovery.py` — Reconciles orphaned positions/trades after crashes (supports all 6 trading platforms)
+- `recovery.py` — Reconciles orphaned positions/trades after crashes (supports all 8 trading platforms)
 - `config.py` — All constants backed by env vars with sensible defaults
 
 ## Key Patterns
@@ -135,6 +140,7 @@ Each `*_api.py` wraps a platform's REST API with auth, retries (`tenacity`), and
 - **Thread safety**: `TradeDB` uses a threading lock on all operations + SQLite WAL mode. Price cache is a plain dict updated from WS threads. Per-market locks in continuous mode prevent double execution.
 - **Config precedence**: CLI args > env vars > defaults in `config.py`.
 - **Parallel everything**: Data fetching, scanning, and execution all use `ThreadPoolExecutor`.
+- **`_build_legs` dispatcher**: `executor.py:_build_legs()` converts an opportunity dict into execution legs by switching on `opp["type"]`. When adding a new opportunity type, add the corresponding branch here and a matching `_revalidate` case.
 
 ## Testing
 
@@ -152,7 +158,7 @@ Run a specific test: `pytest tests/test_fees.py::TestPolymarketFee::test_zero_wh
 ## Environment Variables
 
 All env vars are defined in `config.py` with defaults. Key groups:
-- Platform credentials: `POLYMARKET_PRIVATE_KEY`, `KALSHI_API_KEY_ID`/`KALSHI_PRIVATE_KEY_PATH` (or `_BASE64`), `BETFAIR_*`, `SMARKETS_API_KEY`, `SXBET_API_KEY`, `MATCHBOOK_USERNAME`/`MATCHBOOK_PASSWORD`, `METACULUS_API_KEY` (optional)
+- Platform credentials: `POLYMARKET_PRIVATE_KEY`, `KALSHI_API_KEY_ID`/`KALSHI_PRIVATE_KEY_PATH` (or `_BASE64`), `BETFAIR_*`, `SMARKETS_API_KEY`, `SXBET_API_KEY`, `MATCHBOOK_USERNAME`/`MATCHBOOK_PASSWORD`, `GEMINI_API_KEY`/`GEMINI_API_SECRET`, `IBKR_HOST`/`IBKR_PORT`/`IBKR_CLIENT_ID` (IB Gateway), `METACULUS_API_KEY` (optional)
 - Execution: `DRY_RUN` (default: true), `EXECUTION_MODE`, `MAX_TRADE_SIZE`
 - Risk: `DAILY_LOSS_LIMIT`, `MAX_OPEN_POSITIONS`, `MIN_LIQUIDITY`, `MIN_NET_ROI`
 - Dynamic fees: `DYNAMIC_FEE_ENABLED`, `POLYGON_RPC_URL`, `GAS_PRICE_CACHE_TTL`
@@ -164,7 +170,7 @@ All env vars are defined in `config.py` with defaults. Key groups:
 ## Agent Team Notes
 
 When splitting work across teammates:
-- **API layer** (`*_api.py`, `ws_feeds.py`) — platform integration, auth, data fetching (7 platform clients)
+- **API layer** (`*_api.py`, `ws_feeds.py`) — platform integration, auth, data fetching (9 platform clients)
 - **Analysis layer** (`scans/`, `matcher.py`, `fees.py`, `config.py`, `event_monitor.py`, `gas_monitor.py`) — detection logic, matching, profit calculation, signal processing
 - **Execution layer** (`executor.py`, `risk_manager.py`, `db.py`) — trade execution, risk management, persistence
 - **Orchestration** (`cli.py`, `continuous.py`, `display.py`, `scanner.py`) — entry points, loops, output

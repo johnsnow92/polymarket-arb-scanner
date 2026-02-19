@@ -23,6 +23,10 @@ def normalize_title(title: str) -> str:
     title = title.lower().strip()
     # Remove markdown formatting
     title = re.sub(r"\*+", "", title)
+    # Remove Gemini instrument prefixes (e.g. "GEMI-", "GM-")
+    title = re.sub(r"^(gemi-|gm-)", "", title)
+    # Remove IBKR ForecastEx prefixes (e.g. "FX-", "IBKR-")
+    title = re.sub(r"^(fx-|ibkr-|forecastex\s*[-:]\s*)", "", title)
     # Remove trailing question marks and punctuation
     title = re.sub(r"[?!.]+$", "", title)
     # Normalize whitespace

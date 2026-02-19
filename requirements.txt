@@ -7,4 +7,5 @@ py-clob-client>=0.34.5
 websockets>=12.0
 tenacity>=8.2.0
 python-socks[asyncio]>=2.4.0
+ib_insync>=0.9.86
 pytest>=8.0.0

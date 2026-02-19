@@ -13,6 +13,8 @@ from fees import (
     net_profit_cross_smarkets,
     net_profit_cross_sxbet,
     net_profit_cross_matchbook,
+    net_profit_cross_gemini,
+    net_profit_cross_ibkr,
 )
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
@@ -26,6 +28,8 @@ _CROSS_FEE_FUNCS = {
     ("polymarket", "smarkets"): net_profit_cross_smarkets,
     ("polymarket", "sxbet"): net_profit_cross_sxbet,
     ("polymarket", "matchbook"): net_profit_cross_matchbook,
+    ("polymarket", "gemini"): net_profit_cross_gemini,
+    ("polymarket", "ibkr"): net_profit_cross_ibkr,
 }
 
 
@@ -277,6 +281,24 @@ def _attach_exec_metadata(opp: dict, market: dict, platform: str, suffix: str):
         runners = market.get("runners", [])
         if runners:
             opp["_mb_runner_id"] = runners[0].get("id")
+    elif platform == "gemini":
+        opp["_gm_event_id"] = market.get("id", "")
+        contracts = market.get("contracts", [])
+        for c in contracts:
+            label = (c.get("label") or c.get("outcome") or "").lower()
+            if "yes" in label:
+                opp["_gm_yes_symbol"] = c.get("instrumentSymbol", "")
+            elif "no" in label:
+                opp["_gm_no_symbol"] = c.get("instrumentSymbol", "")
+    elif platform == "ibkr":
+        opp["_ibkr_event_id"] = market.get("id", "")
+        contracts = market.get("contracts", [])
+        for c in contracts:
+            side = (c.get("side") or c.get("label") or "").upper()
+            if "YES" in side:
+                opp["_ibkr_yes_conid"] = c.get("conid", "")
+            elif "NO" in side:
+                opp["_ibkr_no_conid"] = c.get("conid", "")
 
 
 def scan_cross_all(

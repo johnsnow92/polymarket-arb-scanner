@@ -15,6 +15,8 @@ from betfair_api import BetfairClient
 from smarkets_api import SmarketsClient
 from sxbet_api import SXBetClient
 from matchbook_api import MatchbookClient
+from gemini_api import GeminiClient
+from ibkr_api import IBKRClient
 from fees import (
     net_profit_binary_internal,
     net_profit_negrisk_internal,
@@ -22,6 +24,8 @@ from fees import (
     net_profit_kalshi_binary,
     net_profit_kalshi_multi,
     net_profit_triangular,
+    net_profit_gemini_binary,
+    net_profit_ibkr_binary,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +48,8 @@ class ArbitrageExecutor:
         smarkets_client: SmarketsClient | None = None,
         sxbet_client: SXBetClient | None = None,
         matchbook_client: MatchbookClient | None = None,
+        gemini_client: GeminiClient | None = None,
+        ibkr_client: IBKRClient | None = None,
         gas_monitor=None,
         revalidation_adaptive: bool = True,
         revalidation_min_floor: float = 0.003,
@@ -56,6 +62,8 @@ class ArbitrageExecutor:
         self.smarkets_client = smarkets_client
         self.sxbet_client = sxbet_client
         self.matchbook_client = matchbook_client
+        self.gemini_client = gemini_client
+        self.ibkr_client = ibkr_client
         self.gas_monitor = gas_monitor
         self.db = db
         self.risk = risk_manager
@@ -175,6 +183,10 @@ class ArbitrageExecutor:
                 return True  # SX Bet prices are live order book
             elif opp_type in ("MatchbookBackAll", "MatchbookBackLay"):
                 return True  # Matchbook prices are live order book
+            elif opp_type in ("GeminiBinary", "GeminiMulti"):
+                return True  # Gemini prices are from order book
+            elif opp_type == "IBKRBinary":
+                return True  # IBKR prices are from snapshot
             elif opp_type == "TriangularCross":
                 return self._revalidate_triangular(opportunity, original_profit, price_cache)
             elif opp_type == "EventDivergence":
@@ -493,6 +505,29 @@ class ArbitrageExecutor:
                     if entries:
                         entry = entries[0]
                         return float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
+        elif platform == "gemini":
+            event_id = opp.get("_gm_event_id", "")
+            if event_id and self.gemini_client:
+                symbol = opp.get("_gm_yes_symbol" if side == "yes" else "_gm_no_symbol", "")
+                if symbol:
+                    book = self.gemini_client.get_order_book(symbol, limit=1)
+                    if book and book.get("asks"):
+                        return book["asks"][0].get("price")
+        elif platform == "ibkr":
+            event_id = opp.get("_ibkr_event_id", "")
+            if event_id and self.ibkr_client:
+                # Re-fetch via get_market_price with a minimal market dict
+                conid_key = "_ibkr_yes_conid" if side == "yes" else "_ibkr_no_conid"
+                conid = opp.get(conid_key, "")
+                if conid:
+                    mini_market = {
+                        "contracts": [
+                            {"conid": opp.get("_ibkr_yes_conid", ""), "side": "YES"},
+                            {"conid": opp.get("_ibkr_no_conid", ""), "side": "NO"},
+                        ]
+                    }
+                    y, n = self.ibkr_client.get_market_price(mini_market)
+                    return y if side == "yes" else n
         # For betfair/smarkets/sxbet/matchbook: live order book, skip refetch
         return None
 
@@ -520,6 +555,10 @@ class ArbitrageExecutor:
             balance = balances.get("sxbet")
         elif opp_type.startswith("Matchbook"):
             balance = balances.get("matchbook")
+        elif opp_type.startswith("Gemini"):
+            balance = balances.get("gemini")
+        elif opp_type.startswith("IBKR"):
+            balance = balances.get("ibkr")
         else:
             balance = balances.get("polymarket")
 
@@ -562,6 +601,7 @@ class ArbitrageExecutor:
             "Cross" in opp_type or "Triangular" in opp_type
             or opp_type.startswith("Betfair") or opp_type.startswith("Smarkets")
             or opp_type.startswith("SXBet") or opp_type.startswith("Matchbook")
+            or opp_type.startswith("Gemini") or opp_type.startswith("IBKR")
             or opp_type == "EventDivergence"
         )
 
@@ -586,6 +626,14 @@ class ArbitrageExecutor:
                 bal = self.matchbook_client.get_balance()
                 if bal is not None:
                     balances["matchbook"] = bal
+            if self.gemini_client and hasattr(self.gemini_client, "get_balance"):
+                bal = self.gemini_client.get_balance()
+                if bal is not None:
+                    balances["gemini"] = bal
+            if self.ibkr_client and hasattr(self.ibkr_client, "get_balance"):
+                bal = self.ibkr_client.get_balance()
+                if bal is not None:
+                    balances["ibkr"] = bal
         return balances if balances else None
 
     def _build_legs(self, opportunity: dict, size: float) -> list[dict]:
@@ -759,6 +807,36 @@ class ArbitrageExecutor:
                  "price": opportunity.get("_mb_lay_price", 0),
                  "_market_id": market_id, "_runner_id": runner_id},
             ]
+        elif opp_type == "GeminiBinary":
+            yes_price = opportunity.get("_gm_yes_price", self._parse_price(opportunity, "Y="))
+            no_price = opportunity.get("_gm_no_price", self._parse_price(opportunity, "N="))
+            if yes_price is None or no_price is None:
+                return []
+            legs = [
+                {"platform": "gemini", "symbol": opportunity.get("_gm_yes_symbol", ""),
+                 "side": "buy", "outcome": "yes", "price": yes_price},
+                {"platform": "gemini", "symbol": opportunity.get("_gm_no_symbol", ""),
+                 "side": "buy", "outcome": "no", "price": no_price},
+            ]
+        elif opp_type == "GeminiMulti":
+            symbols = opportunity.get("_gm_symbols", [])
+            prices = opportunity.get("_gm_prices", [])
+            for symbol, price in zip(symbols, prices):
+                legs.append({
+                    "platform": "gemini", "symbol": symbol,
+                    "side": "buy", "outcome": "yes", "price": price,
+                })
+        elif opp_type == "IBKRBinary":
+            yes_price = opportunity.get("_ibkr_yes_price", self._parse_price(opportunity, "Y="))
+            no_price = opportunity.get("_ibkr_no_price", self._parse_price(opportunity, "N="))
+            if yes_price is None or no_price is None:
+                return []
+            legs = [
+                {"platform": "ibkr", "conid": opportunity.get("_ibkr_yes_conid", ""),
+                 "side": "buy", "price": yes_price},
+                {"platform": "ibkr", "conid": opportunity.get("_ibkr_no_conid", ""),
+                 "side": "buy", "price": no_price},
+            ]
         elif opp_type == "TriangularCross":
             # 3-way cross-platform: cheapest YES + cheapest NO across 3+ platforms
             legs = self._build_cross_all_legs(opportunity, size)
@@ -878,6 +956,17 @@ class ArbitrageExecutor:
             leg["side"] = side
             leg["_market_id"] = opportunity.get("_mb_market_id", "")
             leg["_runner_id"] = opportunity.get("_mb_runner_id")
+        elif platform_name == "gemini":
+            leg["platform"] = "gemini"
+            leg["side"] = "buy"
+            leg["outcome"] = side
+            leg["symbol"] = opportunity.get(
+                "_gm_yes_symbol" if side == "yes" else "_gm_no_symbol", "")
+        elif platform_name == "ibkr":
+            leg["platform"] = "ibkr"
+            leg["side"] = "buy"
+            leg["conid"] = opportunity.get(
+                "_ibkr_yes_conid" if side == "yes" else "_ibkr_no_conid", "")
         else:
             return None
 
@@ -948,6 +1037,18 @@ class ArbitrageExecutor:
             leg["side"] = "back" if direction == "BUY_YES" else "lay"
             leg["_market_id"] = opportunity.get("_mb_market_id", "")
             leg["_runner_id"] = opportunity.get("_mb_runner_id", "")
+        elif platform == "gemini":
+            leg["platform"] = "gemini"
+            leg["side"] = "buy"
+            leg["outcome"] = "yes" if direction == "BUY_YES" else "no"
+            leg["symbol"] = opportunity.get(
+                "_gm_yes_symbol" if direction == "BUY_YES" else "_gm_no_symbol", "")
+        elif platform == "ibkr":
+            # IBKR: BUY_YES = buy YES conid, BUY_NO = buy NO conid (both are BUY)
+            leg["platform"] = "ibkr"
+            leg["side"] = "buy"
+            leg["conid"] = opportunity.get(
+                "_ibkr_yes_conid" if direction == "BUY_YES" else "_ibkr_no_conid", "")
         else:
             return []
 
@@ -1155,6 +1256,7 @@ class ArbitrageExecutor:
                     smarkets_client=self.smarkets_client,
                     sxbet_client=self.sxbet_client,
                     matchbook_client=self.matchbook_client,
+                    gemini_client=self.gemini_client,
                     db=self.db,
                 )
                 for i, leg in enumerate(legs):
@@ -1344,7 +1446,81 @@ class ArbitrageExecutor:
                 return True, order_id, fill_price
             return False, None, None
 
+        elif platform == "gemini":
+            if not self.gemini_client or not self.gemini_client.authenticated:
+                return False, None, None
+            symbol = leg.get("symbol", "")
+            if not symbol:
+                return False, None, None
+            outcome = leg.get("outcome", "yes")
+            quantity = max(1, int(size / price)) if price > 0 else 1
+            resp = self.gemini_client.place_order(
+                symbol=symbol, side="buy", outcome=outcome,
+                quantity=quantity, price=price, time_in_force="immediate-or-cancel",
+            )
+            if resp:
+                order_id = str(resp.get("orderId", resp.get("order_id", "")))
+                leg["_order_id"] = order_id
+                fill_price = self._confirm_fill_gemini(order_id, price)
+                return True, order_id, fill_price
+            return False, None, None
+
+        elif platform == "ibkr":
+            if not self.ibkr_client or not self.ibkr_client.authenticated:
+                return False, None, None
+            conid = leg.get("conid", "")
+            if not conid:
+                return False, None, None
+            quantity = max(1, int(size / price)) if price > 0 else 1
+            resp = self.ibkr_client.place_order(
+                conid=conid, quantity=quantity, price=price,
+            )
+            if resp:
+                order_id = str(resp.get("orderId", resp.get("order_id", "")))
+                leg["_order_id"] = order_id
+                fill_price = self._confirm_fill_ibkr(order_id, price)
+                return True, order_id, fill_price
+            return False, None, None
+
         return False, None, None
+
+    def _confirm_fill_gemini(self, order_id: str, expected_price: float) -> float:
+        """Poll Gemini for fill confirmation. Returns actual fill price."""
+        if not self.gemini_client or not order_id:
+            return expected_price
+        max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
+        for _ in range(max_polls):
+            status = self.gemini_client.get_order_status(order_id)
+            if status:
+                order_status = (status.get("status") or status.get("orderStatus") or "").lower()
+                if order_status in ("filled", "closed"):
+                    avg_price = status.get("avgExecutionPrice") or status.get("price")
+                    if avg_price is not None:
+                        return float(avg_price)
+                    return expected_price
+                elif order_status in ("cancelled", "canceled", "expired"):
+                    return expected_price
+            time.sleep(FILL_POLL_INTERVAL)
+        return expected_price
+
+    def _confirm_fill_ibkr(self, order_id: str, expected_price: float) -> float:
+        """Poll IBKR for fill confirmation. Returns actual fill price (dollars)."""
+        if not self.ibkr_client or not order_id:
+            return expected_price
+        max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
+        for _ in range(max_polls):
+            status = self.ibkr_client.get_order_status(order_id)
+            if status:
+                order_status = (status.get("status") or "").lower()
+                if order_status == "filled":
+                    avg_price = status.get("avgFillPrice")
+                    if avg_price is not None and float(avg_price) > 0:
+                        return float(avg_price)
+                    return expected_price
+                elif order_status in ("cancelled", "expired", "inactive"):
+                    return expected_price
+            time.sleep(FILL_POLL_INTERVAL)
+        return expected_price
 
     def _confirm_fill_pm(self, order_id: str, expected_price: float) -> float:
         """Poll Polymarket for fill confirmation. Returns actual fill price."""
@@ -1475,6 +1651,10 @@ class ArbitrageExecutor:
             return self.sxbet_client.cancel_order(order_id)
         elif platform == "matchbook" and self.matchbook_client:
             return self.matchbook_client.cancel_order(order_id)
+        elif platform == "gemini" and self.gemini_client:
+            return self.gemini_client.cancel_order(order_id)
+        elif platform == "ibkr" and self.ibkr_client:
+            return self.ibkr_client.cancel_order(order_id)
         return False
 
     def _log_skipped(self, opportunity: dict, reason: str):

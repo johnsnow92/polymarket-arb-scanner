@@ -26,6 +26,8 @@ from betfair_api import BetfairClient
 from smarkets_api import SmarketsClient
 from sxbet_api import SXBetClient
 from matchbook_api import MatchbookClient
+from gemini_api import GeminiClient
+from ibkr_api import IBKRClient
 from metaculus_api import MetaculusClient
 from gas_monitor import GasMonitor
 from event_monitor import EventMonitor
@@ -55,6 +57,9 @@ from scans import (
     scan_sxbet_backlay,
     scan_matchbook_backall,
     scan_matchbook_backlay,
+    scan_gemini_binary,
+    scan_gemini_multi,
+    scan_ibkr_binary,
     scan_triangular,
 )
 from config import (
@@ -103,7 +108,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
 
     fetch_futures = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
-        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "triangular"):
+        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "gemini", "ibkr", "triangular"):
             fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
         if args.mode in ("all", "negrisk"):
             fetch_futures["poly_events"] = pool.submit(fetch_events)
@@ -178,7 +183,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                         if ev_id:
                             mkt_list = client.list_markets(ev_id)
                             markets.extend(mkt_list)
-                elif name in ("smarkets", "sxbet", "matchbook"):
+                elif name in ("smarkets", "sxbet", "matchbook", "gemini", "ibkr"):
                     markets = client.fetch_all_markets()
                 else:
                     markets = []
@@ -249,6 +254,25 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             all_opportunities.extend(mb_backlay)
             logger.info("Found %d Matchbook back-lay opportunities.", len(mb_backlay))
 
+    if args.mode in ("all", "gemini"):
+        gemini = extra_clients.get("gemini")
+        if gemini:
+            logger.info("--- Gemini Scan ---")
+            gm_binary = scan_gemini_binary(gemini, min_profit)
+            all_opportunities.extend(gm_binary)
+            logger.info("Found %d Gemini binary opportunities.", len(gm_binary))
+            gm_multi = scan_gemini_multi(gemini, min_profit)
+            all_opportunities.extend(gm_multi)
+            logger.info("Found %d Gemini multi-outcome opportunities.", len(gm_multi))
+
+    if args.mode in ("all", "ibkr"):
+        ibkr = extra_clients.get("ibkr")
+        if ibkr:
+            logger.info("--- IBKR Scan ---")
+            ibkr_binary = scan_ibkr_binary(ibkr, min_profit)
+            all_opportunities.extend(ibkr_binary)
+            logger.info("Found %d IBKR binary opportunities.", len(ibkr_binary))
+
     if args.mode in ("all", "event") and event_monitor:
         logger.info("--- Event Divergence Scan ---")
         platform_markets_for_event = {}
@@ -283,7 +307,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                             if ev_id:
                                 mkt_list = client.list_markets(ev_id)
                                 markets.extend(mkt_list)
-                    elif name in ("smarkets", "sxbet", "matchbook"):
+                    elif name in ("smarkets", "sxbet", "matchbook", "gemini", "ibkr"):
                         markets = client.fetch_all_markets()
                     else:
                         markets = []
@@ -345,9 +369,9 @@ def main():
         "--mode",
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
                  "spread", "betfair", "smarkets", "sxbet", "matchbook",
-                 "event", "triangular"],
+                 "gemini", "ibkr", "event", "triangular"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, event, triangular",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular",
     )
     parser.add_argument(
         "--min-profit",
@@ -543,6 +567,31 @@ def main():
             else:
                 logger.info("Matchbook authenticated successfully.")
 
+    gemini_client = None
+    if args.mode in ("all", "cross-all", "gemini"):
+        gm_key = os.getenv("GEMINI_API_KEY")
+        gm_secret = os.getenv("GEMINI_API_SECRET")
+        if gm_key and gm_secret:
+            gemini_client = GeminiClient()
+            if not gemini_client.login(gm_key, gm_secret):
+                gemini_client = None
+                logger.warning("Gemini auth failed.")
+            else:
+                logger.info("Gemini authenticated successfully.")
+
+    ibkr_client = None
+    if args.mode in ("all", "cross-all", "ibkr"):
+        ibkr_host = os.getenv("IBKR_HOST", "127.0.0.1")
+        ibkr_port = int(os.getenv("IBKR_PORT", "4001"))
+        ibkr_cid = int(os.getenv("IBKR_CLIENT_ID", "1"))
+        ibkr_client = IBKRClient()
+        if not ibkr_client.login(ibkr_host, ibkr_port, ibkr_cid):
+            ibkr_client = None
+            logger.warning("IBKR connection failed (is IB Gateway running at %s:%d?).",
+                           ibkr_host, ibkr_port)
+        else:
+            logger.info("IBKR connected successfully.")
+
     # Initialize Metaculus client (read-only signal source)
     metaculus_client = None
     mc_key = os.getenv("METACULUS_API_KEY")
@@ -587,6 +636,8 @@ def main():
         smarkets_client=smarkets_client,
         sxbet_client=sxbet_client,
         matchbook_client=matchbook_client,
+        gemini_client=gemini_client,
+        ibkr_client=ibkr_client,
         gas_monitor=gas_monitor,
         revalidation_adaptive=CONFIG_REVALIDATION_ADAPTIVE,
         revalidation_min_floor=CONFIG_REVALIDATION_MIN_FLOOR,
@@ -599,6 +650,8 @@ def main():
         "smarkets": smarkets_client,
         "sxbet": sxbet_client,
         "matchbook": matchbook_client,
+        "gemini": gemini_client,
+        "ibkr": ibkr_client,
     }
 
     # Initialize webhook notifier

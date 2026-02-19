@@ -153,6 +153,24 @@ def _attach_exec_metadata(opp: dict, market: dict, platform: str):
         runners = market.get("runners", [])
         if runners:
             opp["_mb_runner_id"] = runners[0].get("id")
+    elif platform == "gemini":
+        opp["_gm_event_id"] = market.get("id", "")
+        contracts = market.get("contracts", [])
+        for c in contracts:
+            label = (c.get("label") or c.get("outcome") or "").lower()
+            if "yes" in label:
+                opp["_gm_yes_symbol"] = c.get("instrumentSymbol", "")
+            elif "no" in label:
+                opp["_gm_no_symbol"] = c.get("instrumentSymbol", "")
+    elif platform == "ibkr":
+        opp["_ibkr_event_id"] = market.get("id", "")
+        contracts = market.get("contracts", [])
+        for c in contracts:
+            side = (c.get("side") or c.get("label") or "").upper()
+            if "YES" in side:
+                opp["_ibkr_yes_conid"] = c.get("conid", "")
+            elif "NO" in side:
+                opp["_ibkr_no_conid"] = c.get("conid", "")
 
 
 def scan_triangular(

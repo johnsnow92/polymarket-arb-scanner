@@ -122,6 +122,19 @@ SXBET_PRIVATE_KEY = os.getenv("SXBET_PRIVATE_KEY")
 MATCHBOOK_USERNAME = os.getenv("MATCHBOOK_USERNAME")
 MATCHBOOK_PASSWORD = os.getenv("MATCHBOOK_PASSWORD")
 
+# Gemini Predictions
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_SECRET = os.getenv("GEMINI_API_SECRET")
+GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://api.gemini.com")
+GEMINI_FEE_RATE = float(os.getenv("GEMINI_FEE_RATE", "0.05"))  # 5% taker / 1% maker
+GEMINI_RATE_LIMIT = float(os.getenv("GEMINI_RATE_LIMIT", "0.1"))
+
+# IBKR ForecastEx (via IB Gateway / TWS socket)
+IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
+IBKR_PORT = int(os.getenv("IBKR_PORT", "4001"))
+IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "1"))
+IBKR_ORDER_RATE_LIMIT = float(os.getenv("IBKR_ORDER_RATE_LIMIT", "5.0"))
+
 # Metaculus (read-only signal source, works without API key)
 METACULUS_API_KEY = os.getenv("METACULUS_API_KEY")
 

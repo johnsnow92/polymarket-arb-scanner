@@ -20,6 +20,7 @@ class PartialFillHedger:
         smarkets_client=None,
         sxbet_client=None,
         matchbook_client=None,
+        gemini_client=None,
         db: TradeDB = None,
     ):
         self.pm_trader = pm_trader
@@ -28,6 +29,8 @@ class PartialFillHedger:
         self.smarkets_client = smarkets_client
         self.sxbet_client = sxbet_client
         self.matchbook_client = matchbook_client
+        self.gemini_client = gemini_client
+        # Note: IBKR not included — cannot sell (BUY-only platform)
         self.db = db
 
     def queue_hedge(
@@ -103,6 +106,9 @@ class PartialFillHedger:
                 return self._hedge_sxbet(pf, fill_price, size, max_loss)
             elif platform == "matchbook":
                 return self._hedge_matchbook(pf, fill_price, size, max_loss)
+            elif platform == "gemini":
+                return self._hedge_gemini(pf, fill_price, size, max_loss)
+            # IBKR: cannot hedge — BUY-only platform, no sell capability
         except Exception as e:
             logger.warning("Hedge attempt failed for %s on %s: %s", token_id, platform, e)
 
@@ -210,6 +216,35 @@ class PartialFillHedger:
         resp = self.sxbet_client.place_order(
             market_hash=market_hash, outcome_id=outcome_id,
             side=hedge_side, price=fill_price, quantity=quantity,
+        )
+        return resp is not None
+
+    def _hedge_gemini(self, pf: dict, fill_price: float, size: float, max_loss: float) -> bool:
+        """Hedge a Gemini position by selling at market (IOC at worst ask)."""
+        if not self.gemini_client or not self.gemini_client.authenticated:
+            return False
+        symbol = pf.get("token_id", "")
+        if not symbol:
+            return False
+        # Fetch current order book to get best bid
+        book = self.gemini_client.get_order_book(symbol, limit=1)
+        if not book or not book.get("bids"):
+            return False
+        bid = book["bids"][0].get("price", 0)
+        if bid <= 0:
+            return False
+        loss = fill_price - bid
+        if loss > max_loss:
+            logger.info("Gemini hedge: bid $%.3f too far from fill $%.3f (loss $%.3f > max $%.3f)",
+                        bid, fill_price, loss, max_loss)
+            return False
+        outcome = pf.get("side", "yes").lower()
+        if outcome not in ("yes", "no"):
+            outcome = "yes"
+        quantity = max(1, int(size / bid)) if bid > 0 else 1
+        resp = self.gemini_client.place_order(
+            symbol=symbol, side="sell", outcome=outcome,
+            quantity=quantity, price=bid, time_in_force="immediate-or-cancel",
         )
         return resp is not None
 

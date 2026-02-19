@@ -41,6 +41,14 @@
         {
           "name": "KALSHI_PRIVATE_KEY_BASE64",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/kalshi-private-key"
+        },
+        {
+          "name": "GEMINI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/gemini-api-key"
+        },
+        {
+          "name": "GEMINI_API_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/gemini-api-secret"
         }
       ],
       "mountPoints": [

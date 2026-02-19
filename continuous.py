@@ -46,6 +46,9 @@ from scans import (
     scan_sxbet_backlay,
     scan_matchbook_backall,
     scan_matchbook_backlay,
+    scan_gemini_binary,
+    scan_gemini_multi,
+    scan_ibkr_binary,
     scan_triangular,
     _fetch_kalshi_data,
     capital_efficiency_score,
@@ -140,6 +143,16 @@ class OpportunityIndex:
         if mb_market_id:
             keys.append(("matchbook", mb_market_id))
 
+        # Gemini
+        gm_event_id = opp.get("_gm_event_id", "")
+        if gm_event_id:
+            keys.append(("gemini", gm_event_id))
+
+        # IBKR
+        ibkr_event_id = opp.get("_ibkr_event_id", "")
+        if ibkr_event_id:
+            keys.append(("ibkr", ibkr_event_id))
+
         # EventDivergence: index by platform + metaculus question ID
         if opp_type == "EventDivergence":
             platform = opp.get("_platform", "")
@@ -182,6 +195,8 @@ def check_settlements(
     smarkets_client=None,
     sxbet_client=None,
     matchbook_client=None,
+    gemini_client=None,
+    ibkr_client=None,
 ):
     """Check open positions for settlement and update P&L."""
     open_positions = db.get_open_positions()
@@ -265,6 +280,24 @@ def check_settlements(
                             settled += 1
                 except Exception as e:
                     logger.warning("Matchbook settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "gemini" and gemini_client:
+                try:
+                    market_data = gemini_client.get_market_status(market_id) if hasattr(gemini_client, "get_market_status") else None
+                    if market_data and market_data.get("status") in ("settled", "closed", "resolved"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("Gemini settlement check failed for position %s: %s", pos['id'], e)
+            elif platform == "ibkr" and ibkr_client:
+                try:
+                    market_data = ibkr_client.get_market_status(market_id) if hasattr(ibkr_client, "get_market_status") else None
+                    if market_data and market_data.get("status") in ("settled", "closed", "expired"):
+                        realized = _calc_realized_pnl(db, pos)
+                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                        settled += 1
+                except Exception as e:
+                    logger.warning("IBKR settlement check failed for position %s: %s", pos['id'], e)
         except Exception as e:
             logger.warning("Settlement check failed for position %s: %s", pos['id'], e)
 
@@ -415,6 +448,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         smarkets_client=extra_clients.get("smarkets"),
         sxbet_client=extra_clients.get("sxbet"),
         matchbook_client=extra_clients.get("matchbook"),
+        gemini_client=extra_clients.get("gemini"),
+        ibkr_client=extra_clients.get("ibkr"),
     )
 
     # Initialize partial fill hedger for continuous mode
@@ -428,6 +463,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             smarkets_client=extra_clients.get("smarkets"),
             sxbet_client=extra_clients.get("sxbet"),
             matchbook_client=extra_clients.get("matchbook"),
+            gemini_client=extra_clients.get("gemini"),
             db=db,
         )
 
@@ -458,7 +494,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
                 fetch_futures = {}
                 with ThreadPoolExecutor(max_workers=3) as pool:
-                    if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "triangular"):
+                    if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "gemini", "ibkr", "triangular"):
                         fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
                     if args.mode in ("all", "negrisk"):
                         fetch_futures["poly_events"] = pool.submit(fetch_events)
@@ -526,7 +562,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                                         if ev_id:
                                             mkt_list = client.list_markets(ev_id)
                                             markets.extend(mkt_list)
-                                elif name in ("smarkets", "sxbet", "matchbook"):
+                                elif name in ("smarkets", "sxbet", "matchbook", "gemini", "ibkr"):
                                     markets = client.fetch_all_markets()
                                 else:
                                     markets = []
@@ -583,6 +619,20 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         mb_backlay = scan_matchbook_backlay(matchbook, min_profit)
                         all_opportunities.extend(mb_backlay)
 
+                if args.mode in ("all", "gemini"):
+                    gemini = extra_clients.get("gemini")
+                    if gemini:
+                        gm_binary = scan_gemini_binary(gemini, min_profit)
+                        all_opportunities.extend(gm_binary)
+                        gm_multi = scan_gemini_multi(gemini, min_profit)
+                        all_opportunities.extend(gm_multi)
+
+                if args.mode in ("all", "ibkr"):
+                    ibkr = extra_clients.get("ibkr")
+                    if ibkr:
+                        ibkr_binary = scan_ibkr_binary(ibkr, min_profit)
+                        all_opportunities.extend(ibkr_binary)
+
                 if args.mode in ("all", "event") and event_monitor:
                     platform_markets_for_event = {}
                     if poly_markets:
@@ -614,7 +664,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                                         if ev_id:
                                             mkt_list = client.list_markets(ev_id)
                                             markets.extend(mkt_list)
-                                elif name in ("smarkets", "sxbet", "matchbook"):
+                                elif name in ("smarkets", "sxbet", "matchbook", "gemini", "ibkr"):
                                     markets = client.fetch_all_markets()
                                 else:
                                     markets = []
@@ -666,6 +716,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     smarkets_client=extra_clients.get("smarkets"),
                     sxbet_client=extra_clients.get("sxbet"),
                     matchbook_client=extra_clients.get("matchbook"),
+                    gemini_client=extra_clients.get("gemini"),
+                    ibkr_client=extra_clients.get("ibkr"),
                 )
 
                 # Execute opportunities sequentially (balance must be rechecked between trades)

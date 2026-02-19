@@ -17,6 +17,12 @@ from fees import (
     net_profit_cross_platform,
     betfair_commission,
     net_profit_cross_betfair,
+    gemini_fee,
+    net_profit_gemini_binary,
+    net_profit_gemini_multi,
+    net_profit_cross_gemini,
+    net_profit_ibkr_binary,
+    net_profit_cross_ibkr,
 )
 
 
@@ -361,3 +367,158 @@ class TestGasFeeDeduction:
         # Only Kalshi taker fees, no gas
         expected_fees = kalshi_taker_fee(0.40) + kalshi_taker_fee(0.40)
         assert result["fees"] == pytest.approx(expected_fees)
+
+
+# ---------------------------------------------------------------------------
+# net_profit_gemini_binary
+# ---------------------------------------------------------------------------
+
+class TestGeminiFee:
+    def test_symmetric_at_half(self):
+        # min(0.5, 0.5) * 0.05 = 0.025
+        assert gemini_fee(0.50) == pytest.approx(0.025)
+
+    def test_low_price(self):
+        # min(0.10, 0.90) * 0.05 = 0.005
+        assert gemini_fee(0.10) == pytest.approx(0.005)
+
+    def test_high_price(self):
+        # min(0.90, 0.10) * 0.05 = 0.005
+        assert gemini_fee(0.90) == pytest.approx(0.005)
+
+    def test_custom_rate(self):
+        # min(0.40, 0.60) * 0.01 = 0.004
+        assert gemini_fee(0.40, fee_rate=0.01) == pytest.approx(0.004)
+
+    def test_boundary_zero(self):
+        assert gemini_fee(0.0) == 0.0
+        assert gemini_fee(1.0) == 0.0
+
+
+class TestNetProfitGeminiBinary:
+    def test_positive_spread_with_fees(self):
+        # 0.40 + 0.40 = 0.80, gross = 0.20
+        # fee_yes = min(0.40, 0.60) * 0.05 = 0.02
+        # fee_no  = min(0.40, 0.60) * 0.05 = 0.02
+        # total fees = 0.04
+        result = net_profit_gemini_binary(0.40, 0.40)
+        assert result["gross_spread"] == pytest.approx(0.20)
+        assert result["fees"] == pytest.approx(0.04)
+        assert result["net_profit"] == pytest.approx(0.16)
+
+    def test_negative_spread(self):
+        result = net_profit_gemini_binary(0.55, 0.50)
+        assert result["gross_spread"] == pytest.approx(-0.05)
+        assert result["fees"] == 0
+        assert result["net_profit"] == pytest.approx(-0.05)
+
+    def test_configurable_fee_rate(self):
+        # With 1% maker fee
+        result = net_profit_gemini_binary(0.40, 0.40, fee_rate=0.01)
+        # fee per leg = min(0.40, 0.60) * 0.01 = 0.004, total = 0.008
+        assert result["fees"] == pytest.approx(0.008)
+        assert result["net_profit"] == pytest.approx(0.20 - 0.008)
+
+    def test_zero_spread(self):
+        result = net_profit_gemini_binary(0.50, 0.50)
+        assert result["gross_spread"] == pytest.approx(0.0)
+        assert result["net_profit"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# net_profit_gemini_multi
+# ---------------------------------------------------------------------------
+
+class TestNetProfitGeminiMulti:
+    def test_positive_spread_4_outcomes(self):
+        prices = [0.20, 0.20, 0.20, 0.20]
+        result = net_profit_gemini_multi(prices)
+        # Each leg: min(0.20, 0.80) * 0.05 = 0.01, total = 0.04
+        assert result["gross_spread"] == pytest.approx(0.20)
+        assert result["fees"] == pytest.approx(0.04)
+        assert result["net_profit"] == pytest.approx(0.16)
+
+    def test_negative_spread(self):
+        prices = [0.30, 0.30, 0.30, 0.30]
+        result = net_profit_gemini_multi(prices)
+        assert result["gross_spread"] == pytest.approx(-0.20)
+        assert result["fees"] == 0
+
+    def test_configurable_fee_rate(self):
+        prices = [0.20, 0.20, 0.20, 0.20]
+        result = net_profit_gemini_multi(prices, fee_rate=0.01)
+        # Each leg: min(0.20, 0.80) * 0.01 = 0.002, total = 0.008
+        assert result["fees"] == pytest.approx(0.008)
+        assert result["net_profit"] == pytest.approx(0.20 - 0.008)
+
+
+# ---------------------------------------------------------------------------
+# net_profit_cross_gemini
+# ---------------------------------------------------------------------------
+
+class TestNetProfitCrossGemini:
+    def test_positive_spread(self):
+        result = net_profit_cross_gemini(0.30, 0.30, "yes", "no")
+        assert result["gross_spread"] == pytest.approx(0.40)
+        assert result["net_profit"] > 0
+
+    def test_negative_spread(self):
+        result = net_profit_cross_gemini(0.60, 0.50, "yes", "no")
+        assert result["gross_spread"] == pytest.approx(-0.10)
+        assert result["net_profit"] == pytest.approx(-0.10)
+
+    def test_includes_gemini_entry_fee(self):
+        from config import POLYGON_GAS_ESTIMATE
+        # Gemini entry fee = min(0.30, 0.70) * 0.05 = 0.015
+        # PM win fee = 0.02 * (1.0 - 0.30) = 0.014
+        # worst_fees = max(0.014 + 0.015, 0.015) = 0.029
+        result = net_profit_cross_gemini(0.30, 0.30, "yes", "no")
+        gm_entry = gemini_fee(0.30, 0.05)
+        pm_fee = polymarket_fee(0.30, 1.0)
+        expected_worst = max(pm_fee + gm_entry, gm_entry) + POLYGON_GAS_ESTIMATE
+        assert result["fees"] == pytest.approx(expected_worst)
+
+
+# ---------------------------------------------------------------------------
+# net_profit_ibkr_binary
+# ---------------------------------------------------------------------------
+
+class TestNetProfitIBKRBinary:
+    def test_positive_spread_zero_fees(self):
+        result = net_profit_ibkr_binary(0.40, 0.40)
+        assert result["gross_spread"] == pytest.approx(0.20)
+        assert result["fees"] == 0
+        assert result["net_profit"] == pytest.approx(0.20)
+
+    def test_negative_spread(self):
+        result = net_profit_ibkr_binary(0.55, 0.50)
+        assert result["gross_spread"] == pytest.approx(-0.05)
+        assert result["fees"] == 0
+        assert result["net_profit"] == pytest.approx(-0.05)
+
+    def test_profit_equals_gross_spread(self):
+        """IBKR has $0.00 fees so net_profit always equals gross_spread."""
+        result = net_profit_ibkr_binary(0.30, 0.30)
+        assert result["net_profit"] == pytest.approx(result["gross_spread"])
+
+
+# ---------------------------------------------------------------------------
+# net_profit_cross_ibkr
+# ---------------------------------------------------------------------------
+
+class TestNetProfitCrossIBKR:
+    def test_positive_spread(self):
+        result = net_profit_cross_ibkr(0.30, 0.30, "yes", "no")
+        assert result["gross_spread"] == pytest.approx(0.40)
+        assert result["net_profit"] > 0
+
+    def test_negative_spread(self):
+        result = net_profit_cross_ibkr(0.60, 0.50, "yes", "no")
+        assert result["gross_spread"] == pytest.approx(-0.10)
+        assert result["net_profit"] == pytest.approx(-0.10)
+
+    def test_ibkr_zero_fee_means_only_poly_fees(self):
+        from config import POLYGON_GAS_ESTIMATE
+        # IBKR fee = 0, only Polymarket fees + gas
+        result = net_profit_cross_ibkr(0.30, 0.30, "yes", "no")
+        assert result["fees"] >= POLYGON_GAS_ESTIMATE
