@@ -78,6 +78,21 @@ class TradeDB:
         """)
         self.conn.commit()
 
+        # Create indexes for common query patterns (safe — IF NOT EXISTS)
+        self.conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_trades_opportunity_id
+                ON trades(opportunity_id);
+            CREATE INDEX IF NOT EXISTS idx_positions_status
+                ON positions(status);
+            CREATE INDEX IF NOT EXISTS idx_positions_opportunity_id
+                ON positions(opportunity_id);
+            CREATE INDEX IF NOT EXISTS idx_partial_fills_hedge_status
+                ON partial_fills(hedge_status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_opportunities_timestamp
+                ON opportunities(timestamp);
+        """)
+        self.conn.commit()
+
         # Safe migration: add slippage column if it doesn't exist
         try:
             self.conn.execute("ALTER TABLE trades ADD COLUMN slippage REAL")

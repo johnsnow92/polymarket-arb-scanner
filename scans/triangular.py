@@ -316,9 +316,11 @@ def scan_triangular(
         yes_market = platform_prices[best_yes_platform]["market"]
         _attach_exec_metadata(opp, yes_market, best_yes_platform)
 
-        # Attach execution metadata for the NO-side platform (suffix to avoid key collisions)
-        no_market = platform_prices[best_no_platform]["market"]
-        _attach_exec_metadata(opp, no_market, best_no_platform)
+        # Attach execution metadata for the NO-side platform.
+        # Skip if both sides are the same platform (keys already attached above).
+        if best_no_platform != best_yes_platform:
+            no_market = platform_prices[best_no_platform]["market"]
+            _attach_exec_metadata(opp, no_market, best_no_platform)
 
         opportunities.append(opp)
 

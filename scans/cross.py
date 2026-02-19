@@ -466,13 +466,21 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float):
         pm_no = clob["no_ask"]
 
         # Parse the other platform's price from the prices string
+        # Format: "PM_Y=0.45 K_N=0.50" or similar — skip Polymarket entries
         other_price = None
         for part in o.get("prices", "").split():
-            if not part.startswith("polymarket") and "=" in part:
-                try:
-                    other_price = float(part.split("=")[1])
-                except ValueError:
-                    pass
+            if "=" not in part:
+                continue
+            label, _, val_str = part.partition("=")
+            if not val_str or label.lower().startswith("pm_") or label.lower().startswith("polymarket"):
+                continue
+            try:
+                candidate = float(val_str)
+                if 0.0 < candidate < 1.0:
+                    other_price = candidate
+                    break
+            except ValueError:
+                logger.debug("Could not parse price from prices part %r", part)
 
         if other_price is None:
             continue
