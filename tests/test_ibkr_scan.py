@@ -24,9 +24,9 @@ def mock_external_modules():
     for mod_name in mock_modules:
         if mod_name in sys.modules:
             del sys.modules[mod_name]
-    for mod in list(sys.modules):
-        if mod.startswith("scans"):
-            del sys.modules[mod]
+    # Only remove the scan module under test — NOT scans.helpers or scans.__init__
+    if "scans.ibkr" in sys.modules:
+        del sys.modules["scans.ibkr"]
 
 
 def _make_ibkr_event(event_id, title, yes_price, no_price):
@@ -48,9 +48,8 @@ def _make_ibkr_event(event_id, title, yes_price, no_price):
 
 class TestScanIBKRBinary:
     def _import_scan(self):
-        for mod in list(sys.modules):
-            if mod.startswith("scans"):
-                del sys.modules[mod]
+        if "scans.ibkr" in sys.modules:
+            del sys.modules["scans.ibkr"]
         from scans.ibkr import scan_ibkr_binary
         return scan_ibkr_binary
 

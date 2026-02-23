@@ -1,15 +1,18 @@
 """SQLite persistence for trade logging and opportunity tracking."""
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 class TradeDB:
     """Thread-safe SQLite database for logging opportunities and trades."""
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str | None = None):
         if db_path is None:
             import os
             data_dir = os.getenv("DATA_DIR", ".")
@@ -83,7 +86,7 @@ class TradeDB:
             self.conn.execute("ALTER TABLE trades ADD COLUMN slippage REAL")
             self.conn.commit()
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            logger.debug("Migration: column already exists")
 
     def log_opportunity(
         self,
@@ -95,7 +98,7 @@ class TradeDB:
         net_roi: float,
         depth: float,
         action: str,
-    ) -> int:
+    ) -> int | None:
         """Log a detected opportunity. Returns the opportunity ID."""
         with self._lock:
             cur = self.conn.execute(
@@ -127,7 +130,7 @@ class TradeDB:
         status: str,
         fill_price: float | None = None,
         order_id: str | None = None,
-    ) -> int:
+    ) -> int | None:
         """Log a trade leg. Returns the trade ID."""
         with self._lock:
             cur = self.conn.execute(
@@ -221,7 +224,7 @@ class TradeDB:
         market_identifier: str,
         platform: str,
         expected_pnl: float,
-    ) -> int:
+    ) -> int | None:
         """Create an open position after a trade is filled. Returns position ID."""
         with self._lock:
             cur = self.conn.execute(
@@ -322,7 +325,7 @@ class TradeDB:
         side: str,
         fill_price: float,
         size: float,
-    ) -> int:
+    ) -> int | None:
         """Log a partial fill for hedging. Returns partial_fill ID."""
         with self._lock:
             cur = self.conn.execute(
@@ -343,7 +346,7 @@ class TradeDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def update_partial_fill(self, pf_id: int, status: str, attempts: int = None):
+    def update_partial_fill(self, pf_id: int, status: str, attempts: int | None = None):
         """Update partial fill hedge status."""
         with self._lock:
             if attempts is not None:

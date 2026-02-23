@@ -148,8 +148,8 @@ class EventMonitor:
                         prices = raw
                     if prices and len(prices) >= 1:
                         return float(prices[0])
-                except (ValueError, TypeError, IndexError):
-                    pass
+                except (ValueError, TypeError, IndexError) as e:
+                    logger.debug("Price parse failed for Polymarket outcomePrices: %s", e)
 
             # Try tokens array
             tokens = market.get("tokens", [])
@@ -166,16 +166,16 @@ class EventMonitor:
             if yes_price is not None:
                 try:
                     return float(yes_price) / 100.0
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e:
+                    logger.debug("Price parse failed for Kalshi yes_price: %s", e)
 
             # Fallback: last_price
             last_price = market.get("last_price")
             if last_price is not None:
                 try:
                     return float(last_price) / 100.0
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as e:
+                    logger.debug("Price parse failed for Kalshi last_price: %s", e)
 
             return None
 

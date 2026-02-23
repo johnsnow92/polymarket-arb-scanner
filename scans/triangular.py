@@ -13,9 +13,11 @@ sequential pairwise scanning would miss.
 import logging
 from itertools import combinations
 
-from polymarket_api import parse_outcome_prices
-from matcher import match_cross_platform, _get_title
-from config import FUZZY_MATCH_THRESHOLD
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from polymarket_api import parse_outcome_prices, get_clob_prices
+from matcher import match_cross_platform, match_cross_platform_semantic, _get_title
+from config import FUZZY_MATCH_THRESHOLD, SEMANTIC_MATCHING_ENABLED, SEMANTIC_MATCH_THRESHOLD
 from fees import net_profit_triangular
 from scans.helpers import filter_dust, _extract_token_ids
 
@@ -229,14 +231,24 @@ def scan_triangular(
             continue
 
         logger.debug("Matching %s (%d) vs %s (%d)...", pa, len(markets_a), pb, len(markets_b))
-        matched = match_cross_platform(
-            markets_a,
-            markets_b,
-            pa,
-            pb,
-            threshold=FUZZY_MATCH_THRESHOLD,
-            min_confidence=min_confidence,
-        )
+        if SEMANTIC_MATCHING_ENABLED:
+            matched = match_cross_platform_semantic(
+                markets_a,
+                markets_b,
+                pa,
+                pb,
+                threshold=SEMANTIC_MATCH_THRESHOLD,
+                min_confidence=min_confidence,
+            )
+        else:
+            matched = match_cross_platform(
+                markets_a,
+                markets_b,
+                pa,
+                pb,
+                threshold=FUZZY_MATCH_THRESHOLD,
+                min_confidence=min_confidence,
+            )
         all_matches.extend(matched)
         logger.debug("Found %d matches between %s and %s", len(matched), pa, pb)
 
@@ -322,9 +334,111 @@ def scan_triangular(
 
         opportunities.append(opp)
 
+    # Stage 2: Refine Polymarket-side opportunities with CLOB ask prices
+    opportunities = _refine_triangular_with_clob(opportunities, min_profit)
+
     # Filter dust and sort by net_profit descending
     opportunities = filter_dust(opportunities)
     opportunities.sort(key=lambda o: o.get("net_profit", 0), reverse=True)
 
     logger.info("Triangular scan complete: %d opportunities found.", len(opportunities))
     return opportunities
+
+
+def _refine_triangular_with_clob(opportunities: list[dict], min_profit: float) -> list[dict]:
+    """Refine triangular opportunities that include Polymarket using CLOB ask prices.
+
+    For each opportunity where one leg is on Polymarket, fetch the real ask
+    price from the CLOB order book and recalculate profit.  Drops candidates
+    that are no longer profitable at actual fill prices.
+
+    Args:
+        opportunities: Mid-price triangular opportunities.
+        min_profit: Minimum net profit threshold.
+
+    Returns:
+        Refined list of opportunities with updated prices and depths.
+    """
+    pm_opps = [o for o in opportunities
+               if o.get("_platform_a") == "polymarket" or o.get("_platform_b") == "polymarket"]
+    if not pm_opps:
+        return opportunities
+
+    logger.info("Refining %d triangular candidates with CLOB ask prices...", len(pm_opps))
+
+    # Pre-fetch CLOB prices in parallel
+    clob_cache: dict[tuple, dict] = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {}
+        for o in pm_opps:
+            token_ids = o.get("_token_ids", [])
+            if token_ids and len(token_ids) >= 2:
+                key = tuple(token_ids[:2])
+                if key not in futures:
+                    futures[pool.submit(get_clob_prices, {"clobTokenIds": list(key)})] = key
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                clob_cache[key] = future.result()
+            except Exception as e:
+                logger.debug("CLOB fetch failed for triangular refinement: %s", e)
+
+    refined = []
+    for o in opportunities:
+        pa = o.get("_platform_a", "")
+        pb = o.get("_platform_b", "")
+
+        # Non-PM opportunities pass through without refinement
+        if pa != "polymarket" and pb != "polymarket":
+            refined.append(o)
+            continue
+
+        token_ids = o.get("_token_ids", [])
+        if not token_ids or len(token_ids) < 2:
+            refined.append(o)
+            continue
+
+        clob = clob_cache.get(tuple(token_ids[:2]))
+        if not clob or clob.get("yes_ask") is None or clob.get("no_ask") is None:
+            o["_clob_refined"] = False
+            refined.append(o)
+            continue
+
+        # Determine which side Polymarket is on and use real ask price
+        if pa == "polymarket":
+            pm_side = o.get("_side_a", "yes") if "_side_a" in o else "yes"
+            pm_ask = clob["yes_ask"] if pm_side == "yes" else clob["no_ask"]
+            other_price = o.get("_price_b", 0)
+            other_platform = pb
+            result = net_profit_triangular(
+                pm_ask if pm_side == "yes" else other_price,
+                other_price if pm_side == "yes" else pm_ask,
+                pa, pb,
+            )
+        else:
+            pm_side = o.get("_side_b", "yes") if "_side_b" in o else "yes"
+            pm_ask = clob["yes_ask"] if pm_side == "yes" else clob["no_ask"]
+            other_price = o.get("_price_a", 0)
+            other_platform = pa
+            result = net_profit_triangular(
+                other_price if pm_side == "no" else pm_ask,
+                pm_ask if pm_side == "no" else other_price,
+                pa, pb,
+            )
+
+        if result["net_profit"] >= min_profit:
+            o["net_profit"] = result["net_profit"]
+            o["fees"] = f"${result['fees']:.4f}"
+            total_cost = pm_ask + other_price
+            if total_cost > 0:
+                o["net_roi"] = f"{result['net_profit'] / total_cost * 100:.2f}%"
+            o["_clob_depth"] = min(
+                clob.get("yes_ask_size") or 0,
+                clob.get("no_ask_size") or 0,
+            )
+            refined.append(o)
+
+    dropped = len(opportunities) - len(refined)
+    if dropped:
+        logger.info("Dropped %d triangular candidates at CLOB ask prices.", dropped)
+    return refined

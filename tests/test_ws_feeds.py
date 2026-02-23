@@ -7,7 +7,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from unittest.mock import MagicMock
 
-# Mock kalshi_api module before importing ws_feeds
+# Mock kalshi_api module before importing ws_feeds.
+# Save the original so we can restore it after import to avoid polluting
+# other test modules that need the real kalshi_api.
+_original_kalshi = sys.modules.get("kalshi_api")
 mock_kalshi = MagicMock()
 mock_kalshi._sign_pss = MagicMock(return_value="fake_sig")
 mock_kalshi._load_private_key = MagicMock(return_value=None)
@@ -16,6 +19,12 @@ mock_kalshi.KALSHI_API_PATH = "/trade-api/v2"
 sys.modules["kalshi_api"] = mock_kalshi
 
 from ws_feeds import FeedManager, RECONNECT_DELAY, RECONNECT_MAX_DELAY
+
+# Restore the original kalshi_api module so other test files aren't polluted
+if _original_kalshi is not None:
+    sys.modules["kalshi_api"] = _original_kalshi
+else:
+    del sys.modules["kalshi_api"]
 
 
 def _make_feed(mock_callback: MagicMock) -> FeedManager:

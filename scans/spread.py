@@ -87,8 +87,8 @@ def scan_spread_polymarket(markets: list[dict], min_profit: float) -> list[dict]
                 result = future.result()
                 if result:
                     opportunities.append(result)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Spread check failed: %s", e)
 
     logger.info("Found %d Polymarket spread opportunities.", len(opportunities))
     opportunities = filter_dust(opportunities)

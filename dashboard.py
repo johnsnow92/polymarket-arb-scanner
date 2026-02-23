@@ -47,6 +47,31 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/metrics":
+            try:
+                from metrics import metrics
+                body = metrics.get_prometheus_text().encode("utf-8")
+            except Exception as e:
+                logger.debug("Error loading metrics: %s", e)
+                body = b"# metrics unavailable\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/alerts":
+            try:
+                from alerting import alert_manager
+                alerts = alert_manager.get_recent_alerts(50)
+                body = json.dumps(alerts, indent=2).encode()
+            except Exception as e:
+                logger.debug("Error loading alerts: %s", e)
+                body = b"[]"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_response(404)
             self.end_headers()

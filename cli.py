@@ -86,6 +86,7 @@ from config import (
     GAS_PRICE_CACHE_TTL as CONFIG_GAS_CACHE_TTL,
     EVENT_DIVERGENCE_THRESHOLD as CONFIG_EVENT_DIVERGENCE,
     EVENT_MONITOR_ENABLED as CONFIG_EVENT_MONITOR,
+    CONCURRENT_EXECUTION as CONFIG_CONCURRENT_EXECUTION,
 )
 
 # Load .env from project dir first, then ~/.claude/.env as fallback
@@ -364,6 +365,17 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
 
 
 def main():
+    """CLI entry point: parse arguments, initialise clients, and run scans.
+
+    Parses command-line flags (mode, thresholds, execution settings, logging),
+    resolves config precedence (CLI > env > defaults), initialises platform
+    API clients (Polymarket, Kalshi, Betfair, Smarkets, SX Bet, Matchbook,
+    Gemini, IBKR, Metaculus), sets up the trade executor, risk manager, and
+    database, then dispatches to either one-shot scanning or continuous mode
+    with WebSocket price feeds.
+
+    Exits with code 0 on clean shutdown, 1 on fatal initialisation errors.
+    """
     parser = argparse.ArgumentParser(description="Polymarket Arbitrage Scanner")
     parser.add_argument(
         "--mode",
@@ -592,15 +604,14 @@ def main():
         else:
             logger.info("IBKR connected successfully.")
 
-    # Initialize Metaculus client (read-only signal source)
+    # Initialize Metaculus client (read-only signal source, public API works without key)
     metaculus_client = None
     mc_key = os.getenv("METACULUS_API_KEY")
-    if mc_key or True:  # Public API works without key
-        metaculus_client = MetaculusClient()
-        if metaculus_client.login(api_key=mc_key):
-            logger.info("Metaculus client initialized%s.", " (with API key)" if mc_key else " (public)")
-        else:
-            metaculus_client = None
+    metaculus_client = MetaculusClient()
+    if metaculus_client.login(api_key=mc_key):
+        logger.info("Metaculus client initialized%s.", " (with API key)" if mc_key else " (public)")
+    else:
+        metaculus_client = None
 
     # Initialize GasMonitor for dynamic fee thresholds
     gas_monitor = None
@@ -643,6 +654,7 @@ def main():
         revalidation_min_floor=CONFIG_REVALIDATION_MIN_FLOOR,
         dynamic_sizing=CONFIG_DYNAMIC_SIZING,
         sizing_aggressiveness=CONFIG_SIZING_AGGRESSIVENESS,
+        concurrent_execution=CONFIG_CONCURRENT_EXECUTION,
     )
 
     extra_clients = {

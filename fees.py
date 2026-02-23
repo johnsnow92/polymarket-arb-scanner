@@ -1,11 +1,33 @@
 """Fee calculators for Polymarket and Kalshi."""
 
+import logging
 import math
 
 from config import (
+    FEE_MODEL,
     KALSHI_FEE_CAP_CENTS,
     POLYGON_GAS_ESTIMATE,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _select_fees(case_a_fees: float, case_b_fees: float, price_a: float) -> float:
+    """Select fee estimate based on the configured FEE_MODEL.
+
+    Args:
+        case_a_fees: Fees when side A wins.
+        case_b_fees: Fees when side B wins.
+        price_a: Buy price on side A, used as probability proxy for EV model.
+
+    Returns:
+        Fee estimate (worst-case or expected-value depending on FEE_MODEL).
+    """
+    if FEE_MODEL == "expected_value":
+        # Use price as proxy for probability of that side winning
+        prob_a = max(0.0, min(1.0, price_a))
+        return prob_a * case_b_fees + (1.0 - prob_a) * case_a_fees
+    return max(case_a_fees, case_b_fees)
 
 
 def polymarket_fee(buy_price: float, sell_price: float = 1.0) -> float:
@@ -160,14 +182,14 @@ def net_profit_cross_platform(
     # Case 2 (Kalshi wins): only Kalshi entry fee (PM side loses, no fee)
     case2_fees = kalshi_entry_fee
 
-    # Use worst-case fees + Polygon gas for the PM leg
-    worst_fees = max(case1_fees, case2_fees)
+    # Fee estimate + Polygon gas for the PM leg
+    fees = _select_fees(case1_fees, case2_fees, poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees + gas,
-        "net_profit": gross_spread - worst_fees - gas,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
     }
 
 
@@ -212,14 +234,14 @@ def net_profit_cross_betfair(
     bf_win_profit = 1.0 - bf_price
     case2_fees = betfair_commission(bf_win_profit, commission_rate)
 
-    # Use worst-case fees + Polygon gas for the PM leg
-    worst_fees = max(case1_fees, case2_fees)
+    # Fee estimate + Polygon gas for the PM leg
+    fees = _select_fees(case1_fees, case2_fees, poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees + gas,
-        "net_profit": gross_spread - worst_fees - gas,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
     }
 
 
@@ -394,14 +416,14 @@ def net_profit_cross_smarkets(
     sm_win_profit = 1.0 - sm_price
     case2_fees = smarkets_commission(sm_win_profit, commission_rate)
 
-    # Use worst-case fees + Polygon gas for the PM leg
-    worst_fees = max(case1_fees, case2_fees)
+    # Fee estimate + Polygon gas for the PM leg
+    fees = _select_fees(case1_fees, case2_fees, poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees + gas,
-        "net_profit": gross_spread - worst_fees - gas,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
     }
 
 
@@ -499,13 +521,13 @@ def net_profit_cross_matchbook(
     # Case 2 (Matchbook wins): no fees on either side
     case2_fees = 0.0
 
-    worst_fees = max(case1_fees, case2_fees)
+    fees = _select_fees(case1_fees, case2_fees, poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees + gas,
-        "net_profit": gross_spread - worst_fees - gas,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
     }
 
 
@@ -596,13 +618,13 @@ def net_profit_cross_gemini(
     # Case 2 (Gemini wins): Gemini entry fee only (PM side lost, no fee)
     case2_fees = gm_entry_fee
 
-    worst_fees = max(case1_fees, case2_fees)
+    fees = _select_fees(case1_fees, case2_fees, poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees + gas,
-        "net_profit": gross_spread - worst_fees - gas,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
     }
 
 
@@ -653,13 +675,13 @@ def net_profit_cross_ibkr(
     # Case 2 (IBKR wins): no fees on either side
     case2_fees = 0.0
 
-    worst_fees = max(case1_fees, case2_fees)
+    fees = _select_fees(case1_fees, case2_fees, poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees + gas,
-        "net_profit": gross_spread - worst_fees - gas,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
     }
 
 
@@ -705,7 +727,7 @@ def net_profit_triangular(
     # If NO wins: NO-side win fee + YES-side entry fee
     case_no_wins = no_fee + entry_fees
 
-    worst_fees = max(case_yes_wins, case_no_wins)
+    fees = _select_fees(case_yes_wins, case_no_wins, yes_price)
 
     # Gas: Polygon gas for any Polymarket leg
     gas = 0.0
@@ -714,8 +736,8 @@ def net_profit_triangular(
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees + gas,
-        "net_profit": gross_spread - worst_fees - gas,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
     }
 
 
@@ -744,6 +766,62 @@ def _platform_entry_fee(price: float, platform: str) -> float:
     return 0.0
 
 
+def net_profit_cross_generic(
+    price_a: float,
+    price_b: float,
+    side_a: str,
+    side_b: str,
+    platform_a: str = "",
+    platform_b: str = "",
+) -> dict:
+    """Calculate net profit for a cross-platform arbitrage between any two platforms.
+
+    Uses _platform_win_fee and _platform_entry_fee to compute worst-case fees
+    for the given platform pair. Includes Polygon gas when either platform is
+    Polymarket.
+
+    Args:
+        price_a: Price on platform A.
+        price_b: Price on platform B.
+        side_a: 'yes' or 'no' — what we're buying on platform A.
+        side_b: 'yes' or 'no' — what we're buying on platform B.
+        platform_a: Name of the first platform.
+        platform_b: Name of the second platform.
+
+    Returns:
+        Dict with gross_spread, fees, and net_profit.
+    """
+    total_cost = price_a + price_b
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Entry fees (paid regardless of outcome)
+    entry_a = _platform_entry_fee(price_a, platform_a)
+    entry_b = _platform_entry_fee(price_b, platform_b)
+    entry_fees = entry_a + entry_b
+
+    # Case 1 (A wins): A's win fee + B's entry fee + A's entry fee
+    case1_fees = _platform_win_fee(price_a, platform_a) + entry_fees
+    # Case 2 (B wins): B's win fee + A's entry fee + B's entry fee
+    case2_fees = _platform_win_fee(price_b, platform_b) + entry_fees
+
+    fees = _select_fees(case1_fees, case2_fees, price_a)
+
+    # Polygon gas when one side is Polymarket
+    gas = 0.0
+    if platform_a == "polymarket" or platform_b == "polymarket":
+        gas = POLYGON_GAS_ESTIMATE
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
+    }
+
+
 def net_profit_cross_sxbet(
     poly_price: float,
     sx_price: float,
@@ -767,13 +845,13 @@ def net_profit_cross_sxbet(
     # Case 2 (SX Bet wins): no fees on either side
     case2_fees = 0.0
 
-    worst_fees = max(case1_fees, case2_fees)
+    fees = _select_fees(case1_fees, case2_fees, poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
         "gross_spread": gross_spread,
-        "fees": worst_fees + gas,
-        "net_profit": gross_spread - worst_fees - gas,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
     }
 
 

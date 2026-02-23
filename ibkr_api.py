@@ -148,8 +148,8 @@ class IBKRClient:
                         price = ticker.last
                     elif ticker and ticker.close and ticker.close > 0:
                         price = ticker.close
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("IBKR price fetch failed: %s", e)
 
                 events_map[event_id]["contracts"].append({
                     "conid": conid,
@@ -221,8 +221,8 @@ class IBKRClient:
                             yes_price = price
                         elif "NO" in side:
                             no_price = price
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("IBKR price fetch failed: %s", e)
 
         return yes_price, no_price
 

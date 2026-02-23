@@ -21,6 +21,7 @@ from fees import (
     net_profit_kalshi_binary,
     net_profit_kalshi_multi,
     net_profit_cross_betfair,
+    net_profit_cross_generic,
 )
 from config import (
     RESCAN_INTERVAL as CONFIG_RESCAN_INTERVAL,
@@ -28,7 +29,19 @@ from config import (
     WS_TRIGGER_ENABLED as CONFIG_WS_TRIGGER_ENABLED,
     WS_TRIGGER_THRESHOLD as CONFIG_WS_TRIGGER_THRESHOLD,
     HEDGE_ENABLED as CONFIG_HEDGE_ENABLED,
+    SNAPSHOT_ENABLED as CONFIG_SNAPSHOT_ENABLED,
+    SNAPSHOT_INTERVAL as CONFIG_SNAPSHOT_INTERVAL,
 )
+
+# Conditional metrics import — never breaks if metrics.py is missing
+try:
+    from config import METRICS_ENABLED as _METRICS_ENABLED
+    if _METRICS_ENABLED:
+        from metrics import metrics as _metrics
+    else:
+        _metrics = None
+except Exception:
+    _metrics = None
 from scans import (
     scan_binary_internal,
     scan_negrisk_internal,
@@ -198,7 +211,28 @@ def check_settlements(
     gemini_client=None,
     ibkr_client=None,
 ):
-    """Check open positions for settlement and update P&L."""
+    """Check open positions for settlement and update realised P&L.
+
+    Iterates all open positions in the database, queries each platform's
+    API for resolution status, and settles any positions whose underlying
+    market has resolved. Calculates realised P&L from trade history and
+    updates the position record. Also processes pending partial fills that
+    need hedging.
+
+    Args:
+        db: TradeDB instance for reading open positions and writing settlements.
+        kalshi_client: Authenticated KalshiClient, or None to skip Kalshi
+            settlement checks.
+        poly_markets: Latest Polymarket markets list (used to check resolution
+            status), or None.
+        betfair_client: Optional BetfairClient for Betfair settlement checks.
+        smarkets_client: Optional SmarketsClient for Smarkets settlement checks.
+        sxbet_client: Optional SXBetClient for SX Bet settlement checks.
+        matchbook_client: Optional MatchbookClient for Matchbook settlement
+            checks.
+        gemini_client: Optional GeminiClient for Gemini settlement checks.
+        ibkr_client: Optional IBKRClient for IBKR ForecastEx settlement checks.
+    """
     open_positions = db.get_open_positions()
     if not open_positions:
         return
@@ -358,9 +392,33 @@ def _recalc_profit(opp: dict, platform: str, ticker: str, new_price: float, pric
             result = net_profit_kalshi_binary(k_yes, k_no)
             return result["net_profit"]
         elif opp_type.startswith("Cross"):
-            # For cross-platform, use the updated price for the relevant platform
-            return None  # Cross recalc requires both platforms; fall back to stale
-    except Exception:
+            # Cross-platform: use the WS-updated price for one side and cached
+            # price for the other. Requires _price_a/_price_b/_platform_a/_platform_b
+            # metadata attached by the scan (added in cross.py).
+            pa = opp.get("_platform_a", "")
+            pb = opp.get("_platform_b", "")
+            price_a = opp.get("_price_a")
+            price_b = opp.get("_price_b")
+            side_a = opp.get("_side_a", "yes")
+            side_b = opp.get("_side_b", "no")
+            if price_a is None or price_b is None or not pa or not pb:
+                return None
+
+            # Determine which side the WS update applies to
+            if platform == pa:
+                price_a = new_price
+            elif platform == pb:
+                price_b = new_price
+            else:
+                return None  # Update is for an unrelated platform
+
+            result = net_profit_cross_generic(
+                price_a, price_b, side_a, side_b,
+                platform_a=pa, platform_b=pb,
+            )
+            return result["net_profit"]
+    except Exception as e:
+        logger.debug("Error recalculating profit: %s", e)
         return None
     return None
 
@@ -382,7 +440,34 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                    kalshi_private_key_path, executor, db, price_cache,
                    extra_clients=None, notifier=None, pm_trader=None,
                    event_monitor=None):
-    """Continuous mode: periodic re-scans with WebSocket price feeds."""
+    """Run the scanner in continuous mode with WebSocket price feeds.
+
+    Sets up WebSocket connections to all configured platforms, runs periodic
+    full re-scans at a configurable interval, and optionally triggers
+    immediate execution when a WS price update moves a tracked opportunity
+    above the profit threshold. Handles graceful shutdown on SIGINT/SIGTERM,
+    periodic settlement checks, stale price eviction, and dashboard state
+    updates.
+
+    Args:
+        args: Parsed CLI argparse namespace (uses mode, continuous, interval,
+            min_confidence, min_depth, limit, json, dry_run, exec_mode,
+            max_trade, dashboard_port).
+        min_profit: Minimum net profit threshold (0-1 float, e.g. 0.01 = 1%).
+        kalshi_client: Authenticated KalshiClient instance, or None.
+        kalshi_api_key_id: Kalshi API key ID string for WS auth, or None.
+        kalshi_private_key_path: Path to Kalshi RSA private key PEM, or None.
+        executor: TradeExecutor instance for opportunity execution.
+        db: TradeDB instance for logging and settlement tracking.
+        price_cache: Shared dict keyed by (platform, ticker) storing latest
+            price snapshots from WebSocket feeds.
+        extra_clients: Optional dict of additional platform clients keyed by
+            platform name (e.g. {"betfair": BetfairClient, ...}).
+        notifier: Optional Notifier instance for webhook/Slack alerts.
+        pm_trader: Optional PolymarketTrader for on-chain execution.
+        event_monitor: Optional EventMonitor for cross-event divergence
+            tracking.
+    """
     extra_clients = extra_clients or {}
     rescan_interval = getattr(args, 'interval', None) or CONFIG_RESCAN_INTERVAL
 
@@ -467,6 +552,18 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             db=db,
         )
 
+    # Initialize snapshot recorder for backtesting data collection
+    snapshot_recorder = None
+    if CONFIG_SNAPSHOT_ENABLED:
+        try:
+            from snapshot import SnapshotRecorder
+            snapshot_recorder = SnapshotRecorder()
+            logger.info("Snapshot recording enabled (interval=%ds).", CONFIG_SNAPSHOT_INTERVAL)
+        except Exception as e:
+            logger.warning("Failed to initialize snapshot recorder: %s", e)
+
+    _last_snapshot_time = 0.0
+
     # Initialize WebSocket feed manager
     feed_manager = FeedManager(
         on_price_update=on_price_update,
@@ -483,6 +580,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             logger.info("=" * 80)
             logger.info("CONTINUOUS SCAN #%d", scan_count)
             logger.info("=" * 80)
+
+            _scan_start = time.time()
 
             try:
                 from concurrent.futures import ThreadPoolExecutor
@@ -706,6 +805,27 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 dashboard_state.daily_pnl = db.get_daily_pnl()
                 dashboard_state.ws_connections = (1 if ws_task and not ws_task.done() else 0)
 
+                # Update metrics
+                if _metrics:
+                    _scan_duration = time.time() - _scan_start
+                    _metrics.inc("scans_total")
+                    _metrics.inc("opportunities_found", value=len(all_opportunities))
+                    _metrics.observe("scan_duration_seconds", value=_scan_duration)
+                    _metrics.set("scan_cycle_duration_seconds", value=_scan_duration)
+                    _metrics.set("active_positions", value=dashboard_state.open_positions)
+                    _metrics.set("daily_pnl", value=dashboard_state.daily_pnl)
+                    if all_opportunities:
+                        best_roi_str = all_opportunities[0].get("net_roi", "0%")
+                        try:
+                            best_roi = float(best_roi_str.replace("%", "")) / 100 if isinstance(best_roi_str, str) else float(best_roi_str)
+                        except (ValueError, TypeError):
+                            best_roi = 0
+                        _metrics.set("best_opportunity_roi", value=best_roi)
+                        for opp in all_opportunities:
+                            _metrics.observe("opportunity_profit", value=opp.get("net_profit", 0))
+                    _metrics.set("ws_connected", {"platform": "combined"},
+                                 value=1 if ws_task and not ws_task.done() else 0)
+
                 # Evict stale price cache entries
                 _cleanup_price_cache()
 
@@ -741,6 +861,19 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     except Exception as e:
                         logger.warning("Hedger processing failed: %s", e)
 
+                # Record price snapshots for backtesting
+                if snapshot_recorder and all_opportunities:
+                    nonlocal _last_snapshot_time
+                    now = time.time()
+                    if now - _last_snapshot_time >= CONFIG_SNAPSHOT_INTERVAL:
+                        try:
+                            recorded = snapshot_recorder.record_snapshot(all_opportunities)
+                            if recorded:
+                                logger.debug("Recorded %d snapshots.", recorded)
+                            _last_snapshot_time = now
+                        except Exception as e:
+                            logger.warning("Snapshot recording failed: %s", e)
+
                 # Rebuild opportunity index for WS-triggered execution
                 opp_index.rebuild(all_opportunities)
 
@@ -762,6 +895,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
             except Exception as e:
                 logger.error("Scan failed: %s", e)
+                if _metrics:
+                    _metrics.inc("scans_total", {"status": "failed"})
 
             # Wait for next scan interval or shutdown
             logger.info("Next scan in %ds (Ctrl+C to stop)...", rescan_interval)

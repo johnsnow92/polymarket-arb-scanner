@@ -6,7 +6,20 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config import FILL_POLL_INTERVAL, FILL_POLL_TIMEOUT, HEDGE_ENABLED
+from config import (
+    FILL_POLL_INTERVAL, FILL_POLL_TIMEOUT, HEDGE_ENABLED,
+    CONCURRENT_EXECUTION, BALANCE_CACHE_TTL,
+)
+
+# Conditional metrics import — never breaks if metrics.py is missing
+try:
+    from config import METRICS_ENABLED as _METRICS_ENABLED
+    if _METRICS_ENABLED:
+        from metrics import metrics as _metrics
+    else:
+        _metrics = None
+except Exception:
+    _metrics = None
 from db import TradeDB
 from risk_manager import RiskManager
 from polymarket_api import get_clob_prices, fetch_order_book, get_best_bid_ask, PolymarketTrader
@@ -55,6 +68,7 @@ class ArbitrageExecutor:
         revalidation_min_floor: float = 0.003,
         dynamic_sizing: bool = False,
         sizing_aggressiveness: float = 0.5,
+        concurrent_execution: bool = False,
     ):
         self.pm_trader = pm_trader
         self.kalshi_client = kalshi_client
@@ -75,6 +89,42 @@ class ArbitrageExecutor:
         self.revalidation_min_floor = revalidation_min_floor
         self.dynamic_sizing = dynamic_sizing
         self.sizing_aggressiveness = sizing_aggressiveness
+        self.concurrent_execution = concurrent_execution
+        # Balance cache: avoids redundant API calls within a scan cycle
+        self._balance_cache: dict = {}
+        self._balance_cache_ts: float = 0.0
+        self._balance_cache_type: str = ""
+
+    def _get_cached_balances(self, opp_type: str) -> dict | None:
+        """Return cached balances if fresh, otherwise fetch and cache.
+
+        Caches balance results for BALANCE_CACHE_TTL seconds to avoid
+        redundant API calls between the risk gate and preflight check,
+        and across rapid WS-triggered executions.
+
+        Args:
+            opp_type: Opportunity type string for platform determination.
+
+        Returns:
+            Dict of {platform: balance} or None if no balances available.
+        """
+        now = time.time()
+        if (now - self._balance_cache_ts < BALANCE_CACHE_TTL
+                and self._balance_cache_type == opp_type
+                and self._balance_cache):
+            return self._balance_cache
+        balances = self._fetch_balances(opp_type)
+        if balances:
+            self._balance_cache = balances
+            self._balance_cache_ts = now
+            self._balance_cache_type = opp_type
+        return balances
+
+    def invalidate_balance_cache(self):
+        """Clear the balance cache after a trade fills or position changes."""
+        self._balance_cache = {}
+        self._balance_cache_ts = 0.0
+        self._balance_cache_type = ""
 
     def execute(self, opportunity: dict, market_data: dict | None = None) -> bool:
         """Execute an arbitrage opportunity through the full pipeline.
@@ -92,17 +142,23 @@ class ArbitrageExecutor:
 
         logger.info(f"{prefix}--- Evaluating: {market} ({opp_type}) ---")
 
+        _exec_start = time.time()
+
         # 1. Re-validate prices
         if not self.dry_run and not self._revalidate(opportunity, self.price_cache):
             self._log_skipped(opportunity, "stale_prices")
+            if _metrics:
+                _metrics.inc("revalidation_failures", {"type": opp_type})
             return False
 
-        # 2. Risk gate
-        balances = self._fetch_balances(opp_type)
+        # 2. Risk gate (uses cached balances to avoid redundant API calls)
+        balances = self._get_cached_balances(opp_type)
         allowed, reason = self.risk.check(opportunity, self.db, balances)
         if not allowed:
             logger.info(f"{prefix}Risk blocked: {reason}")
             self._log_skipped(opportunity, f"risk:{reason}")
+            if _metrics:
+                _metrics.inc("risk_rejections", {"reason": reason[:50]})
             return False
 
         # 2b. Dynamic fee check (GasMonitor)
@@ -147,9 +203,24 @@ class ArbitrageExecutor:
 
         # 7. Execute or dry-run log
         if self.dry_run:
-            return self._dry_run_log(opportunity, legs, size)
+            result = self._dry_run_log(opportunity, legs, size)
+            if _metrics and result:
+                _metrics.inc("trades_executed", {"platform": opp_type, "status": "dry_run"})
+            return result
         else:
-            return self._execute_legs(opportunity, legs, size)
+            # Use concurrent execution when enabled and all legs support cancellation
+            if self.concurrent_execution and self._supports_concurrent(legs):
+                result = self._execute_legs_concurrent(opportunity, legs, size)
+            else:
+                result = self._execute_legs(opportunity, legs, size)
+            if _metrics:
+                latency = time.time() - _exec_start
+                _metrics.observe("execution_latency_seconds", {"type": opp_type}, latency)
+                if result:
+                    _metrics.inc("trades_executed", {"platform": opp_type, "status": "filled"})
+                else:
+                    _metrics.inc("trades_failed", {"platform": opp_type, "reason": "execution"})
+            return result
 
     def _revalidate(self, opportunity: dict, price_cache: dict | None = None) -> bool:
         """Re-fetch current prices and verify the opportunity still exists.
@@ -593,8 +664,19 @@ class ArbitrageExecutor:
         return balance / num_legs
 
     def _fetch_balances(self, opp_type: str) -> dict | None:
-        """Fetch balances from relevant platforms."""
-        balances = {}
+        """Fetch balances from relevant platforms concurrently.
+
+        Builds a list of (platform_name, callable) pairs based on the
+        opportunity type, then submits all balance fetches in parallel
+        via ThreadPoolExecutor. This reduces cross-platform balance
+        fetching from sequential (200ms-2s) to parallel (~200ms).
+
+        Args:
+            opp_type: Opportunity type string (e.g. "Cross(PM_YES + K_NO)").
+
+        Returns:
+            Dict of {platform: balance} or None if no balances fetched.
+        """
         needs_kalshi = "Kalshi" in opp_type or "Cross" in opp_type or "Triangular" in opp_type
         needs_polymarket = "Kalshi" not in opp_type or "Cross" in opp_type or "Triangular" in opp_type
         needs_exchange = (
@@ -605,35 +687,41 @@ class ArbitrageExecutor:
             or opp_type == "EventDivergence"
         )
 
+        # Build list of (platform_name, fetch_callable) to run in parallel
+        fetch_tasks: list[tuple[str, callable]] = []
         if needs_kalshi and self.kalshi_client:
-            balances["kalshi"] = self.kalshi_client.get_balance()
+            fetch_tasks.append(("kalshi", self.kalshi_client.get_balance))
         if needs_polymarket and self.pm_trader:
-            balances["polymarket"] = self.pm_trader.get_balance()
+            fetch_tasks.append(("polymarket", self.pm_trader.get_balance))
         if needs_exchange:
-            if self.betfair_client and hasattr(self.betfair_client, "get_balance"):
-                bal = self.betfair_client.get_balance()
-                if bal is not None:
-                    balances["betfair"] = bal
-            if self.smarkets_client and hasattr(self.smarkets_client, "get_balance"):
-                bal = self.smarkets_client.get_balance()
-                if bal is not None:
-                    balances["smarkets"] = bal
-            if self.sxbet_client and hasattr(self.sxbet_client, "get_balance"):
-                bal = self.sxbet_client.get_balance()
-                if bal is not None:
-                    balances["sxbet"] = bal
-            if self.matchbook_client and hasattr(self.matchbook_client, "get_balance"):
-                bal = self.matchbook_client.get_balance()
-                if bal is not None:
-                    balances["matchbook"] = bal
-            if self.gemini_client and hasattr(self.gemini_client, "get_balance"):
-                bal = self.gemini_client.get_balance()
-                if bal is not None:
-                    balances["gemini"] = bal
-            if self.ibkr_client and hasattr(self.ibkr_client, "get_balance"):
-                bal = self.ibkr_client.get_balance()
-                if bal is not None:
-                    balances["ibkr"] = bal
+            exchange_clients = [
+                ("betfair", self.betfair_client),
+                ("smarkets", self.smarkets_client),
+                ("sxbet", self.sxbet_client),
+                ("matchbook", self.matchbook_client),
+                ("gemini", self.gemini_client),
+                ("ibkr", self.ibkr_client),
+            ]
+            for name, client in exchange_clients:
+                if client and hasattr(client, "get_balance"):
+                    fetch_tasks.append((name, client.get_balance))
+
+        if not fetch_tasks:
+            return None
+
+        balances = {}
+        with ThreadPoolExecutor(max_workers=len(fetch_tasks)) as pool:
+            futures = {
+                pool.submit(fn): name for name, fn in fetch_tasks
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    bal = future.result()
+                    if bal is not None:
+                        balances[name] = bal
+                except Exception as e:
+                    logger.debug("Failed to fetch %s balance: %s", name, e)
         return balances if balances else None
 
     def _build_legs(self, opportunity: dict, size: float) -> list[dict]:
@@ -988,8 +1076,8 @@ class ArbitrageExecutor:
             if part.startswith("platform="):
                 try:
                     platform_price = float(part.split("=", 1)[1])
-                except ValueError:
-                    pass
+                except ValueError as e:
+                    logger.debug("Ignoring unparseable price part: %s", e)
                 break
 
         if not platform or not direction or platform_price is None:
@@ -1148,23 +1236,25 @@ class ArbitrageExecutor:
             )
             leg["_trade_id"] = trade_id
 
-        # Pre-flight: verify total cost of all legs fits within balance
-        total_expected_cost = 0
+        # Pre-flight: verify cost per platform fits within cached balances.
+        # Groups legs by platform and checks each platform's balance separately,
+        # fixing the previous bug where only the first leg's platform was checked.
+        opp_type = opportunity.get("type", "")
+        cached_balances = self._get_cached_balances(opp_type) or {}
+        cost_per_platform: dict[str, float] = {}
         for leg in legs:
             price = leg.get("price", 0)
             if price > 0:
                 count = int(size / price)
-                total_expected_cost += count * price
-        if total_expected_cost > 0:
-            platform_key = legs[0]["platform"] if legs else ""
-            preflight_balance = None
-            if platform_key == "kalshi" and self.kalshi_client:
-                preflight_balance = self.kalshi_client.get_balance()
-            elif platform_key == "polymarket" and self.pm_trader:
-                preflight_balance = self.pm_trader.get_balance()
-            if preflight_balance is not None and isinstance(preflight_balance, (int, float)) and total_expected_cost > preflight_balance * 0.95:
-                logger.warning("Pre-flight: total cost $%.2f exceeds 95%% of balance $%.2f. Skipping.",
-                               total_expected_cost, preflight_balance)
+                plat = leg["platform"]
+                cost_per_platform[plat] = cost_per_platform.get(plat, 0) + count * price
+        for plat, cost in cost_per_platform.items():
+            bal = cached_balances.get(plat)
+            if bal is not None and isinstance(bal, (int, float)) and cost > bal * 0.95:
+                logger.warning(
+                    "Pre-flight: %s cost $%.2f exceeds 95%% of balance $%.2f. Skipping.",
+                    plat, cost, bal,
+                )
                 for leg in legs:
                     self.db.update_trade_status(leg["_trade_id"], "aborted")
                 return False
@@ -1244,6 +1334,8 @@ class ArbitrageExecutor:
                 platform=platform,
                 expected_pnl=opportunity.get("net_profit", 0),
             )
+            # Invalidate balance cache after a successful trade
+            self.invalidate_balance_cache()
         else:
             # Partial fill detected — attempt hedging on filled legs
             logger.warning("Partial fill detected. Attempting hedge...")
@@ -1283,6 +1375,138 @@ class ArbitrageExecutor:
                             if trade_id:
                                 self.db.update_trade_status(trade_id, "orphaned")
                             logger.warning(f"Leg {i+1} cancel failed -- marked as orphaned.")
+
+        return all_filled
+
+    # Platforms that cannot sell/cancel — concurrent execution is not safe
+    _NO_CANCEL_PLATFORMS = frozenset({"ibkr"})
+
+    def _supports_concurrent(self, legs: list[dict]) -> bool:
+        """Check whether all legs are on platforms that support cancellation.
+
+        Concurrent execution requires the ability to hedge (sell) a filled
+        leg if the other leg fails.  IBKR is BUY-only and cannot be hedged,
+        so any opportunity involving IBKR must fall back to sequential mode.
+        """
+        for leg in legs:
+            if leg.get("platform", "") in self._NO_CANCEL_PLATFORMS:
+                return False
+        return len(legs) >= 2
+
+    def _execute_legs_concurrent(
+        self, opportunity: dict, legs: list[dict], size: float,
+    ) -> bool:
+        """Submit all legs simultaneously and hedge on partial failure.
+
+        All legs are submitted via ThreadPoolExecutor at once.  After all
+        futures complete:
+        - All succeed → create position (normal flow).
+        - Some fail → hedge filled legs using PartialFillHedger.
+        """
+        total_cost_str = opportunity.get("total_cost", "$0")
+        total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
+        roi_str = opportunity.get("net_roi", "0%")
+        roi = float(roi_str.replace("%", "")) / 100 if isinstance(roi_str, str) else 0
+
+        opp_id = self.db.log_opportunity(
+            opp_type=opportunity.get("type", ""),
+            market=opportunity.get("market", ""),
+            prices=opportunity.get("prices", ""),
+            total_cost=total_cost,
+            net_profit=opportunity.get("net_profit", 0),
+            net_roi=roi,
+            depth=opportunity.get("_clob_depth", 0),
+            action="traded_concurrent",
+        )
+
+        # Log all trades as pending
+        for leg in legs:
+            trade_id = self.db.log_trade(
+                opportunity_id=opp_id,
+                platform=leg["platform"],
+                side=leg.get("side", leg.get("token", "")),
+                price=leg.get("price", 0),
+                size=size,
+                status="pending",
+            )
+            leg["_trade_id"] = trade_id
+
+        results: dict[int, bool] = {}
+
+        # Submit all legs concurrently
+        with ThreadPoolExecutor(max_workers=len(legs)) as pool:
+            futures = {}
+            for i, leg in enumerate(legs):
+                future = pool.submit(self._execute_single_leg, leg, size, opportunity)
+                futures[future] = (i, leg)
+            for future in as_completed(futures):
+                idx, leg = futures[future]
+                try:
+                    success, order_id, fill_price = future.result()
+                    trade_id = leg["_trade_id"]
+                    if success:
+                        slippage = fill_price - leg.get("price", 0) if fill_price else 0
+                        self.db.update_trade_status(
+                            trade_id, "filled", fill_price, slippage=slippage)
+                        results[idx] = True
+                        logger.info(
+                            "Concurrent leg %d FILLED: %s order=%s",
+                            idx + 1, leg["platform"], order_id,
+                        )
+                    else:
+                        self.db.update_trade_status(trade_id, "failed")
+                        results[idx] = False
+                        logger.error(
+                            "Concurrent leg %d FAILED: %s", idx + 1, leg["platform"])
+                except Exception as e:
+                    trade_id = leg["_trade_id"]
+                    self.db.update_trade_status(trade_id, "failed")
+                    results[idx] = False
+                    logger.error("Concurrent leg %d ERROR: %s", idx + 1, e)
+
+        all_filled = len(results) == len(legs) and all(results.values())
+        if all_filled:
+            market = opportunity.get("market", "Unknown")
+            opp_type = opportunity.get("type", "")
+            platform = "polymarket"
+            if "Kalshi" in opp_type:
+                platform = "kalshi"
+            elif "Cross" in opp_type:
+                platform = "cross"
+            self.db.create_position(
+                opportunity_id=opp_id,
+                market_identifier=market,
+                platform=platform,
+                expected_pnl=opportunity.get("net_profit", 0),
+            )
+        else:
+            # Hedge any filled legs
+            logger.warning("Concurrent execution: partial fill detected. Attempting hedge...")
+            if HEDGE_ENABLED:
+                from hedger import PartialFillHedger
+                hedger = PartialFillHedger(
+                    pm_trader=self.pm_trader,
+                    kalshi_client=self.kalshi_client,
+                    betfair_client=self.betfair_client,
+                    smarkets_client=self.smarkets_client,
+                    sxbet_client=self.sxbet_client,
+                    matchbook_client=self.matchbook_client,
+                    gemini_client=self.gemini_client,
+                    db=self.db,
+                )
+                for i, leg in enumerate(legs):
+                    if results.get(i) and leg.get("_order_id"):
+                        fill_price = leg.get("price", 0)
+                        hedger.queue_hedge(
+                            trade_id=leg.get("_trade_id"),
+                            platform=leg["platform"],
+                            token_id=leg.get("_token_id", leg.get("_ticker", "")),
+                            side=leg.get("side", ""),
+                            fill_price=fill_price,
+                            size=size,
+                            opportunity_id=opp_id,
+                        )
+                hedger.process_pending_hedges()
 
         return all_filled
 
@@ -1454,9 +1678,11 @@ class ArbitrageExecutor:
                 return False, None, None
             outcome = leg.get("outcome", "yes")
             quantity = max(1, int(size / price)) if price > 0 else 1
+            from config import GEMINI_ORDER_TYPE
+            tif = "good-til-cancelled" if GEMINI_ORDER_TYPE == "gtc" else "immediate-or-cancel"
             resp = self.gemini_client.place_order(
                 symbol=symbol, side="buy", outcome=outcome,
-                quantity=quantity, price=price, time_in_force="immediate-or-cancel",
+                quantity=quantity, price=price, time_in_force=tif,
             )
             if resp:
                 order_id = str(resp.get("orderId", resp.get("order_id", "")))

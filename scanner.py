@@ -45,7 +45,7 @@ from cli import main, _run_oneshot  # noqa: F401
 
 # Re-export names that tests patch on the ``scanner`` module.
 from polymarket_api import get_clob_prices  # noqa: F401
-from matcher import match_cross_platform  # noqa: F401
+from matcher import match_cross_platform, match_cross_platform_semantic, match_markets_to_events_semantic  # noqa: F401
 from fees import net_profit_binary_internal  # noqa: F401
 
 logger = logging.getLogger(__name__)

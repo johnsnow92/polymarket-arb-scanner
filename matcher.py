@@ -1,12 +1,24 @@
-"""Cross-platform market matcher using fuzzy string matching.
+"""Cross-platform market matcher using fuzzy string matching and optional embeddings.
 
 Matches Polymarket binary markets against Kalshi events by title similarity.
 Kalshi events have clean titles suitable for matching, while their markets
 endpoint is dominated by sports parlay combos with unhelpful titles.
+
+When fastembed is available and SEMANTIC_MATCHING_ENABLED is true, an
+embedding-based matcher provides higher-recall cross-platform matching
+using all-MiniLM-L6-v2 cosine similarity.
 """
 
+import logging
 import re
+
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
 from thefuzz import fuzz
+
+logger = logging.getLogger(__name__)
 
 # Common filler words that don't help distinguish markets
 _STOPWORDS = {
@@ -34,18 +46,33 @@ def normalize_title(title: str) -> str:
     return title
 
 
+# Short tokens (< 3 chars) that carry strong identifying signal in prediction
+# markets.  Country/region codes, US state abbreviations, and common acronyms
+# that would otherwise be discarded by the length filter.
+_CRITICAL_SHORT_ENTITIES = {
+    "ai", "uk", "eu", "us", "un", "gp", "nz", "jp", "cn", "hk",
+    "tx", "ca", "ny", "fl", "dc", "la", "sf", "gm", "fx", "rx",
+    "ip", "ev", "ui", "ux", "qa", "pr", "hr", "ir", "vp", "pm",
+    "uv", "gw", "vc", "iq", "io", "sp",
+}
+
+
 def _extract_entities(title: str) -> set[str]:
     """Extract key named entities and distinguishing terms from a title.
 
     Returns significant words (proper nouns, specific terms, numbers)
-    that help identify what the market is actually about.
+    that help identify what the market is actually about.  Two-character
+    tokens are kept only when they appear in ``_CRITICAL_SHORT_ENTITIES``
+    (country codes, state abbreviations, important acronyms).
     """
     normalized = title.lower()
     # Split into words, remove stopwords
     words = re.findall(r"\b[a-z0-9]+\b", normalized)
     entities = set()
     for w in words:
-        if w not in _STOPWORDS and len(w) >= 3:
+        if w in _STOPWORDS:
+            continue
+        if len(w) >= 3 or w in _CRITICAL_SHORT_ENTITIES:
             entities.add(w)
     return entities
 
@@ -114,13 +141,18 @@ def match_markets_to_events(
         best_entity_overlap = 0
         best_min_entities = 0
 
+        # Adaptive entity overlap: short titles (both <=6 words) need only 1
+        pm_word_count = len(pm_norm.split())
+
         for k_norm, k_entities, ke in kalshi_prepared:
             if not k_norm:
                 continue
 
             # Quick reject: if no entity overlap at all, skip
             overlap = pm_entities & k_entities
-            if len(overlap) < 2:
+            k_word_count = len(k_norm.split())
+            min_overlap = 1 if (pm_word_count <= 6 and k_word_count <= 6) else 2
+            if len(overlap) < min_overlap:
                 continue
 
             # Use token_sort_ratio for order-independent matching
@@ -155,7 +187,9 @@ def match_markets_to_events(
                 best_min_entities = min_entities
 
         # Require both fuzzy similarity AND meaningful entity overlap
-        if best_score >= threshold and best_kalshi_event and best_entity_overlap >= 2:
+        # Short titles (both <=6 words) need only 1 shared entity
+        final_min_overlap = 1 if pm_word_count <= 6 else 2
+        if best_score >= threshold and best_kalshi_event and best_entity_overlap >= final_min_overlap:
             confidence = classify_confidence(
                 int(best_score), best_entity_overlap, best_min_entities
             )
@@ -257,12 +291,17 @@ def match_cross_platform(
         best_entity_overlap = 0
         best_min_entities = 0
 
+        # Adaptive entity overlap: short titles (both <=6 words) need only 1
+        a_word_count = len(a_norm.split())
+
         for b_norm, b_entities, mb in b_prepared:
             if not b_norm:
                 continue
 
             overlap = a_entities & b_entities
-            if len(overlap) < 2:
+            b_word_count = len(b_norm.split())
+            min_overlap = 1 if (a_word_count <= 6 and b_word_count <= 6) else 2
+            if len(overlap) < min_overlap:
                 continue
 
             score = fuzz.token_sort_ratio(a_norm, b_norm)
@@ -282,7 +321,9 @@ def match_cross_platform(
                 best_entity_overlap = len(overlap)
                 best_min_entities = min_entities
 
-        if best_score >= threshold and best_match and best_entity_overlap >= 2:
+        # Short titles need only 1 shared entity
+        final_min_overlap = 1 if a_word_count <= 6 else 2
+        if best_score >= threshold and best_match and best_entity_overlap >= final_min_overlap:
             confidence = classify_confidence(
                 int(best_score), best_entity_overlap, best_min_entities
             )
@@ -343,3 +384,390 @@ def detect_inverted(pm_title: str, kalshi_title: str) -> bool:
 
     # XOR: inversion only if exactly one title has negation signals
     return pm_inv != kalshi_inv
+
+
+# ---------------------------------------------------------------------------
+# Embedding-based semantic matcher (optional — requires fastembed)
+# ---------------------------------------------------------------------------
+
+# Confidence tiers for semantic matching (cosine similarity thresholds)
+SEMANTIC_HIGH = 0.90
+SEMANTIC_MEDIUM = 0.80
+# LOW = anything >= SEMANTIC_MATCH_THRESHOLD (default 0.70)
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute cosine similarity between two vectors.
+
+    Args:
+        a: First embedding vector.
+        b: Second embedding vector.
+
+    Returns:
+        Cosine similarity in [-1, 1].
+    """
+    dot = np.dot(a, b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(dot / (norm_a * norm_b))
+
+
+def _semantic_confidence(similarity: float) -> str:
+    """Classify semantic match confidence based on cosine similarity.
+
+    Args:
+        similarity: Cosine similarity score.
+
+    Returns:
+        Confidence tier string: HIGH, MEDIUM, or LOW.
+    """
+    if similarity >= SEMANTIC_HIGH:
+        return "HIGH"
+    elif similarity >= SEMANTIC_MEDIUM:
+        return "MEDIUM"
+    return "LOW"
+
+
+class EmbeddingMatcher:
+    """Singleton embedding matcher using fastembed for semantic market matching.
+
+    Lazily loads the all-MiniLM-L6-v2 model on first use and caches
+    embeddings per normalized title to avoid re-computation across scan
+    cycles. Only new/changed market titles are embedded each cycle.
+
+    The model uses ONNX runtime (~150-200MB RAM) instead of PyTorch,
+    making it suitable for the 2048MB Fargate task.
+    """
+
+    _instance: "EmbeddingMatcher | None" = None
+    _MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+    def __init__(self):
+        self._model = None
+        self._cache: dict[str, np.ndarray] = {}
+
+    @classmethod
+    def get_instance(cls) -> "EmbeddingMatcher":
+        """Return the singleton EmbeddingMatcher instance."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def _ensure_model(self):
+        """Lazy-load the fastembed model on first use."""
+        if self._model is not None:
+            return
+        try:
+            from fastembed import TextEmbedding
+            self._model = TextEmbedding(model_name=self._MODEL_NAME)
+            logger.info("Loaded embedding model %s", self._MODEL_NAME)
+        except ImportError:
+            logger.warning("fastembed not installed — semantic matching unavailable")
+            raise
+        except Exception:
+            logger.exception("Failed to load embedding model %s", self._MODEL_NAME)
+            raise
+
+    def embed_titles(self, titles: list[str]) -> list[np.ndarray]:
+        """Embed a batch of titles, using cache for previously seen titles.
+
+        Args:
+            titles: List of normalized title strings.
+
+        Returns:
+            List of embedding vectors (same order as input).
+        """
+        self._ensure_model()
+
+        results: list[np.ndarray | None] = [None] * len(titles)
+        to_embed: list[tuple[int, str]] = []
+
+        for i, title in enumerate(titles):
+            if title in self._cache:
+                results[i] = self._cache[title]
+            else:
+                to_embed.append((i, title))
+
+        if to_embed:
+            texts = [t for _, t in to_embed]
+            embeddings = list(self._model.embed(texts))
+            for (idx, title), emb in zip(to_embed, embeddings):
+                vec = np.array(emb, dtype=np.float32)
+                self._cache[title] = vec
+                results[idx] = vec
+
+        return results
+
+    def clear_cache(self):
+        """Clear the embedding cache (e.g. between full scan cycles)."""
+        self._cache.clear()
+
+    @property
+    def cache_size(self) -> int:
+        """Number of cached embeddings."""
+        return len(self._cache)
+
+
+def match_cross_platform_semantic(
+    markets_a: list[dict],
+    markets_b: list[dict],
+    platform_a: str,
+    platform_b: str,
+    threshold: float = 0.70,
+    min_confidence: str = "LOW",
+) -> list[dict]:
+    """Embedding-based cross-platform matching using cosine similarity.
+
+    Uses a two-stage pipeline:
+    1. Entity overlap pre-filter (>= 1 shared entity) to skip obviously
+       unrelated pairs and avoid O(N*M) cosine comparisons.
+    2. Cosine similarity of normalized title embeddings.
+
+    Falls back to fuzzy matching (match_cross_platform) if fastembed is
+    unavailable.
+
+    Args:
+        markets_a: List of market dicts from platform A.
+        markets_b: List of market dicts from platform B.
+        platform_a: Name of platform A.
+        platform_b: Name of platform B.
+        threshold: Minimum cosine similarity for a match (0-1).
+        min_confidence: Minimum confidence tier (HIGH/MEDIUM/LOW).
+
+    Returns:
+        List of matched pairs with similarity scores and confidence.
+    """
+    try:
+        matcher = EmbeddingMatcher.get_instance()
+    except Exception:
+        logger.info("Falling back to fuzzy matching for %s vs %s", platform_a, platform_b)
+        return match_cross_platform(
+            markets_a, markets_b, platform_a, platform_b,
+            threshold=80, min_confidence=min_confidence,
+        )
+
+    min_conf_level = CONFIDENCE_ORDER.get(min_confidence.upper(), 1)
+
+    # Pre-normalize and extract entities for all markets
+    a_prepared: list[tuple[str, set[str], dict]] = []
+    for ma in markets_a:
+        title = _get_title(ma)
+        if not title or len(title) < 8:
+            continue
+        norm = normalize_title(title)
+        entities = _extract_entities(title)
+        a_prepared.append((norm, entities, ma))
+
+    b_prepared: list[tuple[str, set[str], dict]] = []
+    for mb in markets_b:
+        title = _get_title(mb)
+        if not title:
+            continue
+        norm = normalize_title(title)
+        entities = _extract_entities(title)
+        b_prepared.append((norm, entities, mb))
+
+    if not a_prepared or not b_prepared:
+        return []
+
+    # Batch-embed all titles
+    all_a_titles = [norm for norm, _, _ in a_prepared]
+    all_b_titles = [norm for norm, _, _ in b_prepared]
+
+    try:
+        a_embeddings = matcher.embed_titles(all_a_titles)
+        b_embeddings = matcher.embed_titles(all_b_titles)
+    except Exception:
+        logger.warning("Embedding failed, falling back to fuzzy matching")
+        return match_cross_platform(
+            markets_a, markets_b, platform_a, platform_b,
+            threshold=80, min_confidence=min_confidence,
+        )
+
+    # Find best match for each A market
+    matches = []
+    for i, (a_norm, a_entities, ma) in enumerate(a_prepared):
+        best_sim = 0.0
+        best_j = -1
+        best_overlap = 0
+        best_min_ent = 0
+
+        for j, (b_norm, b_entities, mb) in enumerate(b_prepared):
+            # Stage 1: entity overlap pre-filter (at least 1 shared entity)
+            overlap = a_entities & b_entities
+            if len(overlap) < 1:
+                continue
+
+            # Stage 2: cosine similarity
+            sim = _cosine_similarity(a_embeddings[i], b_embeddings[j])
+
+            if sim > best_sim:
+                best_sim = sim
+                best_j = j
+                best_overlap = len(overlap)
+                best_min_ent = min(len(a_entities), len(b_entities))
+
+        if best_sim >= threshold and best_j >= 0:
+            confidence = _semantic_confidence(best_sim)
+            if CONFIDENCE_ORDER.get(confidence, 0) < min_conf_level:
+                continue
+
+            b_norm, b_entities, mb = b_prepared[best_j]
+            matches.append({
+                "market_a": ma,
+                "market_b": mb,
+                "platform_a": platform_a,
+                "platform_b": platform_b,
+                "similarity": int(best_sim * 100),
+                "cosine_similarity": best_sim,
+                "entity_overlap": best_overlap,
+                "confidence": confidence,
+                "title_a": _get_title(ma),
+                "title_b": _get_title(mb),
+            })
+
+    # Sort by cosine similarity descending
+    matches.sort(key=lambda x: x["cosine_similarity"], reverse=True)
+
+    # Deduplicate: best match per platform B market
+    seen_b: set[str] = set()
+    deduped: list[dict] = []
+    for m in matches:
+        b_id = _get_market_id(m["market_b"])
+        if b_id not in seen_b:
+            seen_b.add(b_id)
+            deduped.append(m)
+
+    return deduped
+
+
+def match_markets_to_events_semantic(
+    polymarket_markets: list[dict],
+    kalshi_events: list[dict],
+    threshold: float = 0.70,
+    min_confidence: str = "LOW",
+) -> list[dict]:
+    """Embedding-based matching of Polymarket markets to Kalshi events.
+
+    Semantic counterpart of ``match_markets_to_events()``.  Uses the same
+    two-stage pipeline as ``match_cross_platform_semantic()`` —
+    entity-overlap pre-filter followed by cosine similarity — but operates
+    on PM markets vs Kalshi *events* rather than generic market lists.
+
+    Falls back to fuzzy ``match_markets_to_events()`` if fastembed is
+    unavailable.
+
+    Args:
+        polymarket_markets: List of Polymarket market dicts.
+        kalshi_events: List of Kalshi event dicts (title/event_ticker).
+        threshold: Minimum cosine similarity for a match (0-1).
+        min_confidence: Minimum confidence tier (HIGH/MEDIUM/LOW).
+
+    Returns:
+        List of matched pairs with keys ``polymarket``, ``kalshi_event``,
+        ``similarity``, ``cosine_similarity``, ``entity_overlap``, and
+        ``confidence``.
+    """
+    try:
+        matcher = EmbeddingMatcher.get_instance()
+    except Exception:
+        logger.info("Falling back to fuzzy matching for PM vs Kalshi events")
+        return match_markets_to_events(
+            polymarket_markets, kalshi_events,
+            threshold=80, min_confidence=min_confidence,
+        )
+
+    min_conf_level = CONFIDENCE_ORDER.get(min_confidence.upper(), 1)
+
+    # Pre-normalize Polymarket markets
+    pm_prepared: list[tuple[str, set[str], dict]] = []
+    for pm in polymarket_markets:
+        title = pm.get("question", "") or pm.get("title", "")
+        if not title or len(title) < 8:
+            continue
+        norm = normalize_title(title)
+        entities = _extract_entities(title)
+        pm_prepared.append((norm, entities, pm))
+
+    # Pre-normalize Kalshi events
+    ke_prepared: list[tuple[str, set[str], dict]] = []
+    for ke in kalshi_events:
+        title = ke.get("title", "")
+        if not title:
+            continue
+        norm = normalize_title(title)
+        entities = _extract_entities(title)
+        ke_prepared.append((norm, entities, ke))
+
+    if not pm_prepared or not ke_prepared:
+        return []
+
+    # Batch-embed all titles
+    pm_titles = [norm for norm, _, _ in pm_prepared]
+    ke_titles = [norm for norm, _, _ in ke_prepared]
+
+    try:
+        pm_embeddings = matcher.embed_titles(pm_titles)
+        ke_embeddings = matcher.embed_titles(ke_titles)
+    except Exception:
+        logger.warning("Embedding failed, falling back to fuzzy matching")
+        return match_markets_to_events(
+            polymarket_markets, kalshi_events,
+            threshold=80, min_confidence=min_confidence,
+        )
+
+    # Find best Kalshi event for each Polymarket market
+    matches = []
+    for i, (pm_norm, pm_entities, pm) in enumerate(pm_prepared):
+        best_sim = 0.0
+        best_j = -1
+        best_overlap = 0
+        best_min_ent = 0
+
+        for j, (ke_norm, ke_entities, ke) in enumerate(ke_prepared):
+            # Entity overlap pre-filter (>= 1 shared entity)
+            overlap = pm_entities & ke_entities
+            if len(overlap) < 1:
+                continue
+
+            sim = _cosine_similarity(pm_embeddings[i], ke_embeddings[j])
+
+            if sim > best_sim:
+                best_sim = sim
+                best_j = j
+                best_overlap = len(overlap)
+                best_min_ent = min(len(pm_entities), len(ke_entities))
+
+        if best_sim >= threshold and best_j >= 0:
+            confidence = _semantic_confidence(best_sim)
+            if CONFIDENCE_ORDER.get(confidence, 0) < min_conf_level:
+                continue
+
+            _, _, ke = ke_prepared[best_j]
+            pm_title = pm.get("question", "") or pm.get("title", "")
+            matches.append({
+                "polymarket": pm,
+                "kalshi_event": ke,
+                "similarity": int(best_sim * 100),
+                "cosine_similarity": best_sim,
+                "entity_overlap": best_overlap,
+                "confidence": confidence,
+                "pm_title": pm_title,
+                "kalshi_title": ke.get("title", ""),
+            })
+
+    # Sort by cosine similarity descending
+    matches.sort(key=lambda x: x["cosine_similarity"], reverse=True)
+
+    # Deduplicate: best match per Kalshi event
+    seen_kalshi: set[str] = set()
+    deduped: list[dict] = []
+    for m in matches:
+        k_ticker = m["kalshi_event"].get("event_ticker", "")
+        if k_ticker not in seen_kalshi:
+            seen_kalshi.add(k_ticker)
+            deduped.append(m)
+
+    return deduped

@@ -44,8 +44,8 @@ def scan_betfair_backall(betfair_client: BetfairClient, min_profit: float) -> li
             try:
                 markets = future.result()
                 all_markets.extend(markets)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Betfair market fetch failed: %s", e)
 
     logger.info("Fetched %d Betfair market catalogues.", len(all_markets))
 
@@ -161,8 +161,8 @@ def scan_betfair_backlay(betfair_client: BetfairClient, min_profit: float) -> li
         for future in as_completed(futures):
             try:
                 all_markets.extend(future.result())
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Betfair market fetch failed: %s", e)
 
     market_ids = [m.get("marketId", "") for m in all_markets if m.get("marketId")]
     if not market_ids:

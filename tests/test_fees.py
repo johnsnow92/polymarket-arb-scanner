@@ -17,12 +17,16 @@ from fees import (
     net_profit_cross_platform,
     betfair_commission,
     net_profit_cross_betfair,
+    smarkets_commission,
     gemini_fee,
     net_profit_gemini_binary,
     net_profit_gemini_multi,
     net_profit_cross_gemini,
     net_profit_ibkr_binary,
     net_profit_cross_ibkr,
+    net_profit_cross_generic,
+    _platform_win_fee,
+    _platform_entry_fee,
 )
 
 
@@ -246,6 +250,7 @@ class TestNetProfitCrossPlatform:
         assert result["gross_spread"] == pytest.approx(-0.10)
         assert result["net_profit"] == pytest.approx(-0.10)
 
+    @patch("fees.FEE_MODEL", "worst_case")
     def test_worst_case_fees_used(self):
         from config import POLYGON_GAS_ESTIMATE
         # Verify worst-case (max) fees + gas are applied
@@ -257,6 +262,15 @@ class TestNetProfitCrossPlatform:
 
         result = net_profit_cross_platform(poly_price, kalshi_price, "yes", "no")
         assert result["fees"] == pytest.approx(expected_worst)
+
+    def test_ev_fees_lower_than_worst_case(self):
+        """EV fee model should produce lower or equal fees vs worst-case."""
+        from fees import _select_fees
+        # Case where case1 > case2: EV should be lower than max
+        case1, case2, price_a = 0.03, 0.01, 0.40
+        ev_fees = _select_fees(case1, case2, price_a)
+        worst_fees = max(case1, case2)
+        assert ev_fees <= worst_fees
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +305,7 @@ class TestNetProfitCrossBetfair:
         assert result["gross_spread"] < 0
         assert result["fees"] == 0
 
+    @patch("fees.FEE_MODEL", "worst_case")
     def test_worst_case_fees(self):
         from config import POLYGON_GAS_ESTIMATE
         poly_price, bf_price = 0.30, 0.30
@@ -467,6 +482,7 @@ class TestNetProfitCrossGemini:
         assert result["gross_spread"] == pytest.approx(-0.10)
         assert result["net_profit"] == pytest.approx(-0.10)
 
+    @patch("fees.FEE_MODEL", "worst_case")
     def test_includes_gemini_entry_fee(self):
         from config import POLYGON_GAS_ESTIMATE
         # Gemini entry fee = min(0.30, 0.70) * 0.05 = 0.015
@@ -522,3 +538,141 @@ class TestNetProfitCrossIBKR:
         # IBKR fee = 0, only Polymarket fees + gas
         result = net_profit_cross_ibkr(0.30, 0.30, "yes", "no")
         assert result["fees"] >= POLYGON_GAS_ESTIMATE
+
+
+# ---------------------------------------------------------------------------
+# net_profit_cross_generic
+# ---------------------------------------------------------------------------
+
+class TestNetProfitCrossGeneric:
+    def test_positive_spread_kalshi_betfair(self):
+        """Kalshi vs Betfair with profitable spread."""
+        result = net_profit_cross_generic(
+            0.30, 0.30, "yes", "no", platform_a="kalshi", platform_b="betfair"
+        )
+        assert result["gross_spread"] == pytest.approx(0.40)
+        assert result["net_profit"] > 0
+        assert result["fees"] > 0  # Kalshi entry fee + Betfair commission
+
+    def test_negative_spread_returns_negative(self):
+        result = net_profit_cross_generic(
+            0.60, 0.50, "yes", "no", platform_a="kalshi", platform_b="betfair"
+        )
+        assert result["gross_spread"] == pytest.approx(-0.10)
+        assert result["net_profit"] == pytest.approx(-0.10)
+
+    def test_no_gas_for_non_polymarket_pairs(self):
+        """Non-Polymarket pairs should NOT include Polygon gas fees."""
+        result = net_profit_cross_generic(
+            0.30, 0.30, "yes", "no", platform_a="kalshi", platform_b="sxbet"
+        )
+        from config import POLYGON_GAS_ESTIMATE
+        # Compute expected fees without gas
+        kalshi_entry = kalshi_taker_fee(0.30)
+        # SX Bet: 0% fees. Kalshi: entry fee only, no win fee.
+        # Case A wins: Kalshi win fee (0) + entry fees
+        # Case B wins: SX Bet win fee (0) + entry fees
+        # Both cases = entry fees only = kalshi_entry
+        expected = kalshi_entry
+        assert result["fees"] == pytest.approx(expected)
+        # Verify no gas component
+        assert POLYGON_GAS_ESTIMATE not in [0.0]  # gas > 0
+        # fees should not include gas
+        assert result["fees"] < result["gross_spread"]
+
+    def test_includes_gas_when_polymarket_involved(self):
+        """Polymarket pair should include Polygon gas."""
+        from config import POLYGON_GAS_ESTIMATE
+        result = net_profit_cross_generic(
+            0.30, 0.30, "yes", "no", platform_a="polymarket", platform_b="kalshi"
+        )
+        assert result["fees"] >= POLYGON_GAS_ESTIMATE
+
+    def test_kalshi_entry_fees_both_sides(self):
+        """When both platforms are entry-fee platforms, both fees count."""
+        result = net_profit_cross_generic(
+            0.40, 0.40, "yes", "no", platform_a="kalshi", platform_b="gemini"
+        )
+        kalshi_entry = kalshi_taker_fee(0.40)
+        gm_entry = gemini_fee(0.40)
+        # Entry fees should include both platforms
+        assert result["fees"] >= kalshi_entry + gm_entry
+
+    def test_zero_fee_platforms(self):
+        """SX Bet vs Matchbook — both 0% fee platforms."""
+        result = net_profit_cross_generic(
+            0.30, 0.30, "yes", "no", platform_a="sxbet", platform_b="matchbook"
+        )
+        assert result["gross_spread"] == pytest.approx(0.40)
+        assert result["fees"] == 0.0
+        assert result["net_profit"] == pytest.approx(0.40)
+
+    @patch("fees.FEE_MODEL", "worst_case")
+    def test_betfair_win_fee(self):
+        """Betfair vs SX Bet — Betfair charges commission when its side wins."""
+        result = net_profit_cross_generic(
+            0.30, 0.30, "yes", "no", platform_a="betfair", platform_b="sxbet"
+        )
+        # When Betfair wins: commission on (1.0 - 0.30) = 5% of 0.70 = 0.035
+        bf_win_fee = betfair_commission(1.0 - 0.30)
+        assert result["fees"] == pytest.approx(bf_win_fee)
+
+    @patch("fees.FEE_MODEL", "worst_case")
+    def test_smarkets_win_fee(self):
+        """Smarkets vs IBKR — Smarkets charges 2% when its side wins."""
+        result = net_profit_cross_generic(
+            0.30, 0.30, "yes", "no", platform_a="smarkets", platform_b="ibkr"
+        )
+        sm_win_fee = smarkets_commission(1.0 - 0.30)
+        assert result["fees"] == pytest.approx(sm_win_fee)
+
+    def test_equal_to_one_returns_zero(self):
+        result = net_profit_cross_generic(
+            0.50, 0.50, "yes", "no", platform_a="kalshi", platform_b="betfair"
+        )
+        assert result["gross_spread"] == pytest.approx(0.0)
+        assert result["net_profit"] == pytest.approx(0.0)
+
+    def test_exceeds_one_returns_negative(self):
+        result = net_profit_cross_generic(
+            0.60, 0.50, "yes", "no", platform_a="smarkets", platform_b="betfair"
+        )
+        assert result["net_profit"] < 0
+
+
+# ---------------------------------------------------------------------------
+# _CROSS_FEE_FUNCS coverage
+# ---------------------------------------------------------------------------
+
+class TestCrossFeeFuncsMap:
+    def test_all_28_pairs_registered(self):
+        """All C(8,2) = 28 platform pairs should have fee functions."""
+        from scans.cross import _CROSS_FEE_FUNCS
+        assert len(_CROSS_FEE_FUNCS) == 28
+
+    def test_polymarket_pairs_use_dedicated_functions(self):
+        """Polymarket pairs should use their hand-tuned implementations."""
+        from scans.cross import _CROSS_FEE_FUNCS
+        assert _CROSS_FEE_FUNCS[("polymarket", "kalshi")] is net_profit_cross_platform
+        assert _CROSS_FEE_FUNCS[("polymarket", "betfair")] is net_profit_cross_betfair
+        assert _CROSS_FEE_FUNCS[("polymarket", "gemini")] is net_profit_cross_gemini
+        assert _CROSS_FEE_FUNCS[("polymarket", "ibkr")] is net_profit_cross_ibkr
+
+    def test_non_polymarket_pairs_are_callable(self):
+        """All non-Polymarket pairs should be callable with 4 args."""
+        from scans.cross import _CROSS_FEE_FUNCS
+        non_pm = {k: v for k, v in _CROSS_FEE_FUNCS.items()
+                  if "polymarket" not in k}
+        assert len(non_pm) == 21  # C(7,2) = 21
+        for (pa, pb), fn in non_pm.items():
+            result = fn(0.40, 0.40, "yes", "no")
+            assert "net_profit" in result, f"Missing net_profit for {pa}-{pb}"
+            assert "fees" in result, f"Missing fees for {pa}-{pb}"
+            assert result["net_profit"] > 0, f"Expected profit for {pa}-{pb} at 0.40+0.40"
+
+    def test_symmetric_lookup(self):
+        """Both (a,b) and reversed lookup should find the same pair."""
+        from scans.cross import _CROSS_FEE_FUNCS
+        # kalshi-betfair should be findable
+        key = ("kalshi", "betfair")
+        assert key in _CROSS_FEE_FUNCS or ("betfair", "kalshi") in _CROSS_FEE_FUNCS

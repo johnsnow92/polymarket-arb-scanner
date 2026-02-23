@@ -35,8 +35,8 @@ def _refine_binary_with_clob(opportunities: list[dict], markets_by_question: dic
                 try:
                     _, clob = future.result()
                     clob_results[mk] = clob
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("CLOB fetch failed for binary refinement: %s", e)
 
     refined = []
     for opp in opportunities:

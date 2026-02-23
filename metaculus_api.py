@@ -47,7 +47,7 @@ class MetaculusClient:
         self.authenticated = False
         self.base_url = METACULUS_API_URL
 
-    def login(self, api_key: str = None) -> bool:
+    def login(self, api_key: str | None = None) -> bool:
         """Authenticate with Metaculus API token.
 
         Public API works without a key (stricter rate limits). If an API key

@@ -534,7 +534,8 @@ class TestScanTriangular:
         """Returns empty when no pairwise matches exist across platforms."""
         mod = _import_triangular()
 
-        with patch.object(mod, "match_cross_platform", return_value=[]):
+        with patch.object(mod, "SEMANTIC_MATCHING_ENABLED", False), \
+             patch.object(mod, "match_cross_platform", return_value=[]):
             opps = mod.scan_triangular(
                 {
                     "polymarket": [{"conditionId": "pm1", "question": "Unmatched A"}],
