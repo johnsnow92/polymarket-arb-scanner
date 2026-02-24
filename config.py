@@ -228,6 +228,9 @@ BACKTEST_INITIAL_BALANCE = _env_float("BACKTEST_INITIAL_BALANCE", "1000.0")
 
 # Dashboard
 DASHBOARD_PORT = _env_int("DASHBOARD_PORT", "0")  # 0 = disabled
+DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
+DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "")  # empty = no auth
+DASHBOARD_REFRESH_SECONDS = _env_int("DASHBOARD_REFRESH_SECONDS", "15")
 
 # Metrics & Alerting
 METRICS_ENABLED = _env_bool("METRICS_ENABLED", "true")
@@ -378,6 +381,13 @@ def validate_config() -> list[str]:
             f"FILL_POLL_TIMEOUT ({FILL_POLL_TIMEOUT}) < "
             f"FILL_POLL_INTERVAL ({FILL_POLL_INTERVAL}); "
             f"polls may never complete"
+        )
+
+    # --- Dashboard checks ---
+    if DASHBOARD_PORT > 0 and not DASHBOARD_PASS:
+        warnings.append(
+            "DASHBOARD_PORT is set but DASHBOARD_PASS is empty — "
+            "dashboard has no authentication"
         )
 
     # --- Contradiction warnings ---

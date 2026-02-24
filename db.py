@@ -366,5 +366,106 @@ class TradeDB:
                 )
             self.conn.commit()
 
+    # ---------------------------------------------------------------------------
+    # Dashboard queries
+    # ---------------------------------------------------------------------------
+
+    def get_daily_pnl_history(self, days: int = 30) -> list[dict]:
+        """Get daily realized P&L aggregated by date for the last N days.
+
+        Returns:
+            List of dicts with keys 'date' (YYYY-MM-DD) and 'pnl' (float).
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT date(settlement_timestamp) as date,
+                          SUM(realized_pnl) as pnl
+                   FROM positions
+                   WHERE status = 'settled'
+                     AND settlement_timestamp >= date('now', ?)
+                   GROUP BY date(settlement_timestamp)
+                   ORDER BY date""",
+                (f"-{days} days",),
+            ).fetchall()
+            return [{"date": r["date"], "pnl": round(r["pnl"], 4)} for r in rows]
+
+    def get_positions_by_platform(self) -> list[dict]:
+        """Get open position counts and total expected P&L grouped by platform.
+
+        Returns:
+            List of dicts with keys 'platform', 'count', 'total_expected_pnl'.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT platform,
+                          COUNT(*) as count,
+                          COALESCE(SUM(expected_pnl), 0) as total_expected_pnl
+                   FROM positions
+                   WHERE status = 'open'
+                   GROUP BY platform
+                   ORDER BY count DESC"""
+            ).fetchall()
+            return [
+                {
+                    "platform": r["platform"],
+                    "count": r["count"],
+                    "total_expected_pnl": round(r["total_expected_pnl"], 4),
+                }
+                for r in rows
+            ]
+
+    def get_opportunity_stats_by_type(self) -> list[dict]:
+        """Get opportunity statistics grouped by type.
+
+        Returns:
+            List of dicts with type, count, avg_roi, avg_profit, total_profit.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT type,
+                          COUNT(*) as count,
+                          AVG(net_roi) as avg_roi,
+                          AVG(net_profit) as avg_profit,
+                          SUM(net_profit) as total_profit
+                   FROM opportunities
+                   GROUP BY type
+                   ORDER BY count DESC"""
+            ).fetchall()
+            return [
+                {
+                    "type": r["type"],
+                    "count": r["count"],
+                    "avg_roi": round(r["avg_roi"] or 0, 4),
+                    "avg_profit": round(r["avg_profit"] or 0, 4),
+                    "total_profit": round(r["total_profit"] or 0, 4),
+                }
+                for r in rows
+            ]
+
+    def get_recent_trades(self, limit: int = 100) -> list[dict]:
+        """Get recent trades with their opportunity context.
+
+        Returns:
+            List of trade dicts enriched with opportunity type and market.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT t.*, o.type as opp_type, o.market as opp_market
+                   FROM trades t
+                   LEFT JOIN opportunities o ON t.opportunity_id = o.id
+                   ORDER BY t.id DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_cumulative_pnl(self) -> float:
+        """Get total realized P&L across all settled positions."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions WHERE status = 'settled'"
+            ).fetchone()
+            return round(row["total"], 4)
+
     def close(self):
         self.conn.close()
