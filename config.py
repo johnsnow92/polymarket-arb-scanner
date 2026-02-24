@@ -91,16 +91,16 @@ WS_TRIGGER_ENABLED = _env_bool("WS_TRIGGER_ENABLED", "true")
 WS_TRIGGER_THRESHOLD = _env_float("WS_TRIGGER_THRESHOLD", "0.03")
 PARALLEL_WORKERS = _env_int("PARALLEL_WORKERS", "4")
 RESCAN_INTERVAL = _env_int("RESCAN_INTERVAL", "30")
-MAX_RESOLUTION_DAYS = _env_int("MAX_RESOLUTION_DAYS", "14")
+MAX_RESOLUTION_DAYS = _env_int("MAX_RESOLUTION_DAYS", "7")
 
 # Kalshi fee parameters
 KALSHI_FEE_CAP_CENTS = _env_int("KALSHI_FEE_CAP_CENTS", "175")
 
 # Risk management
-BASE_TRADE_SIZE = _env_float("BASE_TRADE_SIZE", "5.0")
-MAX_TRADE_SIZE = _env_float("MAX_TRADE_SIZE", "25.0")
-DAILY_LOSS_LIMIT = _env_float("DAILY_LOSS_LIMIT", "25.0")
-MAX_OPEN_POSITIONS = _env_int("MAX_OPEN_POSITIONS", "25")
+BASE_TRADE_SIZE = _env_float("BASE_TRADE_SIZE", "1.0")
+MAX_TRADE_SIZE = _env_float("MAX_TRADE_SIZE", "3.0")
+DAILY_LOSS_LIMIT = _env_float("DAILY_LOSS_LIMIT", "5.0")
+MAX_OPEN_POSITIONS = _env_int("MAX_OPEN_POSITIONS", "10")
 MIN_LIQUIDITY = _env_float("MIN_LIQUIDITY", "10.0")
 MIN_LIQUIDITY_HIGH_ROI = _env_float("MIN_LIQUIDITY_HIGH_ROI", "5.0")
 MIN_NET_ROI = _env_float("MIN_NET_ROI", "0")
@@ -127,7 +127,7 @@ PM_RATE_LIMIT = _env_float("PM_RATE_LIMIT", "0.01")
 KALSHI_RATE_LIMIT = _env_float("KALSHI_RATE_LIMIT", "0.05")
 
 # Dust trade filter — minimum profit to execute (avoids wasting gas)
-MIN_PROFIT_AMOUNT = _env_float("MIN_PROFIT_AMOUNT", "0.05")
+MIN_PROFIT_AMOUNT = _env_float("MIN_PROFIT_AMOUNT", "0.02")
 
 # Fill polling (Polymarket only; Kalshi FOK fills instantly)
 FILL_POLL_INTERVAL = _env_float("FILL_POLL_INTERVAL", "0.1")
