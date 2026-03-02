@@ -150,6 +150,21 @@ class TestWithinResolutionWindow:
         market = {"endDateIso": naive_str}
         assert _within_resolution_window(market, max_days=7, platform="polymarket") is True
 
+    def test_already_resolved_returns_false(self):
+        """Markets that resolved in the past should be rejected."""
+        market = {"endDateIso": (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()}
+        assert _within_resolution_window(market, max_days=7, platform="polymarket") is False
+
+    def test_already_resolved_kalshi_returns_false(self):
+        """Kalshi markets that already closed should be rejected."""
+        market = {"close_time": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()}
+        assert _within_resolution_window(market, max_days=7, platform="kalshi") is False
+
+    def test_resolves_today_returns_true(self):
+        """A market resolving in 1 hour (today) should be included."""
+        market = {"endDateIso": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+        assert _within_resolution_window(market, max_days=7, platform="polymarket") is True
+
 
 class TestFilterDust:
     def test_removes_below_threshold(self):

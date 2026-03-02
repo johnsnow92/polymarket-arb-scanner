@@ -47,17 +47,18 @@ def _days_to_resolution(market: dict, platform: str = "polymarket") -> float | N
 
 
 def _within_resolution_window(market: dict, max_days: int = None, platform: str = "polymarket") -> bool:
-    """Check if a market resolves within max_days from now.
+    """Check if a market resolves within max_days from now **and has not already resolved**.
 
-    Returns True if the market resolves within the window (keep it),
-    False if it resolves too far out or has no date (skip it).
+    Returns True if the market resolves in the future within the window (keep it),
+    False if it has already resolved, resolves too far out, or has no date (skip it).
     """
     if max_days is None:
         max_days = MAX_RESOLUTION_DAYS
     if max_days <= 0:
         return True  # 0 = disabled
 
-    cutoff = datetime.now(timezone.utc) + timedelta(days=max_days)
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=max_days)
 
     if platform == "kalshi":
         date_str = market.get("close_time") or market.get("expected_expiration_time")
@@ -74,7 +75,8 @@ def _within_resolution_window(market: dict, max_days: int = None, platform: str 
         resolve_dt = datetime.fromisoformat(date_str)
         if resolve_dt.tzinfo is None:
             resolve_dt = resolve_dt.replace(tzinfo=timezone.utc)
-        return resolve_dt <= cutoff
+        # Must resolve in the future AND within the max_days window
+        return now <= resolve_dt <= cutoff
     except (ValueError, TypeError):
         return False  # Unparseable date = skip
 
