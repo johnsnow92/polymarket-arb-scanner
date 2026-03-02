@@ -1987,7 +1987,9 @@ class ArbitrageExecutor:
                    f"${size:.2f} on {platforms} | {filled}/{len(legs)} legs filled")
 
         url = self.notifier.url
-        if "hooks.slack.com" in url:
+        if getattr(self.notifier, "_is_callmebot", False):
+            payload = {"text": msg}
+        elif "hooks.slack.com" in url:
             emoji = ":white_check_mark:" if success else ":x:"
             payload = {"text": f"{emoji} {msg}"}
         elif "discord.com/api/webhooks" in url:

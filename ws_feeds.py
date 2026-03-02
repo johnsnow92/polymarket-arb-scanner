@@ -25,7 +25,7 @@ except Exception:
 
 import websockets
 
-from kalshi_api import KALSHI_BASE_URL, KALSHI_API_PATH, _sign_pss, _load_private_key, _load_private_key_from_base64
+from kalshi_api import _sign_pss, _load_private_key, _load_private_key_from_base64
 
 # Proxy support for WebSocket connections
 try:
@@ -219,9 +219,11 @@ class FeedManager:
     async def _connect_kalshi(self):
         """Connect to Kalshi WebSocket and subscribe to tickers."""
         # Build auth headers for WS connection
+        # Per Kalshi docs, the WS signature signs: timestamp + "GET" + "/trade-api/ws/v2"
+        # Note: this is NOT the REST API path (/trade-api/v2), it's the WS path.
         import datetime
         timestamp_ms = str(int(datetime.datetime.now().timestamp() * 1000))
-        msg = timestamp_ms + "GET" + KALSHI_API_PATH + "/ws/v2"
+        msg = timestamp_ms + "GET" + "/trade-api/ws/v2"
         signature = _sign_pss(self.kalshi_private_key, msg)
 
         headers = {
@@ -324,26 +326,34 @@ class FeedManager:
         async with websockets.connect(POLYMARKET_WS_URL, **connect_kwargs) as ws:
             logger.info("Polymarket connected. Subscribing to %d tokens...", len(self._poly_token_ids))
 
-            # Subscribe to market updates — batch into groups
-            # Polymarket WS accepts asset subscriptions
-            for token_id in self._poly_token_ids:
+            # Subscribe to market updates in batches to avoid flooding the server.
+            # Polymarket WS accepts arrays of asset IDs per message.
+            batch_size = 100
+            for i in range(0, len(self._poly_token_ids), batch_size):
+                batch = self._poly_token_ids[i:i + batch_size]
                 sub_msg = {
                     "type": "market",
-                    "assets_ids": [token_id],
+                    "assets_ids": batch,
                 }
                 await ws.send(json.dumps(sub_msg))
+                # Small delay between batches to avoid server rejection
+                if i + batch_size < len(self._poly_token_ids):
+                    await asyncio.sleep(0.1)
 
             self._poly_ws = ws
 
             while self._running:
-                # Send any pending subscriptions
-                while self._pending_poly_subs:
-                    token_id = self._pending_poly_subs.pop(0)
-                    sub_msg = {
-                        "type": "market",
-                        "assets_ids": [token_id],
-                    }
-                    await ws.send(json.dumps(sub_msg))
+                # Send any pending subscriptions (batched)
+                if self._pending_poly_subs:
+                    pending = list(self._pending_poly_subs)
+                    self._pending_poly_subs.clear()
+                    for i in range(0, len(pending), batch_size):
+                        batch = pending[i:i + batch_size]
+                        sub_msg = {
+                            "type": "market",
+                            "assets_ids": batch,
+                        }
+                        await ws.send(json.dumps(sub_msg))
 
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=KEEPALIVE_INTERVAL)
