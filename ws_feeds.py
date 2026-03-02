@@ -315,7 +315,13 @@ class FeedManager:
                     delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
     async def _connect_polymarket(self):
-        """Connect to Polymarket CLOB WebSocket and subscribe to markets."""
+        """Connect to Polymarket CLOB WebSocket and subscribe to markets.
+
+        Per Polymarket docs the first subscription uses ``{"type": "market"}``
+        format.  Subsequent dynamic subscriptions use
+        ``{"operation": "subscribe"}`` format.  Heartbeat is the literal
+        string ``PING`` sent every ~10 s (server replies ``PONG``).
+        """
         # Use proxy if configured
         connect_kwargs = {}
         if self._pm_proxy and _SOCKS_AVAILABLE:
@@ -326,44 +332,62 @@ class FeedManager:
         async with websockets.connect(POLYMARKET_WS_URL, **connect_kwargs) as ws:
             logger.info("Polymarket connected. Subscribing to %d tokens...", len(self._poly_token_ids))
 
-            # Subscribe to market updates in batches to avoid flooding the server.
-            # Polymarket WS accepts arrays of asset IDs per message.
+            # ---- Initial subscription (first batch uses "type": "market") ----
             batch_size = 100
+            first_batch = True
             for i in range(0, len(self._poly_token_ids), batch_size):
                 batch = self._poly_token_ids[i:i + batch_size]
-                sub_msg = {
-                    "type": "market",
-                    "assets_ids": batch,
-                }
+                if first_batch:
+                    sub_msg = {
+                        "assets_ids": batch,
+                        "type": "market",
+                        "custom_feature_enabled": True,
+                    }
+                    first_batch = False
+                else:
+                    # Subsequent batches use the dynamic subscribe format
+                    sub_msg = {
+                        "assets_ids": batch,
+                        "operation": "subscribe",
+                        "custom_feature_enabled": True,
+                    }
                 await ws.send(json.dumps(sub_msg))
                 # Small delay between batches to avoid server rejection
                 if i + batch_size < len(self._poly_token_ids):
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
 
+            logger.info("Polymarket subscription sent (%d batches).",
+                        (len(self._poly_token_ids) + batch_size - 1) // batch_size)
             self._poly_ws = ws
 
             while self._running:
-                # Send any pending subscriptions (batched)
+                # Send any pending dynamic subscriptions (always use "operation")
                 if self._pending_poly_subs:
                     pending = list(self._pending_poly_subs)
                     self._pending_poly_subs.clear()
                     for i in range(0, len(pending), batch_size):
                         batch = pending[i:i + batch_size]
                         sub_msg = {
-                            "type": "market",
                             "assets_ids": batch,
+                            "operation": "subscribe",
+                            "custom_feature_enabled": True,
                         }
                         await ws.send(json.dumps(sub_msg))
+                        await asyncio.sleep(0.5)
 
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=KEEPALIVE_INTERVAL)
+                    # Server responds to PING with PONG (literal strings)
+                    if raw == "PONG":
+                        continue
                     data = json.loads(raw)
                     self._handle_polymarket_message(data)
                 except asyncio.TimeoutError:
+                    # Polymarket requires literal "PING" string heartbeat
                     try:
-                        await ws.ping()
+                        await ws.send("PING")
                     except Exception as e:
-                        logger.debug("Polymarket ping failed: %s", e)
+                        logger.debug("Polymarket PING failed: %s", e)
                         break
 
             self._poly_ws = None
