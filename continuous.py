@@ -926,7 +926,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     )
 
             except Exception as e:
-                logger.error("Scan failed: %s", e)
+                import traceback
+                logger.error("Scan failed: %s\n%s", e, traceback.format_exc())
                 if _metrics:
                     _metrics.inc("scans_total", {"status": "failed"})
 
