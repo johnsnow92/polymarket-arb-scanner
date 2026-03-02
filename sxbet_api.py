@@ -144,6 +144,9 @@ class SXBetClient:
             })
             if market_data and "data" in market_data:
                 for market in market_data["data"]:
+                    if not isinstance(market, dict):
+                        logger.debug("SX Bet: skipping non-dict market entry: %s", type(market).__name__)
+                        continue
                     market["_sport"] = sport
                     all_markets.append(market)
 
