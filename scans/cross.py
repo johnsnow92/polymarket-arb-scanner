@@ -100,6 +100,7 @@ def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min
         result2 = net_profit_cross_platform(pm_no, k_yes, "no", "yes")
         best = result1 if result1["net_profit"] > result2["net_profit"] else result2
 
+        mid_profit = opp.get("net_profit", 0)
         if best["net_profit"] >= min_profit:
             if best == result1:
                 total_cost = pm_yes + k_no
@@ -119,6 +120,15 @@ def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min
             if partial:
                 opp["_partial_clob"] = True
             refined.append(opp)
+        else:
+            logger.info(
+                "Cross dropped: %s | mid=$%.4f -> ask=$%.4f (min=%.4f) | "
+                "PM_Y=%.3f PM_N=%.3f K_Y=%.3f K_N=%.3f | "
+                "r1=$%.4f r2=$%.4f fees=$%.4f",
+                opp.get("market", "?")[:50], mid_profit, best["net_profit"],
+                min_profit, pm_yes, pm_no, k_yes, k_no,
+                result1["net_profit"], result2["net_profit"], best["fees"],
+            )
 
     dropped = len(opportunities) - len(refined)
     if dropped:
@@ -246,6 +256,11 @@ def scan_cross_platform(
 
         if best_opp:
             opportunities.append(best_opp)
+            logger.info(
+                "Cross candidate (mid): %s | %s | profit=$%.4f roi=%s",
+                best_opp.get("market", "?")[:50], best_opp.get("prices", ""),
+                best_opp.get("net_profit", 0), best_opp.get("net_roi", "?"),
+            )
 
         if (i + 1) % 50 == 0:
             logger.info("Processed %d/%d matches...", i + 1, len(matched))

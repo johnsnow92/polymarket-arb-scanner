@@ -98,10 +98,10 @@ def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, 
             refined.append(opp)
         else:
             mid_profit = opp.get("net_profit", 0)
-            logger.debug(
-                "NegRisk dropped: %s | mid=$%.4f -> ask=$%.4f (coverage=%d/%d, depth=%.0f)",
+            logger.info(
+                "NegRisk dropped: %s | mid=$%.4f -> ask=$%.4f (min=%.4f, coverage=%d/%d, depth=%.0f)",
                 opp.get("market", "?")[:40], mid_profit, result["net_profit"],
-                clob_count, total_outcomes,
+                min_profit, clob_count, total_outcomes,
                 min_depth if min_depth != float("inf") else 0,
             )
 
