@@ -32,7 +32,7 @@ docker build -t polymarket-arb-scanner .
 ## Testing
 
 ```bash
-# Run the full suite (1329 tests)
+# Run the full suite (1344 tests)
 python -m pytest tests/ -v
 
 # Single file

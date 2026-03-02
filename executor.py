@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import (
     FILL_POLL_INTERVAL, FILL_POLL_TIMEOUT, HEDGE_ENABLED,
     CONCURRENT_EXECUTION, BALANCE_CACHE_TTL,
+    ENABLED_EXECUTION_PLATFORMS, PLATFORM_MIN_ORDER_SIZE,
 )
 
 # Conditional metrics import — never breaks if metrics.py is missing
@@ -970,6 +971,22 @@ class ArbitrageExecutor:
         prices_str = opportunity.get("prices", "")
         platform_a = opportunity.get("_platform_a", "")
         platform_b = opportunity.get("_platform_b", "")
+
+        # Reject early if either platform is not whitelisted
+        for plat in (platform_a, platform_b):
+            if plat and plat not in ENABLED_EXECUTION_PLATFORMS:
+                logger.info(
+                    f"Cross-platform leg on '{plat}' blocked — "
+                    f"not in ENABLED_EXECUTION_PLATFORMS"
+                )
+                return []
+            min_size = PLATFORM_MIN_ORDER_SIZE.get(plat, 0)
+            if plat and size > 0 and size / 2 < min_size:
+                logger.info(
+                    f"Cross-platform leg on '{plat}' blocked — "
+                    f"per-leg size ${size / 2:.2f} below minimum ${min_size:.2f}"
+                )
+                return []
         token_ids = opportunity.get("_token_ids", [])
 
         # Parse prices: format is "{platform}_Y={price} {platform}_N={price}"
@@ -1516,6 +1533,24 @@ class ArbitrageExecutor:
         """Execute a single trade leg. Returns (success, order_id, fill_price)."""
         platform = leg["platform"]
         price = leg.get("price", 0)
+
+        # --- Platform whitelist guard ---
+        if platform not in ENABLED_EXECUTION_PLATFORMS:
+            logger.warning(
+                f"Platform '{platform}' not in ENABLED_EXECUTION_PLATFORMS "
+                f"({', '.join(sorted(ENABLED_EXECUTION_PLATFORMS))}). "
+                f"Skipping leg."
+            )
+            return False, None, None
+
+        # --- Minimum order size guard ---
+        min_size = PLATFORM_MIN_ORDER_SIZE.get(platform, 0)
+        if size < min_size:
+            logger.warning(
+                f"Order size ${size:.2f} below {platform} minimum "
+                f"${min_size:.2f}. Skipping leg."
+            )
+            return False, None, None
 
         if platform == "polymarket":
             if not self.pm_trader:

@@ -32,7 +32,8 @@
         { "name": "MAX_OPEN_POSITIONS", "value": "10" },
         { "name": "DAILY_LOSS_LIMIT", "value": "5.0" },
         { "name": "MIN_PROFIT_AMOUNT", "value": "0.02" },
-        { "name": "RESCAN_INTERVAL", "value": "60" }
+        { "name": "RESCAN_INTERVAL", "value": "60" },
+        { "name": "ENABLED_EXECUTION_PLATFORMS", "value": "polymarket,kalshi,sxbet" }
       ],
       "secrets": [
         {

@@ -115,6 +115,31 @@ SIZING_AGGRESSIVENESS = _env_float("SIZING_AGGRESSIVENESS", "0.5")
 DRY_RUN = _env_bool("DRY_RUN", "true")
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "semi-auto")
 
+# Platform execution whitelist — only these platforms can place live orders.
+# Comma-separated list of platform names. Platforms not listed here will still
+# be scanned for price data but will never execute trades.
+_VALID_PLATFORMS = frozenset([
+    "polymarket", "kalshi", "betfair", "smarkets",
+    "sxbet", "matchbook", "gemini", "ibkr",
+])
+_raw_enabled = os.getenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,kalshi")
+ENABLED_EXECUTION_PLATFORMS: frozenset[str] = frozenset(
+    p.strip().lower() for p in _raw_enabled.split(",") if p.strip()
+)
+
+# Platform minimum order sizes (USD). Orders below these are rejected
+# client-side to prevent API rejections and costly partial-fill hedging.
+PLATFORM_MIN_ORDER_SIZE: dict[str, float] = {
+    "polymarket": 0.01,
+    "kalshi": 0.01,
+    "sxbet": 1.00,
+    "gemini": 0.01,
+    "ibkr": 0.01,
+    "betfair": 2.50,
+    "smarkets": 6.25,
+    "matchbook": 5.50,
+}
+
 # Polygon gas cost estimate (per transaction, in dollars)
 POLYGON_GAS_ESTIMATE = _env_float("POLYGON_GAS_ESTIMATE", "0.005")
 
@@ -388,6 +413,19 @@ def validate_config() -> list[str]:
         warnings.append(
             "DASHBOARD_PORT is set but DASHBOARD_PASS is empty — "
             "dashboard has no authentication"
+        )
+
+    # --- Platform whitelist validation ---
+    if not ENABLED_EXECUTION_PLATFORMS:
+        warnings.append(
+            "ENABLED_EXECUTION_PLATFORMS is empty — no platforms will execute trades"
+        )
+    unknown = ENABLED_EXECUTION_PLATFORMS - _VALID_PLATFORMS
+    if unknown:
+        raise ConfigError(
+            f"ENABLED_EXECUTION_PLATFORMS contains unknown platforms: "
+            f"{', '.join(sorted(unknown))}. "
+            f"Valid: {', '.join(sorted(_VALID_PLATFORMS))}"
         )
 
     # --- Contradiction warnings ---

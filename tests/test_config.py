@@ -329,3 +329,55 @@ class TestValidateConfigWarnings:
         warnings = validate_config()
         # May have warnings based on env, but at minimum it shouldn't error
         assert isinstance(warnings, list)
+
+
+# ---------------------------------------------------------------------------
+# validate_config — platform whitelist
+# ---------------------------------------------------------------------------
+
+class TestPlatformWhitelistConfig:
+
+    def test_valid_platforms_accepted(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,kalshi,sxbet")
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        # Should not raise; just check it returns a list
+        assert isinstance(warnings, list)
+
+    def test_unknown_platform_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,robinhood")
+        # ConfigError is a ValueError subclass; raised at module reload time
+        with pytest.raises(ValueError, match="unknown platforms.*robinhood"):
+            _reload_config()
+
+    def test_empty_whitelist_warns(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "")
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        assert any("empty" in w.lower() for w in warnings)
+
+    def test_single_platform_valid(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "kalshi")
+        cfg = _reload_config()
+        assert "kalshi" in cfg.ENABLED_EXECUTION_PLATFORMS
+        assert len(cfg.ENABLED_EXECUTION_PLATFORMS) == 1
+
+    def test_all_eight_platforms_valid(self, monkeypatch):
+        all_plats = "polymarket,kalshi,betfair,smarkets,sxbet,matchbook,gemini,ibkr"
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", all_plats)
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        assert isinstance(warnings, list)
+        assert len(cfg.ENABLED_EXECUTION_PLATFORMS) == 8
+
+    def test_whitespace_trimmed(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", " polymarket , kalshi ")
+        cfg = _reload_config()
+        assert "polymarket" in cfg.ENABLED_EXECUTION_PLATFORMS
+        assert "kalshi" in cfg.ENABLED_EXECUTION_PLATFORMS
+
+    def test_platform_min_order_size_all_platforms_present(self):
+        from config import PLATFORM_MIN_ORDER_SIZE, _VALID_PLATFORMS
+        for plat in _VALID_PLATFORMS:
+            assert plat in PLATFORM_MIN_ORDER_SIZE, f"Missing min order size for {plat}"
+            assert PLATFORM_MIN_ORDER_SIZE[plat] >= 0
