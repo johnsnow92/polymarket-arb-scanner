@@ -153,6 +153,7 @@ class TestScanGeminiMulti:
         client.fetch_all_markets.return_value = [
             _make_categorical_event("E1", "Who wins?", [0.20, 0.20, 0.20, 0.20]),
         ]
+        client.get_order_book.return_value = {"asks": [{"price": 0.20, "amount": 50}]}
 
         result = scan_fn(client, min_profit=0.001)
         assert len(result) >= 1

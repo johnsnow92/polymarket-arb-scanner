@@ -137,6 +137,14 @@ def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min
             if partial:
                 opp["_partial_clob"] = True
             refined.append(opp)
+        else:
+            mid_profit = opp.get("net_profit", 0)
+            logger.debug(
+                "Cross-platform dropped: %s | mid=$%.4f -> ask=$%.4f "
+                "(PM_Y=%.3f PM_N=%.3f K_Y=%.3f K_N=%.3f)",
+                opp.get("market", "?")[:40], mid_profit, best["net_profit"],
+                pm_yes, pm_no, k_yes or 0, k_no or 0,
+            )
 
     dropped = len(opportunities) - len(refined)
     if dropped:
