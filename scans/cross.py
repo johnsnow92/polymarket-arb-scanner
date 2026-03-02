@@ -33,14 +33,15 @@ _CROSS_FEE_FUNCS = {
 }
 
 
-def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min_profit: float) -> list[dict]:
+def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min_profit: float,
+                            price_cache: dict | None = None) -> list[dict]:
     """Stage 2: Re-check cross-platform candidates using CLOB ask prices for Polymarket side."""
     if not opportunities:
         return opportunities
 
     logger.info("Refining %d cross-platform candidates with CLOB ask prices...", len(opportunities))
 
-    # Pre-fetch CLOB prices in parallel
+    # Pre-fetch CLOB prices in parallel (WS cache checked inside _fetch_clob_for_market)
     fetch_tasks = {}  # market_key -> market
     for opp in opportunities:
         market_key = opp.get("_market_key")
@@ -51,7 +52,7 @@ def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min
     clob_results = {}
     if fetch_tasks:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {pool.submit(_fetch_clob_for_market, m): mk
+            futures = {pool.submit(_fetch_clob_for_market, m, price_cache): mk
                        for mk, m in fetch_tasks.items()}
             for future in as_completed(futures):
                 mk = futures[future]
@@ -143,6 +144,7 @@ def scan_cross_platform(
     kalshi_markets_by_event: dict | None = None,
     min_confidence: str = "LOW",
     kalshi_events_preloaded: list[dict] | None = None,
+    price_cache: dict | None = None,
 ) -> list[dict]:
     """Scan for cross-platform arbitrage between Polymarket and Kalshi."""
     opportunities = []
@@ -269,7 +271,7 @@ def scan_cross_platform(
         logger.info("Filtered %d/%d cross-platform matches outside resolution window.", filtered_resolution, len(matched))
 
     # Stage 2: Refine with CLOB ask prices
-    opportunities = _refine_cross_with_clob(opportunities, markets_by_key, min_profit)
+    opportunities = _refine_cross_with_clob(opportunities, markets_by_key, min_profit, price_cache=price_cache)
 
     opportunities = filter_dust(opportunities)
 
@@ -321,6 +323,7 @@ def scan_cross_all(
     platform_clients: dict,
     min_profit: float,
     min_confidence: str = "LOW",
+    price_cache: dict | None = None,
 ) -> list[dict]:
     """Scan for cross-platform arbitrage across all platform pairs."""
     opportunities = []
@@ -426,24 +429,23 @@ def scan_cross_all(
                     opportunities.append(opp_entry)
 
     # Stage 2: Refine Polymarket side with CLOB ask prices
-    _refine_cross_all_with_clob(opportunities, min_profit)
+    _refine_cross_all_with_clob(opportunities, min_profit, price_cache=price_cache)
 
     opportunities = filter_dust(opportunities)
 
     return opportunities
 
 
-def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float):
+def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float,
+                                price_cache: dict | None = None):
     """Refine cross-all opportunities that include Polymarket using CLOB ask prices."""
     pm_opps = [o for o in opportunities
                if o.get("_platform_a") == "polymarket" or o.get("_platform_b") == "polymarket"]
     if not pm_opps:
         return
 
-    # Pre-fetch CLOB prices in parallel for all PM-side token IDs
-    def _fetch_clob_for_tokens(token_ids):
-        return get_clob_prices({"clobTokenIds": token_ids})
-
+    # Pre-fetch CLOB prices in parallel for all PM-side token IDs.
+    # _fetch_clob_for_market checks the WS cache first before hitting REST.
     clob_cache = {}
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {}
@@ -452,11 +454,13 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float):
             if token_ids and len(token_ids) >= 2:
                 key = tuple(token_ids[:2])
                 if key not in futures:
-                    futures[pool.submit(_fetch_clob_for_tokens, list(key))] = key
+                    fake_market = {"clobTokenIds": list(key)}
+                    futures[pool.submit(_fetch_clob_for_market, fake_market, price_cache)] = key
         for future in as_completed(futures):
             key = futures[future]
             try:
-                clob_cache[key] = future.result()
+                _, clob = future.result()
+                clob_cache[key] = clob
             except Exception:
                 pass
 

@@ -287,14 +287,35 @@ class FeedManager:
             self._kalshi_ws = None
 
     def _handle_kalshi_message(self, data: dict):
-        """Process a Kalshi WebSocket message."""
+        """Process a Kalshi WebSocket message.
+
+        Normalises orderbook snapshots/deltas into a scan-friendly format
+        with ``yes_ask``, ``no_ask``, ``yes_ask_size``, ``no_ask_size`` etc.
+        so the scan modules can consume cached prices directly.
+        """
         if _ws_metrics:
             _ws_metrics.inc("ws_messages_received", {"platform": "kalshi"})
         msg_type = data.get("type", "")
         if msg_type == "orderbook_snapshot" or msg_type == "orderbook_delta":
-            ticker = data.get("msg", {}).get("market_ticker", "")
-            if ticker:
-                self.on_price_update("kalshi", ticker, data.get("msg", {}))
+            msg = data.get("msg", {})
+            ticker = msg.get("market_ticker", "")
+            if not ticker:
+                return
+
+            # Parse best yes/no ask from the ladder arrays.
+            # Kalshi ladders: [[price_cents, quantity], ...] sorted best-first.
+            normalised = dict(msg)  # keep raw fields for backward compat
+            for side in ("yes", "no"):
+                ladder = msg.get(side, [])
+                if ladder and isinstance(ladder, list) and len(ladder[0]) >= 2:
+                    # Price is in cents (0-100); convert to dollars (0-1)
+                    normalised[f"{side}_ask"] = ladder[0][0] / 100.0
+                    normalised[f"{side}_ask_size"] = ladder[0][1]
+                else:
+                    normalised[f"{side}_ask"] = None
+                    normalised[f"{side}_ask_size"] = 0
+
+            self.on_price_update("kalshi", ticker, normalised)
 
     async def _run_polymarket(self):
         """Maintain Polymarket WebSocket connection with auto-reconnect and exponential backoff."""
@@ -393,14 +414,75 @@ class FeedManager:
             self._poly_ws = None
 
     def _handle_polymarket_message(self, data: dict | list):
-        """Process a Polymarket WebSocket message."""
+        """Process a Polymarket WebSocket message.
+
+        Normalises ``book``, ``price_change``, and ``best_bid_ask`` events
+        into a scan-friendly cache entry with ``best_bid``, ``best_ask``,
+        ``best_bid_size``, and ``best_ask_size`` fields so CLOB refinement
+        can skip REST fetches when fresh WS data is available.
+        """
         if _ws_metrics:
             _ws_metrics.inc("ws_messages_received", {"platform": "polymarket"})
         # Polymarket sends arrays of events
         events = data if isinstance(data, list) else [data]
         for event in events:
+            event_type = event.get("event_type", "")
             asset_id = event.get("asset_id", "")
-            if asset_id:
+            if not asset_id:
+                # price_change events nest data inside price_changes array
+                if event_type == "price_change":
+                    for pc in event.get("price_changes", []):
+                        aid = pc.get("asset_id", "")
+                        if not aid:
+                            continue
+                        normalised = dict(pc)
+                        normalised["event_type"] = "price_change"
+                        # price_change events include best_bid / best_ask
+                        try:
+                            bb = pc.get("best_bid")
+                            ba = pc.get("best_ask")
+                            if bb is not None:
+                                normalised["best_bid"] = float(bb)
+                            if ba is not None:
+                                normalised["best_ask"] = float(ba)
+                        except (ValueError, TypeError):
+                            pass
+                        self.on_price_update("polymarket", aid, normalised)
+                continue
+
+            if event_type == "book":
+                # Full order book snapshot — extract best bid/ask + size
+                normalised = {"event_type": "book", "asset_id": asset_id}
+                asks = event.get("asks", [])
+                bids = event.get("bids", [])
+                if asks and isinstance(asks, list):
+                    try:
+                        normalised["best_ask"] = float(asks[0].get("price", 0))
+                        normalised["best_ask_size"] = float(asks[0].get("size", 0))
+                    except (ValueError, TypeError, IndexError):
+                        pass
+                if bids and isinstance(bids, list):
+                    try:
+                        normalised["best_bid"] = float(bids[0].get("price", 0))
+                        normalised["best_bid_size"] = float(bids[0].get("size", 0))
+                    except (ValueError, TypeError, IndexError):
+                        pass
+                self.on_price_update("polymarket", asset_id, normalised)
+            elif event_type == "best_bid_ask":
+                # Direct best bid/ask update (requires custom_feature_enabled)
+                normalised = {"event_type": "best_bid_ask", "asset_id": asset_id}
+                try:
+                    bb = event.get("best_bid")
+                    ba = event.get("best_ask")
+                    if bb is not None:
+                        normalised["best_bid"] = float(bb)
+                    if ba is not None:
+                        normalised["best_ask"] = float(ba)
+                except (ValueError, TypeError):
+                    pass
+                self.on_price_update("polymarket", asset_id, normalised)
+            else:
+                # last_trade_price, tick_size_change, etc. — store as-is
                 self.on_price_update("polymarket", asset_id, event)
 
 

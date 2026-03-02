@@ -10,14 +10,15 @@ from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _within_re
 logger = logging.getLogger(__name__)
 
 
-def _refine_binary_with_clob(opportunities: list[dict], markets_by_question: dict, min_profit: float) -> list[dict]:
+def _refine_binary_with_clob(opportunities: list[dict], markets_by_question: dict, min_profit: float,
+                             price_cache: dict | None = None) -> list[dict]:
     """Stage 2: Re-check binary candidates using CLOB ask prices (what you'd actually pay)."""
     if not opportunities:
         return opportunities
 
     logger.info("Refining %d candidates with CLOB ask prices...", len(opportunities))
 
-    # Pre-fetch CLOB prices in parallel
+    # Pre-fetch CLOB prices in parallel (WS cache checked inside _fetch_clob_for_market)
     fetch_tasks = {}  # market_key -> market
     for opp in opportunities:
         market_key = opp.get("_market_key")
@@ -28,7 +29,7 @@ def _refine_binary_with_clob(opportunities: list[dict], markets_by_question: dic
     clob_results = {}
     if fetch_tasks:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {pool.submit(_fetch_clob_for_market, m): mk
+            futures = {pool.submit(_fetch_clob_for_market, m, price_cache): mk
                        for mk, m in fetch_tasks.items()}
             for future in as_completed(futures):
                 mk = futures[future]
@@ -75,7 +76,8 @@ def _refine_binary_with_clob(opportunities: list[dict], markets_by_question: dic
     return refined
 
 
-def scan_binary_internal(markets: list[dict], min_profit: float) -> list[dict]:
+def scan_binary_internal(markets: list[dict], min_profit: float,
+                         price_cache: dict | None = None) -> list[dict]:
     """Scan for binary arbitrage on Polymarket (YES + NO < $1.00)."""
     opportunities = []
     markets_by_question = {}
@@ -127,7 +129,7 @@ def scan_binary_internal(markets: list[dict], min_profit: float) -> list[dict]:
         logger.info("Filtered %d/%d binary markets outside resolution window.", filtered_resolution, len(binary_markets))
 
     # Stage 2: Refine with CLOB ask prices
-    opportunities = _refine_binary_with_clob(opportunities, markets_by_question, min_profit)
+    opportunities = _refine_binary_with_clob(opportunities, markets_by_question, min_profit, price_cache=price_cache)
 
     opportunities = filter_dust(opportunities)
 

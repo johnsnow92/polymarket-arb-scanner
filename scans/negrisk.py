@@ -10,7 +10,8 @@ from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _within_re
 logger = logging.getLogger(__name__)
 
 
-def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, min_profit: float) -> list[dict]:
+def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, min_profit: float,
+                              price_cache: dict | None = None) -> list[dict]:
     """Stage 2: Re-check NegRisk candidates using CLOB ask prices."""
     if not opportunities:
         return opportunities
@@ -18,6 +19,7 @@ def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, 
     logger.info("Refining %d NegRisk candidates with CLOB ask prices...", len(opportunities))
 
     # Pre-fetch all CLOB data for NegRisk markets in parallel
+    # _fetch_clob_for_market checks the WS cache first before hitting REST.
     all_markets = []
     for opp in opportunities:
         event_key = opp.get("_event_key")
@@ -28,7 +30,7 @@ def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, 
     clob_cache = {}
     if all_markets:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {pool.submit(_fetch_clob_for_market, m): m for m in all_markets}
+            futures = {pool.submit(_fetch_clob_for_market, m, price_cache): m for m in all_markets}
             for future in as_completed(futures):
                 try:
                     market, clob = future.result()
@@ -111,7 +113,8 @@ def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, 
     return refined
 
 
-def scan_negrisk_internal(events: list[dict], min_profit: float) -> list[dict]:
+def scan_negrisk_internal(events: list[dict], min_profit: float,
+                          price_cache: dict | None = None) -> list[dict]:
     """Scan for NegRisk arbitrage on Polymarket multi-outcome events."""
     opportunities = []
     events_by_title = {}
@@ -192,7 +195,7 @@ def scan_negrisk_internal(events: list[dict], min_profit: float) -> list[dict]:
         logger.info("Filtered %d NegRisk events outside resolution window.", filtered_resolution)
 
     # Stage 2: Refine with CLOB ask prices
-    opportunities = _refine_negrisk_with_clob(opportunities, events_by_title, min_profit)
+    opportunities = _refine_negrisk_with_clob(opportunities, events_by_title, min_profit, price_cache=price_cache)
 
     opportunities = filter_dust(opportunities)
 

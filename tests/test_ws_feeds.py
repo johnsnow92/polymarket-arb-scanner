@@ -52,7 +52,16 @@ class TestHandleKalshiMessage:
         }
         fm._handle_kalshi_message(data)
 
-        cb.assert_called_once_with("kalshi", "PRES-2028-REP", data["msg"])
+        cb.assert_called_once()
+        args = cb.call_args[0]
+        assert args[0] == "kalshi"
+        assert args[1] == "PRES-2028-REP"
+        # Normalised payload includes parsed best ask prices
+        assert args[2]["market_ticker"] == "PRES-2028-REP"
+        assert args[2]["yes_ask"] == 0.50
+        assert args[2]["no_ask"] == 0.50
+        assert args[2]["yes_ask_size"] == 100
+        assert args[2]["no_ask_size"] == 100
 
     def test_orderbook_delta_calls_on_price_update(self):
         cb = MagicMock()
@@ -68,7 +77,13 @@ class TestHandleKalshiMessage:
         }
         fm._handle_kalshi_message(data)
 
-        cb.assert_called_once_with("kalshi", "PRES-2028-DEM", data["msg"])
+        cb.assert_called_once()
+        args = cb.call_args[0]
+        assert args[0] == "kalshi"
+        assert args[1] == "PRES-2028-DEM"
+        # Delta without yes/no ladder still preserves raw fields
+        assert args[2]["market_ticker"] == "PRES-2028-DEM"
+        assert args[2]["price"] == 45
 
     def test_unknown_type_does_not_call(self):
         cb = MagicMock()

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
@@ -10,6 +11,9 @@ from kalshi_api import KalshiClient
 from config import MAX_RESOLUTION_DAYS, MIN_PROFIT_AMOUNT
 
 logger = logging.getLogger(__name__)
+
+# Maximum age (seconds) of a WS cache entry before we fall back to REST
+_WS_CACHE_MAX_AGE = 30
 
 
 def filter_dust(opportunities: list[dict], min_amount: float = None) -> list[dict]:
@@ -119,8 +123,46 @@ def _parallel_fetch_kalshi(kalshi_client: KalshiClient, tickers: list[str], max_
     return results
 
 
-def _fetch_clob_for_market(market: dict) -> tuple[dict, dict | None]:
-    """Fetch CLOB prices for a single market. Returns (market, clob_data)."""
+def _fetch_clob_for_market(market: dict, price_cache: dict | None = None) -> tuple[dict, dict | None]:
+    """Fetch CLOB prices for a single market, checking WS cache first.
+
+    If fresh (< ``_WS_CACHE_MAX_AGE`` seconds) normalised price data exists
+    in *price_cache* for both the YES and NO tokens, those values are
+    returned immediately without making any REST API calls.  Otherwise
+    falls back to the standard ``get_clob_prices`` REST fetch.
+
+    Args:
+        market: Polymarket market dict (must contain ``clobTokenIds``).
+        price_cache: Shared WS price cache keyed by ``(platform, token_id)``.
+
+    Returns:
+        ``(market, clob_data)`` where *clob_data* has ``yes_ask``,
+        ``yes_ask_size``, ``no_ask``, ``no_ask_size``, ``yes_bid``,
+        ``yes_bid_size``, ``no_bid``, ``no_bid_size`` — or ``None``.
+    """
+    if price_cache:
+        token_ids = _extract_token_ids(market)
+        if len(token_ids) >= 2:
+            now = time.time()
+            cached_yes = price_cache.get(("polymarket", token_ids[0]))
+            cached_no = price_cache.get(("polymarket", token_ids[1]))
+            if (cached_yes and cached_no
+                    and now - cached_yes.get("_ts", 0) < _WS_CACHE_MAX_AGE
+                    and now - cached_no.get("_ts", 0) < _WS_CACHE_MAX_AGE):
+                yes_ask = cached_yes.get("best_ask")
+                no_ask = cached_no.get("best_ask")
+                if yes_ask is not None and no_ask is not None:
+                    return market, {
+                        "yes_ask": yes_ask,
+                        "yes_ask_size": cached_yes.get("best_ask_size", 0) or 0,
+                        "no_ask": no_ask,
+                        "no_ask_size": cached_no.get("best_ask_size", 0) or 0,
+                        "yes_bid": cached_yes.get("best_bid"),
+                        "yes_bid_size": cached_yes.get("best_bid_size", 0) or 0,
+                        "no_bid": cached_no.get("best_bid"),
+                        "no_bid_size": cached_no.get("best_bid_size", 0) or 0,
+                    }
+    # Fallback to REST API
     return market, get_clob_prices(market)
 
 

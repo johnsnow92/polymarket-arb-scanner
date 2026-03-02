@@ -620,10 +620,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 with ThreadPoolExecutor(max_workers=4) as pool:
                     if args.mode in ("all", "binary") and poly_markets:
                         scan_futures["binary"] = pool.submit(
-                            scan_binary_internal, poly_markets, min_profit)
+                            scan_binary_internal, poly_markets, min_profit,
+                            price_cache=price_cache)
                     if args.mode in ("all", "negrisk") and poly_events:
                         scan_futures["negrisk"] = pool.submit(
-                            scan_negrisk_internal, poly_events, min_profit)
+                            scan_negrisk_internal, poly_events, min_profit,
+                            price_cache=price_cache)
                     if args.mode in ("all", "kalshi") and kalshi_client:
                         scan_futures["kalshi_binary"] = pool.submit(
                             scan_kalshi_binary, kalshi_client, min_profit, kalshi_data=kalshi_data)
@@ -645,6 +647,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         poly_markets, kalshi_client, min_profit,
                         min_confidence=args.min_confidence,
                         kalshi_events_preloaded=kalshi_events_preloaded,
+                        price_cache=price_cache,
                     )
                     all_opportunities.extend(cross_opps)
 
@@ -674,6 +677,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     cross_all_opps = scan_cross_all(
                         poly_markets, platform_clients, min_profit,
                         min_confidence=args.min_confidence,
+                        price_cache=price_cache,
                     )
                     all_opportunities.extend(cross_all_opps)
 
