@@ -137,10 +137,10 @@ class SXBetClient:
             if not sport_id:
                 continue
 
-            # Fetch markets for this sport
+            # Fetch markets for this sport (SX Bet max pageSize = 50)
             market_data = self._request("GET", "/markets/active", params={
                 "sportId": sport_id,
-                "pageSize": 100,
+                "pageSize": 50,
             })
             if market_data and "data" in market_data:
                 for market in market_data["data"]:
