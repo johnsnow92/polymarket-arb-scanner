@@ -1,15 +1,18 @@
 """SQLite persistence for trade logging and opportunity tracking."""
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 class TradeDB:
     """Thread-safe SQLite database for logging opportunities and trades."""
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str | None = None):
         if db_path is None:
             import os
             data_dir = os.getenv("DATA_DIR", ".")
@@ -98,7 +101,7 @@ class TradeDB:
             self.conn.execute("ALTER TABLE trades ADD COLUMN slippage REAL")
             self.conn.commit()
         except sqlite3.OperationalError:
-            pass  # Column already exists
+            logger.debug("Migration: column already exists")
 
     def log_opportunity(
         self,
@@ -110,7 +113,7 @@ class TradeDB:
         net_roi: float,
         depth: float,
         action: str,
-    ) -> int:
+    ) -> int | None:
         """Log a detected opportunity. Returns the opportunity ID."""
         with self._lock:
             cur = self.conn.execute(
@@ -142,7 +145,7 @@ class TradeDB:
         status: str,
         fill_price: float | None = None,
         order_id: str | None = None,
-    ) -> int:
+    ) -> int | None:
         """Log a trade leg. Returns the trade ID."""
         with self._lock:
             cur = self.conn.execute(
@@ -236,7 +239,7 @@ class TradeDB:
         market_identifier: str,
         platform: str,
         expected_pnl: float,
-    ) -> int:
+    ) -> int | None:
         """Create an open position after a trade is filled. Returns position ID."""
         with self._lock:
             cur = self.conn.execute(
@@ -337,7 +340,7 @@ class TradeDB:
         side: str,
         fill_price: float,
         size: float,
-    ) -> int:
+    ) -> int | None:
         """Log a partial fill for hedging. Returns partial_fill ID."""
         with self._lock:
             cur = self.conn.execute(
@@ -358,7 +361,7 @@ class TradeDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def update_partial_fill(self, pf_id: int, status: str, attempts: int = None):
+    def update_partial_fill(self, pf_id: int, status: str, attempts: int | None = None):
         """Update partial fill hedge status."""
         with self._lock:
             if attempts is not None:
@@ -377,6 +380,175 @@ class TradeDB:
                     (datetime.now(timezone.utc).isoformat(), pf_id),
                 )
             self.conn.commit()
+
+    # ---------------------------------------------------------------------------
+    # Dashboard queries
+    # ---------------------------------------------------------------------------
+
+    def get_daily_pnl_history(self, days: int = 30) -> list[dict]:
+        """Get daily realized P&L aggregated by date for the last N days.
+
+        Returns:
+            List of dicts with keys 'date' (YYYY-MM-DD) and 'pnl' (float).
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT date(settlement_timestamp) as date,
+                          SUM(realized_pnl) as pnl
+                   FROM positions
+                   WHERE status = 'settled'
+                     AND settlement_timestamp >= date('now', ?)
+                   GROUP BY date(settlement_timestamp)
+                   ORDER BY date""",
+                (f"-{days} days",),
+            ).fetchall()
+            return [{"date": r["date"], "pnl": round(r["pnl"], 4)} for r in rows]
+
+    def get_positions_by_platform(self) -> list[dict]:
+        """Get open position counts and total expected P&L grouped by platform.
+
+        Returns:
+            List of dicts with keys 'platform', 'count', 'total_expected_pnl'.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT platform,
+                          COUNT(*) as count,
+                          COALESCE(SUM(expected_pnl), 0) as total_expected_pnl
+                   FROM positions
+                   WHERE status = 'open'
+                   GROUP BY platform
+                   ORDER BY count DESC"""
+            ).fetchall()
+            return [
+                {
+                    "platform": r["platform"],
+                    "count": r["count"],
+                    "total_expected_pnl": round(r["total_expected_pnl"], 4),
+                }
+                for r in rows
+            ]
+
+    def get_opportunity_stats_by_type(self) -> list[dict]:
+        """Get opportunity statistics grouped by type.
+
+        Returns:
+            List of dicts with type, count, avg_roi, avg_profit, total_profit.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT type,
+                          COUNT(*) as count,
+                          AVG(net_roi) as avg_roi,
+                          AVG(net_profit) as avg_profit,
+                          SUM(net_profit) as total_profit
+                   FROM opportunities
+                   GROUP BY type
+                   ORDER BY count DESC"""
+            ).fetchall()
+            return [
+                {
+                    "type": r["type"],
+                    "count": r["count"],
+                    "avg_roi": round(r["avg_roi"] or 0, 4),
+                    "avg_profit": round(r["avg_profit"] or 0, 4),
+                    "total_profit": round(r["total_profit"] or 0, 4),
+                }
+                for r in rows
+            ]
+
+    def get_recent_trades(self, limit: int = 100) -> list[dict]:
+        """Get recent trades with their opportunity context.
+
+        Returns:
+            List of trade dicts enriched with opportunity type and market.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT t.*, o.type as opp_type, o.market as opp_market
+                   FROM trades t
+                   LEFT JOIN opportunities o ON t.opportunity_id = o.id
+                   ORDER BY t.id DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_cumulative_pnl(self) -> float:
+        """Get total realized P&L across all settled positions."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions WHERE status = 'settled'"
+            ).fetchone()
+            return round(row["total"], 4)
+
+    # ---------------------------------------------------------------------------
+    # Admin / maintenance
+    # ---------------------------------------------------------------------------
+
+    def purge_opportunities_by_type(self, opp_type: str) -> dict:
+        """Delete all opportunities and their associated trades for a given type.
+
+        Also removes any positions and partial fills linked to those opportunities.
+        Returns a summary dict with counts of deleted rows.
+
+        Args:
+            opp_type: The opportunity type to purge (e.g. 'SpreadKalshi').
+
+        Returns:
+            Dict with keys 'opportunities', 'trades', 'positions', 'partial_fills'.
+        """
+        with self._lock:
+            # Get opportunity IDs first
+            rows = self.conn.execute(
+                "SELECT id FROM opportunities WHERE type = ?", (opp_type,)
+            ).fetchall()
+            opp_ids = [r["id"] for r in rows]
+
+            if not opp_ids:
+                return {"opportunities": 0, "trades": 0, "positions": 0, "partial_fills": 0}
+
+            placeholders = ",".join("?" for _ in opp_ids)
+
+            # Delete in dependency order: partial_fills -> trades -> positions -> opportunities
+            pf_cur = self.conn.execute(
+                f"DELETE FROM partial_fills WHERE opportunity_id IN ({placeholders})",
+                opp_ids,
+            )
+            tr_cur = self.conn.execute(
+                f"DELETE FROM trades WHERE opportunity_id IN ({placeholders})",
+                opp_ids,
+            )
+            pos_cur = self.conn.execute(
+                f"DELETE FROM positions WHERE opportunity_id IN ({placeholders})",
+                opp_ids,
+            )
+            opp_cur = self.conn.execute(
+                f"DELETE FROM opportunities WHERE type = ?", (opp_type,)
+            )
+            self.conn.commit()
+
+            result = {
+                "opportunities": opp_cur.rowcount,
+                "trades": tr_cur.rowcount,
+                "positions": pos_cur.rowcount,
+                "partial_fills": pf_cur.rowcount,
+            }
+            logger.info("Purged %s: %s", opp_type, result)
+            return result
+
+    def get_db_stats(self) -> dict:
+        """Get row counts for all tables — useful for dashboard diagnostics.
+
+        Returns:
+            Dict with table names as keys and row counts as values.
+        """
+        with self._lock:
+            stats = {}
+            for table in ("opportunities", "trades", "positions", "partial_fills"):
+                row = self.conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
+                stats[table] = row["cnt"]
+            return stats
 
     def close(self):
         self.conn.close()

@@ -34,8 +34,8 @@ def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, 
                     market, clob = future.result()
                     m_key = id(market)
                     clob_cache[m_key] = clob
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("CLOB fetch failed for NegRisk refinement: %s", e)
 
     refined = []
     for opp in opportunities:
@@ -96,6 +96,14 @@ def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, 
             opp["_partial_clob"] = clob_count < total_outcomes
             opp["_clob_coverage"] = f"{clob_count}/{total_outcomes}"
             refined.append(opp)
+        else:
+            mid_profit = opp.get("net_profit", 0)
+            logger.debug(
+                "NegRisk dropped: %s | mid=$%.4f -> ask=$%.4f (coverage=%d/%d, depth=%.0f)",
+                opp.get("market", "?")[:40], mid_profit, result["net_profit"],
+                clob_count, total_outcomes,
+                min_depth if min_depth != float("inf") else 0,
+            )
 
     dropped = len(opportunities) - len(refined)
     if dropped:

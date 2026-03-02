@@ -1,0 +1,227 @@
+"""Historical price snapshot recorder for backtesting."""
+
+import logging
+import os
+import sqlite3
+import threading
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+
+class SnapshotRecorder:
+    """Records price snapshots to SQLite for historical analysis and backtesting.
+
+    Thread-safe with WAL mode, following the same pattern as TradeDB.
+    """
+
+    def __init__(self, db_path: str | None = None):
+        if db_path is None:
+            data_dir = os.getenv("DATA_DIR", ".")
+            db_path = os.path.join(data_dir, "snapshots.db")
+        self._lock = threading.Lock()
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self._create_tables()
+
+    def _create_tables(self):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS price_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                market TEXT NOT NULL,
+                platform_a TEXT,
+                platform_b TEXT,
+                price_a REAL,
+                price_b REAL,
+                gross_spread REAL,
+                fees REAL,
+                net_profit REAL,
+                opp_type TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp
+                ON price_snapshots(timestamp);
+
+            CREATE INDEX IF NOT EXISTS idx_snapshots_opp_type
+                ON price_snapshots(opp_type);
+        """)
+        self.conn.commit()
+
+    def record_snapshot(self, opportunities: list[dict]) -> int:
+        """Record a batch of opportunity price snapshots.
+
+        Args:
+            opportunities: List of opportunity dicts from the scanner.
+
+        Returns:
+            Number of snapshots recorded.
+        """
+        if not opportunities:
+            return 0
+
+        now = datetime.now(timezone.utc).isoformat()
+        rows = []
+
+        for opp in opportunities:
+            market = opp.get("market", "Unknown")
+            opp_type = opp.get("type", "")
+            net_profit = opp.get("net_profit", 0)
+
+            # Extract platform info and prices
+            platform_a, platform_b, price_a, price_b = self._extract_platforms(opp)
+
+            # Parse total cost for gross spread calculation
+            total_cost_str = opp.get("total_cost", "$0")
+            if isinstance(total_cost_str, str):
+                total_cost = float(total_cost_str.replace("$", ""))
+            else:
+                total_cost = float(total_cost_str)
+
+            gross_spread = 1.0 - total_cost if total_cost < 1.0 else 0.0
+
+            # Fees = gross_spread - net_profit
+            fees = gross_spread - net_profit if gross_spread > net_profit else 0.0
+
+            rows.append((
+                now, market, platform_a, platform_b,
+                price_a, price_b, gross_spread, fees,
+                net_profit, opp_type,
+            ))
+
+        if not rows:
+            return 0
+
+        with self._lock:
+            self.conn.executemany(
+                """INSERT INTO price_snapshots
+                   (timestamp, market, platform_a, platform_b,
+                    price_a, price_b, gross_spread, fees,
+                    net_profit, opp_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+            self.conn.commit()
+
+        logger.debug("Recorded %d price snapshots.", len(rows))
+        return len(rows)
+
+    def _extract_platforms(self, opp: dict) -> tuple[str, str, float | None, float | None]:
+        """Extract platform names and prices from an opportunity dict.
+
+        Returns (platform_a, platform_b, price_a, price_b).
+        """
+        opp_type = opp.get("type", "")
+        prices_str = opp.get("prices", "")
+
+        # Cross-platform: "{platform}_Y={price} {platform}_N={price}"
+        if "_platform_a" in opp:
+            platform_a = opp.get("_platform_a", "")
+            platform_b = opp.get("_platform_b", "")
+            price_a = opp.get("_price_a")
+            price_b = opp.get("_price_b")
+            if price_a is None or price_b is None:
+                price_a, price_b = self._parse_prices_str(prices_str)
+            return platform_a, platform_b, price_a, price_b
+
+        # Same-platform arbs
+        if opp_type == "Binary" or opp_type.startswith("NegRisk"):
+            return "polymarket", "polymarket", *self._parse_prices_str(prices_str)
+        elif opp_type.startswith("Kalshi"):
+            return "kalshi", "kalshi", *self._parse_prices_str(prices_str)
+        elif opp_type.startswith("Betfair"):
+            return "betfair", "betfair", *self._parse_prices_str(prices_str)
+        elif opp_type.startswith("Smarkets"):
+            return "smarkets", "smarkets", *self._parse_prices_str(prices_str)
+        elif opp_type.startswith("SXBet"):
+            return "sxbet", "sxbet", *self._parse_prices_str(prices_str)
+        elif opp_type.startswith("Matchbook"):
+            return "matchbook", "matchbook", *self._parse_prices_str(prices_str)
+        elif opp_type.startswith("Gemini"):
+            return "gemini", "gemini", *self._parse_prices_str(prices_str)
+        elif opp_type.startswith("IBKR"):
+            return "ibkr", "ibkr", *self._parse_prices_str(prices_str)
+        elif opp_type.startswith("Cross"):
+            # Standard cross: "PM_Y=0.300 K_N=0.350"
+            return "polymarket", "kalshi", *self._parse_prices_str(prices_str)
+        elif opp_type == "TriangularCross":
+            pa = opp.get("_platform_a", "")
+            pb = opp.get("_platform_b", "")
+            return pa, pb, *self._parse_prices_str(prices_str)
+        elif opp_type == "EventDivergence":
+            platform = opp.get("_platform", "")
+            return platform, "metaculus", *self._parse_prices_str(prices_str)
+
+        return "", "", None, None
+
+    @staticmethod
+    def _parse_prices_str(prices_str: str) -> tuple[float | None, float | None]:
+        """Parse two prices from a prices string like 'Y=0.400 N=0.450'."""
+        parts = prices_str.split()
+        price_a = price_b = None
+        for i, part in enumerate(parts):
+            if "=" in part:
+                try:
+                    val = float(part.split("=", 1)[1])
+                    if i == 0:
+                        price_a = val
+                    elif i == 1:
+                        price_b = val
+                except ValueError:
+                    pass
+            else:
+                # Comma-separated (NegRisk): "0.20, 0.25, 0.30"
+                try:
+                    val = float(part.rstrip(","))
+                    if price_a is None:
+                        price_a = val
+                    elif price_b is None:
+                        price_b = val
+                except ValueError:
+                    pass
+        return price_a, price_b
+
+    def get_snapshots(
+        self,
+        start_time: str,
+        end_time: str,
+        opp_type: str | None = None,
+    ) -> list[dict]:
+        """Retrieve snapshots within a time range.
+
+        Args:
+            start_time: ISO format start timestamp.
+            end_time: ISO format end timestamp.
+            opp_type: Optional filter by opportunity type.
+
+        Returns:
+            List of snapshot dicts.
+        """
+        with self._lock:
+            if opp_type:
+                rows = self.conn.execute(
+                    """SELECT * FROM price_snapshots
+                       WHERE timestamp >= ? AND timestamp <= ? AND opp_type = ?
+                       ORDER BY timestamp""",
+                    (start_time, end_time, opp_type),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    """SELECT * FROM price_snapshots
+                       WHERE timestamp >= ? AND timestamp <= ?
+                       ORDER BY timestamp""",
+                    (start_time, end_time),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_snapshot_count(self) -> int:
+        """Return total number of snapshots in the database."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM price_snapshots"
+            ).fetchone()
+            return row["cnt"]
+
+    def close(self):
+        self.conn.close()

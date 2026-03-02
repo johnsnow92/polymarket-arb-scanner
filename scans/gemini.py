@@ -53,12 +53,20 @@ def scan_gemini_binary(gemini_client: GeminiClient, min_profit: float) -> list[d
                 yes_symbol = contracts[0].get("instrumentSymbol", "")
                 no_symbol = contracts[1].get("instrumentSymbol", "")
 
-            # Try to get order book depth
+            # Depth = min ask-side liquidity across YES and NO books,
+            # since the arb requires buying one contract of each.
             depth = 0
-            if yes_symbol:
-                book = gemini_client.get_order_book(yes_symbol, limit=1)
-                if book and book.get("asks"):
-                    depth = book["asks"][0].get("amount", 0)
+            if yes_symbol and no_symbol:
+                yes_book = gemini_client.get_order_book(yes_symbol, limit=1)
+                no_book = gemini_client.get_order_book(no_symbol, limit=1)
+                yes_depth = 0
+                no_depth = 0
+                if yes_book and yes_book.get("asks"):
+                    yes_depth = yes_book["asks"][0].get("amount", 0)
+                if no_book and no_book.get("asks"):
+                    no_depth = no_book["asks"][0].get("amount", 0)
+                if yes_depth and no_depth:
+                    depth = min(yes_depth, no_depth)
 
             opportunities.append({
                 "type": "GeminiBinary",
@@ -127,6 +135,24 @@ def scan_gemini_multi(gemini_client: GeminiClient, min_profit: float) -> list[di
             if n > 5:
                 price_summary += f"... ({n} outcomes)"
 
+            # Fetch order book depth for each outcome — the bottleneck
+            # is the thinnest book since the arb requires one contract
+            # of every outcome.
+            min_depth = float("inf")
+            for sym in symbols:
+                if not sym:
+                    min_depth = 0
+                    break
+                book = gemini_client.get_order_book(sym, limit=1)
+                if book and book.get("asks"):
+                    amt = book["asks"][0].get("amount", 0)
+                    min_depth = min(min_depth, amt)
+                else:
+                    min_depth = 0
+                    break
+            if min_depth == float("inf"):
+                min_depth = 0
+
             opportunities.append({
                 "type": "GeminiMulti",
                 "market": event.get("title", "")[:60],
@@ -139,7 +165,7 @@ def scan_gemini_multi(gemini_client: GeminiClient, min_profit: float) -> list[di
                 "_gm_event_id": event.get("id", ""),
                 "_gm_symbols": symbols,
                 "_gm_prices": prices,
-                "_clob_depth": 0,
+                "_clob_depth": min_depth,
             })
 
     logger.info("Found %d Gemini multi-outcome opportunities.", len(opportunities))

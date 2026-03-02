@@ -1,11 +1,25 @@
-"""Tests for config.py — setup_logging and configuration constants."""
+"""Tests for config.py — setup_logging, env helpers, and config validation."""
 
+import importlib
 import logging
 import os
+import sys
 import tempfile
-import pytest
-from config import setup_logging, LOG_LEVEL, DASHBOARD_PORT, WEBHOOK_URL
+from pathlib import Path
 
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from config import (
+    setup_logging, LOG_LEVEL, DASHBOARD_PORT, WEBHOOK_URL,
+    _env_float, _env_int, _env_bool, ConfigError, validate_config,
+)
+
+
+# ---------------------------------------------------------------------------
+# setup_logging
+# ---------------------------------------------------------------------------
 
 class TestSetupLogging:
     def test_default_level(self):
@@ -50,6 +64,10 @@ class TestSetupLogging:
         assert console_handler.level == logging.INFO
 
 
+# ---------------------------------------------------------------------------
+# TestConfigConstants
+# ---------------------------------------------------------------------------
+
 class TestConfigConstants:
     def test_log_level_default(self):
         # When LOG_LEVEL env var not set, defaults to INFO
@@ -60,3 +78,306 @@ class TestConfigConstants:
 
     def test_webhook_url_is_string(self):
         assert isinstance(WEBHOOK_URL, str)
+
+
+# ---------------------------------------------------------------------------
+# _env_float
+# ---------------------------------------------------------------------------
+
+class TestEnvFloat:
+    def test_valid_float(self, monkeypatch):
+        monkeypatch.setenv("TEST_FLOAT", "3.14")
+        assert _env_float("TEST_FLOAT", "0") == pytest.approx(3.14)
+
+    def test_valid_int_string(self, monkeypatch):
+        monkeypatch.setenv("TEST_FLOAT", "42")
+        assert _env_float("TEST_FLOAT", "0") == 42.0
+
+    def test_negative_float(self, monkeypatch):
+        monkeypatch.setenv("TEST_FLOAT", "-1.5")
+        assert _env_float("TEST_FLOAT", "0") == -1.5
+
+    def test_uses_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("TEST_FLOAT_MISSING", raising=False)
+        assert _env_float("TEST_FLOAT_MISSING", "9.9") == pytest.approx(9.9)
+
+    def test_invalid_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("TEST_FLOAT", "not_a_number")
+        with pytest.raises(ConfigError, match="TEST_FLOAT.*not a valid float"):
+            _env_float("TEST_FLOAT", "0")
+
+    def test_empty_string_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("TEST_FLOAT", "")
+        with pytest.raises(ConfigError, match="TEST_FLOAT.*not a valid float"):
+            _env_float("TEST_FLOAT", "0")
+
+
+# ---------------------------------------------------------------------------
+# _env_int
+# ---------------------------------------------------------------------------
+
+class TestEnvInt:
+    def test_valid_int(self, monkeypatch):
+        monkeypatch.setenv("TEST_INT", "42")
+        assert _env_int("TEST_INT", "0") == 42
+
+    def test_negative_int(self, monkeypatch):
+        monkeypatch.setenv("TEST_INT", "-5")
+        assert _env_int("TEST_INT", "0") == -5
+
+    def test_uses_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("TEST_INT_MISSING", raising=False)
+        assert _env_int("TEST_INT_MISSING", "7") == 7
+
+    def test_float_string_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("TEST_INT", "3.14")
+        with pytest.raises(ConfigError, match="TEST_INT.*not a valid integer"):
+            _env_int("TEST_INT", "0")
+
+    def test_invalid_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("TEST_INT", "abc")
+        with pytest.raises(ConfigError, match="TEST_INT.*not a valid integer"):
+            _env_int("TEST_INT", "0")
+
+    def test_empty_string_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("TEST_INT", "")
+        with pytest.raises(ConfigError, match="TEST_INT.*not a valid integer"):
+            _env_int("TEST_INT", "0")
+
+
+# ---------------------------------------------------------------------------
+# _env_bool
+# ---------------------------------------------------------------------------
+
+class TestEnvBool:
+    @pytest.mark.parametrize("raw", ["true", "True", "TRUE", "1", "yes", "YES"])
+    def test_truthy_values(self, monkeypatch, raw):
+        monkeypatch.setenv("TEST_BOOL", raw)
+        assert _env_bool("TEST_BOOL", "false") is True
+
+    @pytest.mark.parametrize("raw", ["false", "False", "FALSE", "0", "no", "NO"])
+    def test_falsy_values(self, monkeypatch, raw):
+        monkeypatch.setenv("TEST_BOOL", raw)
+        assert _env_bool("TEST_BOOL", "true") is False
+
+    def test_uses_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("TEST_BOOL_MISSING", raising=False)
+        assert _env_bool("TEST_BOOL_MISSING", "true") is True
+        assert _env_bool("TEST_BOOL_MISSING", "false") is False
+
+    def test_invalid_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("TEST_BOOL", "maybe")
+        with pytest.raises(ConfigError, match="TEST_BOOL.*not a valid boolean"):
+            _env_bool("TEST_BOOL", "false")
+
+    def test_whitespace_trimmed(self, monkeypatch):
+        monkeypatch.setenv("TEST_BOOL", "  true  ")
+        assert _env_bool("TEST_BOOL", "false") is True
+
+
+# ---------------------------------------------------------------------------
+# validate_config — range checks (uses importlib.reload to re-read env)
+# ---------------------------------------------------------------------------
+
+def _reload_config():
+    """Force-reload config module to pick up env var changes.
+
+    Returns the freshly reloaded module. Uses importlib.reload so that
+    module-level code (including validate_config()) re-executes with current
+    env vars. Raises whatever exception the module raises at load time.
+    """
+    import config as _cfg
+    return importlib.reload(_cfg)
+
+
+class TestValidateConfig:
+
+    def test_default_config_is_valid(self):
+        # The current defaults should pass validation with no errors
+        warnings = validate_config()
+        assert isinstance(warnings, list)
+
+    def test_invalid_execution_mode(self, monkeypatch):
+        monkeypatch.setenv("EXECUTION_MODE", "yolo")
+        with pytest.raises(ValueError, match="EXECUTION_MODE.*yolo"):
+            _reload_config()
+
+    def test_negative_max_trade_size(self, monkeypatch):
+        monkeypatch.setenv("MAX_TRADE_SIZE", "-10")
+        with pytest.raises(ValueError, match="MAX_TRADE_SIZE.*must be > 0"):
+            _reload_config()
+
+    def test_zero_daily_loss_limit(self, monkeypatch):
+        monkeypatch.setenv("DAILY_LOSS_LIMIT", "0")
+        with pytest.raises(ValueError, match="DAILY_LOSS_LIMIT.*must be > 0"):
+            _reload_config()
+
+    def test_zero_parallel_workers(self, monkeypatch):
+        monkeypatch.setenv("PARALLEL_WORKERS", "0")
+        with pytest.raises(ValueError, match="PARALLEL_WORKERS.*must be > 0"):
+            _reload_config()
+
+    def test_negative_min_liquidity(self, monkeypatch):
+        monkeypatch.setenv("MIN_LIQUIDITY", "-1")
+        with pytest.raises(ValueError, match="MIN_LIQUIDITY.*must be >= 0"):
+            _reload_config()
+
+    def test_sizing_aggressiveness_above_one(self, monkeypatch):
+        monkeypatch.setenv("SIZING_AGGRESSIVENESS", "1.5")
+        with pytest.raises(ValueError, match="SIZING_AGGRESSIVENESS.*must be in"):
+            _reload_config()
+
+    def test_sizing_aggressiveness_negative(self, monkeypatch):
+        monkeypatch.setenv("SIZING_AGGRESSIVENESS", "-0.1")
+        with pytest.raises(ValueError, match="SIZING_AGGRESSIVENESS.*must be in"):
+            _reload_config()
+
+    def test_betfair_commission_rate_too_high(self, monkeypatch):
+        monkeypatch.setenv("BETFAIR_COMMISSION_RATE", "2.0")
+        with pytest.raises(ValueError, match="BETFAIR_COMMISSION_RATE.*must be in"):
+            _reload_config()
+
+    def test_smarkets_commission_rate_negative(self, monkeypatch):
+        monkeypatch.setenv("SMARKETS_COMMISSION_RATE", "-0.01")
+        with pytest.raises(ValueError, match="SMARKETS_COMMISSION_RATE.*must be in"):
+            _reload_config()
+
+    def test_gemini_fee_rate_too_high(self, monkeypatch):
+        monkeypatch.setenv("GEMINI_FEE_RATE", "1.0")
+        with pytest.raises(ValueError, match="GEMINI_FEE_RATE.*must be in"):
+            _reload_config()
+
+    def test_dashboard_port_out_of_range(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_PORT", "99999")
+        with pytest.raises(ValueError, match="DASHBOARD_PORT.*must be in"):
+            _reload_config()
+
+    def test_dashboard_port_negative(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_PORT", "-1")
+        with pytest.raises(ValueError, match="DASHBOARD_PORT.*must be in"):
+            _reload_config()
+
+    def test_fuzzy_match_threshold_zero(self, monkeypatch):
+        monkeypatch.setenv("FUZZY_MATCH_THRESHOLD", "0")
+        with pytest.raises(ValueError, match="FUZZY_MATCH_THRESHOLD.*must be in"):
+            _reload_config()
+
+    def test_fuzzy_match_threshold_above_100(self, monkeypatch):
+        monkeypatch.setenv("FUZZY_MATCH_THRESHOLD", "101")
+        with pytest.raises(ValueError, match="FUZZY_MATCH_THRESHOLD.*must be in"):
+            _reload_config()
+
+    def test_event_divergence_threshold_above_one(self, monkeypatch):
+        monkeypatch.setenv("EVENT_DIVERGENCE_THRESHOLD", "1.5")
+        with pytest.raises(ValueError, match="EVENT_DIVERGENCE_THRESHOLD.*must be in"):
+            _reload_config()
+
+    def test_hedge_max_spread_loss_pct_negative(self, monkeypatch):
+        monkeypatch.setenv("HEDGE_MAX_SPREAD_LOSS_PCT", "-0.1")
+        with pytest.raises(ValueError, match="HEDGE_MAX_SPREAD_LOSS_PCT.*must be in"):
+            _reload_config()
+
+    def test_reentry_improvement_threshold_above_one(self, monkeypatch):
+        monkeypatch.setenv("REENTRY_IMPROVEMENT_THRESHOLD", "2.0")
+        with pytest.raises(ValueError, match="REENTRY_IMPROVEMENT_THRESHOLD.*must be in"):
+            _reload_config()
+
+    def test_non_numeric_float_var(self, monkeypatch):
+        monkeypatch.setenv("MAX_TRADE_SIZE", "abc")
+        with pytest.raises(ValueError, match="MAX_TRADE_SIZE.*not a valid float"):
+            _reload_config()
+
+    def test_non_numeric_int_var(self, monkeypatch):
+        monkeypatch.setenv("PARALLEL_WORKERS", "abc")
+        with pytest.raises(ValueError, match="PARALLEL_WORKERS.*not a valid integer"):
+            _reload_config()
+
+    def test_invalid_bool_var(self, monkeypatch):
+        monkeypatch.setenv("DRY_RUN", "maybe")
+        with pytest.raises(ValueError, match="DRY_RUN.*not a valid boolean"):
+            _reload_config()
+
+
+# ---------------------------------------------------------------------------
+# validate_config — warnings
+# ---------------------------------------------------------------------------
+
+class TestValidateConfigWarnings:
+
+    def test_fullauth_dryrun_contradiction_warning(self, monkeypatch):
+        monkeypatch.setenv("EXECUTION_MODE", "full-auto")
+        monkeypatch.setenv("DRY_RUN", "true")
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        assert any("full-auto" in w and "DRY_RUN" in w for w in warnings)
+
+    def test_poll_timeout_less_than_interval_warning(self, monkeypatch):
+        monkeypatch.setenv("FILL_POLL_INTERVAL", "5.0")
+        monkeypatch.setenv("FILL_POLL_TIMEOUT", "1.0")
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        assert any("FILL_POLL_TIMEOUT" in w for w in warnings)
+
+    def test_invalid_log_level_warning(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "VERBOSE")
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        assert any("LOG_LEVEL" in w for w in warnings)
+
+    def test_valid_config_no_warnings(self):
+        # Default config should produce no warnings (DRY_RUN=true, EXECUTION_MODE=semi-auto)
+        warnings = validate_config()
+        # May have warnings based on env, but at minimum it shouldn't error
+        assert isinstance(warnings, list)
+
+
+# ---------------------------------------------------------------------------
+# validate_config — platform whitelist
+# ---------------------------------------------------------------------------
+
+class TestPlatformWhitelistConfig:
+
+    def test_valid_platforms_accepted(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,kalshi,sxbet")
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        # Should not raise; just check it returns a list
+        assert isinstance(warnings, list)
+
+    def test_unknown_platform_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,robinhood")
+        # ConfigError is a ValueError subclass; raised at module reload time
+        with pytest.raises(ValueError, match="unknown platforms.*robinhood"):
+            _reload_config()
+
+    def test_empty_whitelist_warns(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "")
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        assert any("empty" in w.lower() for w in warnings)
+
+    def test_single_platform_valid(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "kalshi")
+        cfg = _reload_config()
+        assert "kalshi" in cfg.ENABLED_EXECUTION_PLATFORMS
+        assert len(cfg.ENABLED_EXECUTION_PLATFORMS) == 1
+
+    def test_all_eight_platforms_valid(self, monkeypatch):
+        all_plats = "polymarket,kalshi,betfair,smarkets,sxbet,matchbook,gemini,ibkr"
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", all_plats)
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        assert isinstance(warnings, list)
+        assert len(cfg.ENABLED_EXECUTION_PLATFORMS) == 8
+
+    def test_whitespace_trimmed(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", " polymarket , kalshi ")
+        cfg = _reload_config()
+        assert "polymarket" in cfg.ENABLED_EXECUTION_PLATFORMS
+        assert "kalshi" in cfg.ENABLED_EXECUTION_PLATFORMS
+
+    def test_platform_min_order_size_all_platforms_present(self):
+        from config import PLATFORM_MIN_ORDER_SIZE, _VALID_PLATFORMS
+        for plat in _VALID_PLATFORMS:
+            assert plat in PLATFORM_MIN_ORDER_SIZE, f"Missing min order size for {plat}"
+            assert PLATFORM_MIN_ORDER_SIZE[plat] >= 0

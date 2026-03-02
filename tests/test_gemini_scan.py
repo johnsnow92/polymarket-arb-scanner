@@ -24,9 +24,10 @@ def mock_external_modules():
     for mod_name in mock_modules:
         if mod_name in sys.modules:
             del sys.modules[mod_name]
-    for mod in list(sys.modules):
-        if mod.startswith("scans"):
-            del sys.modules[mod]
+    # Only remove the scan module under test — NOT scans.helpers or scans.__init__
+    # which may be referenced by other test modules (e.g. test_helpers).
+    if "scans.gemini" in sys.modules:
+        del sys.modules["scans.gemini"]
 
 
 def _make_binary_event(event_id, title, yes_price, no_price):
@@ -72,9 +73,8 @@ def _make_categorical_event(event_id, title, prices):
 
 class TestScanGeminiBinary:
     def _import_scan(self):
-        for mod in list(sys.modules):
-            if mod.startswith("scans"):
-                del sys.modules[mod]
+        if "scans.gemini" in sys.modules:
+            del sys.modules["scans.gemini"]
         from scans.gemini import scan_gemini_binary
         return scan_gemini_binary
 
@@ -140,9 +140,8 @@ class TestScanGeminiBinary:
 
 class TestScanGeminiMulti:
     def _import_scan(self):
-        for mod in list(sys.modules):
-            if mod.startswith("scans"):
-                del sys.modules[mod]
+        if "scans.gemini" in sys.modules:
+            del sys.modules["scans.gemini"]
         from scans.gemini import scan_gemini_multi
         return scan_gemini_multi
 
@@ -154,6 +153,7 @@ class TestScanGeminiMulti:
         client.fetch_all_markets.return_value = [
             _make_categorical_event("E1", "Who wins?", [0.20, 0.20, 0.20, 0.20]),
         ]
+        client.get_order_book.return_value = {"asks": [{"price": 0.20, "amount": 50}]}
 
         result = scan_fn(client, min_profit=0.001)
         assert len(result) >= 1

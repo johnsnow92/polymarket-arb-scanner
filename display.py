@@ -1,8 +1,11 @@
 """Display formatting for scan results (table and JSON output)."""
 
 import json
+import logging
 
 from tabulate import tabulate
+
+logger = logging.getLogger(__name__)
 
 
 def display_results(all_opportunities: list[dict], json_output: bool = False):
@@ -81,5 +84,5 @@ def display_results(all_opportunities: list[dict], json_output: bool = False):
             headers.append("Depth")
         print(tabulate(table_data, headers=headers, tablefmt="grid", maxcolwidths=50))
 
-    print(f"\n  Disclaimer: Prices are snapshots. Verify on-chain before trading.")
-    print(f"  Opportunities may close within milliseconds.\n")
+    print("\n  Disclaimer: Prices are snapshots. Verify on-chain before trading.")
+    print("  Opportunities may close within milliseconds.\n")

@@ -43,6 +43,9 @@ def _load_private_key(file_path: str):
             f.read(),
             password=None,
             backend=default_backend(),
+            # Kalshi-generated keys may have non-standard CRT parameters
+            # that fail strict validation in newer cryptography versions.
+            unsafe_skip_rsa_key_validation=True,
         )
 
 
@@ -53,6 +56,7 @@ def _load_private_key_from_base64(b64_string: str):
         pem_bytes,
         password=None,
         backend=default_backend(),
+        unsafe_skip_rsa_key_validation=True,
     )
 
 
@@ -87,7 +91,7 @@ class KalshiClient:
         self.api_key_id = None
         self.private_key = None
 
-    def login_with_api_key(self, api_key_id: str, private_key_path: str = None, private_key_base64: str = None) -> bool:
+    def login_with_api_key(self, api_key_id: str, private_key_path: str | None = None, private_key_base64: str | None = None) -> bool:
         """Authenticate using API key ID + RSA private key (file path or base64).
 
         Provide either private_key_path (PEM file) or private_key_base64
@@ -137,7 +141,7 @@ class KalshiClient:
         retry=retry_if_exception_type((_RateLimitError, requests.ConnectionError, requests.Timeout)),
         reraise=True,
     )
-    def _request(self, method: str, path: str, params: dict = None, json_body: dict = None) -> requests.Response | None:
+    def _request(self, method: str, path: str, params: dict | None = None, json_body: dict | None = None) -> requests.Response | None:
         """Make an authenticated request to Kalshi API with retry."""
         _rate_limit()
         headers = self._auth_headers(method, path)

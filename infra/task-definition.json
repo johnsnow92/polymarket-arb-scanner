@@ -20,14 +20,20 @@
       "environment": [
         { "name": "DATA_DIR", "value": "/data" },
         { "name": "DASHBOARD_PORT", "value": "8080" },
+        { "name": "DASHBOARD_USER", "value": "jtamm" },
+        { "name": "DASHBOARD_REFRESH_SECONDS", "value": "15" },
         { "name": "DRY_RUN", "value": "false" },
         { "name": "EXECUTION_MODE", "value": "full-auto" },
         { "name": "LOG_LEVEL", "value": "INFO" },
         { "name": "MIN_PROFIT_THRESHOLD", "value": "0.005" },
-        { "name": "MAX_TRADE_SIZE", "value": "25.0" },
-        { "name": "DAILY_LOSS_LIMIT", "value": "25.0" },
-        { "name": "MAX_OPEN_POSITIONS", "value": "25" },
-        { "name": "RESCAN_INTERVAL", "value": "60" }
+        { "name": "BASE_TRADE_SIZE", "value": "1.0" },
+        { "name": "MAX_TRADE_SIZE", "value": "3.0" },
+        { "name": "MAX_RESOLUTION_DAYS", "value": "7" },
+        { "name": "MAX_OPEN_POSITIONS", "value": "10" },
+        { "name": "DAILY_LOSS_LIMIT", "value": "5.0" },
+        { "name": "MIN_PROFIT_AMOUNT", "value": "0.02" },
+        { "name": "RESCAN_INTERVAL", "value": "60" },
+        { "name": "ENABLED_EXECUTION_PLATFORMS", "value": "polymarket,kalshi,sxbet" }
       ],
       "secrets": [
         {
@@ -49,6 +55,18 @@
         {
           "name": "GEMINI_API_SECRET",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/gemini-api-secret"
+        },
+        {
+          "name": "DASHBOARD_PASS",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/dashboard-pass"
+        },
+        {
+          "name": "SXBET_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/sxbet-api-key"
+        },
+        {
+          "name": "SXBET_PRIVATE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/sxbet-private-key"
         }
       ],
       "mountPoints": [
@@ -67,7 +85,7 @@
         }
       },
       "healthCheck": {
-        "command": ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/status')\" || exit 1"],
+        "command": ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\" || exit 1"],
         "interval": 30,
         "timeout": 5,
         "retries": 3,

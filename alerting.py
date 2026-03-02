@@ -1,0 +1,281 @@
+"""Structured alerting for execution failures, loss limits, and system health.
+
+Integrates with the existing notifier.py webhook system and provides
+rate-limited alerts with severity levels.
+"""
+
+import logging
+import threading
+import time
+from collections import deque
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+
+class AlertType(str, Enum):
+    EXECUTION_FAILURE = "EXECUTION_FAILURE"
+    LOSS_STREAK = "LOSS_STREAK"
+    DAILY_LOSS_LIMIT = "DAILY_LOSS_LIMIT"
+    POSITION_LIMIT = "POSITION_LIMIT"
+    WS_DISCONNECT = "WS_DISCONNECT"
+    SCAN_FAILURE = "SCAN_FAILURE"
+    BALANCE_LOW = "BALANCE_LOW"
+
+
+class Severity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+class AlertManager:
+    """Rate-limited alerting system that fires alerts via notifier.py.
+
+    Features:
+    - Rate limiting: max 1 alert per type per configurable window (default 5 min)
+    - Severity levels: INFO, WARNING, CRITICAL
+    - Loss streak detection: fires after N consecutive losing trades
+    - Loss limit warning: fires at 80% and 100% of daily loss limit
+    - Formats alerts for the existing notifier.py webhook
+    """
+
+    def __init__(
+        self,
+        notifier=None,
+        rate_limit_seconds: float = 300,
+        loss_streak_threshold: int = 5,
+        balance_low_threshold: float = 10.0,
+    ):
+        """
+        Args:
+            notifier: WebhookNotifier instance (or None for logging-only).
+            rate_limit_seconds: Minimum seconds between alerts of the same type.
+            loss_streak_threshold: Number of consecutive losses before alert.
+            balance_low_threshold: Dollar amount below which BALANCE_LOW fires.
+        """
+        self.notifier = notifier
+        self.rate_limit_seconds = rate_limit_seconds
+        self.loss_streak_threshold = loss_streak_threshold
+        self.balance_low_threshold = balance_low_threshold
+
+        # Rate limiting: alert_type -> last fire timestamp
+        self._last_fired: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+        # Loss streak tracking
+        self._trade_results: deque[bool] = deque(maxlen=100)
+
+        # Recent alerts ring buffer
+        self._recent_alerts: deque[dict] = deque(maxlen=200)
+
+        # Track whether 80% and 100% warnings have fired today
+        self._loss_80_fired = False
+        self._loss_100_fired = False
+
+    def alert(
+        self,
+        alert_type: str | AlertType,
+        severity: str | Severity,
+        message: str,
+        details: dict | None = None,
+    ) -> bool:
+        """Fire an alert if not rate-limited.
+
+        Args:
+            alert_type: One of the AlertType values.
+            severity: One of the Severity values.
+            message: Human-readable alert message.
+            details: Optional extra context.
+
+        Returns:
+            True if the alert was actually sent (not rate-limited), False otherwise.
+        """
+        alert_type_str = str(alert_type.value if isinstance(alert_type, AlertType) else alert_type)
+        severity_str = str(severity.value if isinstance(severity, Severity) else severity)
+
+        # Rate limiting check
+        with self._lock:
+            now = time.time()
+            last = self._last_fired.get(alert_type_str, 0)
+            if now - last < self.rate_limit_seconds:
+                logger.debug("Alert %s rate-limited (last fired %.0fs ago)",
+                             alert_type_str, now - last)
+                return False
+            self._last_fired[alert_type_str] = now
+
+        # Build alert record
+        alert_record = {
+            "type": alert_type_str,
+            "severity": severity_str,
+            "message": message,
+            "details": details or {},
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "epoch": time.time(),
+        }
+
+        self._recent_alerts.append(alert_record)
+
+        # Log it
+        log_level = {
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "CRITICAL": logging.CRITICAL,
+        }.get(severity_str, logging.WARNING)
+        logger.log(log_level, "ALERT [%s/%s]: %s", alert_type_str, severity_str, message)
+
+        # Send via notifier if available
+        if self.notifier:
+            self._send_webhook(alert_record)
+
+        return True
+
+    def check_loss_streak(self, trade_won: bool) -> bool:
+        """Record a trade result and fire an alert if a loss streak is detected.
+
+        Args:
+            trade_won: True if the trade was profitable, False if it lost.
+
+        Returns:
+            True if a LOSS_STREAK alert was fired.
+        """
+        self._trade_results.append(trade_won)
+
+        # Count consecutive losses from the end
+        streak = 0
+        for result in reversed(self._trade_results):
+            if not result:
+                streak += 1
+            else:
+                break
+
+        if streak >= self.loss_streak_threshold:
+            return self.alert(
+                AlertType.LOSS_STREAK,
+                Severity.CRITICAL,
+                f"Loss streak detected: {streak} consecutive losing trades",
+                {"streak_length": streak, "threshold": self.loss_streak_threshold},
+            )
+        return False
+
+    def check_daily_loss(self, current_pnl: float, daily_limit: float) -> bool:
+        """Check daily P&L against loss limit and fire warnings at 80% and 100%.
+
+        Args:
+            current_pnl: Current daily P&L (negative means loss).
+            daily_limit: Maximum allowed daily loss (positive number).
+
+        Returns:
+            True if an alert was fired.
+        """
+        if daily_limit <= 0:
+            return False
+
+        loss_ratio = abs(current_pnl) / daily_limit if current_pnl < 0 else 0
+
+        if loss_ratio >= 1.0 and not self._loss_100_fired:
+            self._loss_100_fired = True
+            self._loss_80_fired = True  # implicitly surpassed
+            return self.alert(
+                AlertType.DAILY_LOSS_LIMIT,
+                Severity.CRITICAL,
+                f"Daily loss limit HIT: P&L ${current_pnl:.2f} (limit -${daily_limit:.2f})",
+                {"current_pnl": current_pnl, "daily_limit": daily_limit, "ratio": loss_ratio},
+            )
+        elif loss_ratio >= 0.8 and not self._loss_80_fired:
+            self._loss_80_fired = True
+            return self.alert(
+                AlertType.DAILY_LOSS_LIMIT,
+                Severity.WARNING,
+                f"Approaching daily loss limit: P&L ${current_pnl:.2f} ({loss_ratio:.0%} of -${daily_limit:.2f})",
+                {"current_pnl": current_pnl, "daily_limit": daily_limit, "ratio": loss_ratio},
+            )
+
+        return False
+
+    def check_position_limit(self, current: int, max_limit: int) -> bool:
+        """Check position count against limit and warn at 90% and 100%.
+
+        Returns:
+            True if an alert was fired.
+        """
+        if max_limit <= 0:
+            return False
+
+        if current >= max_limit:
+            return self.alert(
+                AlertType.POSITION_LIMIT,
+                Severity.CRITICAL,
+                f"Max positions reached: {current}/{max_limit}",
+                {"current": current, "max_limit": max_limit},
+            )
+        elif current >= max_limit * 0.9:
+            return self.alert(
+                AlertType.POSITION_LIMIT,
+                Severity.WARNING,
+                f"Approaching position limit: {current}/{max_limit}",
+                {"current": current, "max_limit": max_limit},
+            )
+
+        return False
+
+    def get_recent_alerts(self, count: int = 20) -> list[dict]:
+        """Return the most recent alerts.
+
+        Args:
+            count: Maximum number of alerts to return.
+
+        Returns:
+            List of alert dicts, newest first.
+        """
+        alerts = list(self._recent_alerts)
+        alerts.reverse()
+        return alerts[:count]
+
+    def reset_daily(self):
+        """Reset daily state (call at midnight)."""
+        self._loss_80_fired = False
+        self._loss_100_fired = False
+        self._trade_results.clear()
+
+    def _send_webhook(self, alert_record: dict):
+        """Format and send an alert via the notifier webhook."""
+        if not self.notifier or not hasattr(self.notifier, 'url') or not self.notifier.url:
+            return
+
+        severity = alert_record["severity"]
+        alert_type = alert_record["type"]
+        message = alert_record["message"]
+
+        # Build a synthetic opportunity-like dict so we can reuse notifier._send_raw
+        severity_emoji = {"INFO": "info", "WARNING": "warning", "CRITICAL": "rotating_light"}
+        emoji = severity_emoji.get(severity, "bell")
+
+        url = self.notifier.url
+        if "hooks.slack.com" in url:
+            payload = {"text": f":{emoji}: *[{severity}]* {alert_type}\n{message}"}
+        elif "discord.com/api/webhooks" in url:
+            payload = {"content": f"**[{severity}]** {alert_type}\n{message}"}
+        else:
+            payload = {
+                "event": "alert",
+                "type": alert_type,
+                "severity": severity,
+                "message": message,
+                "details": alert_record.get("details", {}),
+                "timestamp": alert_record.get("timestamp", ""),
+            }
+
+        # Fire-and-forget via notifier's raw send
+        if hasattr(self.notifier, '_send_raw'):
+            import threading as _threading
+            thread = _threading.Thread(
+                target=self.notifier._send_raw, args=(payload,), daemon=True)
+            thread.start()
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton
+# ---------------------------------------------------------------------------
+
+alert_manager = AlertManager()

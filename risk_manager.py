@@ -1,11 +1,16 @@
 """Risk management gates for arbitrage execution."""
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class RiskManager:
     """Pure gate: returns (allowed, reason) for each opportunity."""
 
     def __init__(self, config: dict):
-        self.max_trade_size = config.get("max_trade_size", 5.0)
+        self.base_trade_size = config.get("base_trade_size", 5.0)
+        self.max_trade_size = config.get("max_trade_size", 25.0)
         self.daily_loss_limit = config.get("daily_loss_limit", 25.0)
         self.max_open_positions = config.get("max_open_positions", 25)
         self.min_liquidity = config.get("min_liquidity", 25.0)
@@ -48,6 +53,16 @@ class RiskManager:
                 k_balance = balances.get("kalshi", 0)
                 if k_balance is not None and k_balance < trade_cost:
                     return False, f"Insufficient Kalshi balance (${k_balance:.2f})"
+            elif opp_type.startswith("Gemini"):
+                # Gemini-only arb: entire cost is on Gemini
+                g_balance = balances.get("gemini", 0)
+                if g_balance is not None and g_balance < trade_cost:
+                    return False, f"Insufficient Gemini balance (${g_balance:.2f})"
+            elif opp_type.startswith("IBKR"):
+                # IBKR-only arb: entire cost is on IBKR
+                i_balance = balances.get("ibkr", 0)
+                if i_balance is not None and i_balance < trade_cost:
+                    return False, f"Insufficient IBKR balance (${i_balance:.2f})"
             elif "Cross" in opp_type:
                 # Cross-platform: check both participating platforms
                 half_cost = trade_cost / 2
@@ -99,9 +114,9 @@ class RiskManager:
     def calculate_dynamic_size(self, opportunity: dict, aggressiveness: float = 0.5) -> float:
         """Calculate trade size based on opportunity quality using half-Kelly sizing.
 
-        Formula: base_size * (1 + ROI * aggressiveness * 20)
-        Capped at 50% of available depth to avoid slippage.
-        Still clamped by max_trade_size.
+        Starts from base_trade_size and scales up toward max_trade_size based
+        on ROI.  Formula: base * (1 + ROI * aggressiveness * 20), capped at
+        50% of available depth and max_trade_size.
 
         Args:
             opportunity: Opportunity dict with net_profit, total_cost, _clob_depth
@@ -110,7 +125,7 @@ class RiskManager:
         Returns:
             Calculated trade size in dollars.
         """
-        base_size = self.max_trade_size
+        base_size = self.base_trade_size
         net_profit = opportunity.get("net_profit", 0)
         total_cost_str = opportunity.get("total_cost", "$0")
         total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)

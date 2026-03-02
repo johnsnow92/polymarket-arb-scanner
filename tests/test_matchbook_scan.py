@@ -25,9 +25,9 @@ def mock_external_modules():
     for mod_name in mock_modules:
         if mod_name in sys.modules:
             del sys.modules[mod_name]
-    for mod in list(sys.modules):
-        if mod.startswith("scans"):
-            del sys.modules[mod]
+    # Only remove the scan module under test — NOT scans.helpers or scans.__init__
+    if "scans.matchbook" in sys.modules:
+        del sys.modules["scans.matchbook"]
 
 
 def _make_runner(runner_id, back_odds=None, lay_odds=None,
@@ -74,9 +74,8 @@ def _make_market(market_id, event_name="Test Event", market_name="Test Market",
 class TestScanMatchbookBackAll:
     def _import_scan(self):
         """Import scan module with mocked fee functions."""
-        for mod in list(sys.modules):
-            if mod.startswith("scans"):
-                del sys.modules[mod]
+        if "scans.matchbook" in sys.modules:
+            del sys.modules["scans.matchbook"]
 
         # Mock the fee functions that don't exist yet
         fees_mod = sys.modules.get("fees")
@@ -192,9 +191,8 @@ class TestScanMatchbookBackAll:
 class TestScanMatchbookBackLay:
     def _import_scan(self):
         """Import scan module with mocked fee functions."""
-        for mod in list(sys.modules):
-            if mod.startswith("scans"):
-                del sys.modules[mod]
+        if "scans.matchbook" in sys.modules:
+            del sys.modules["scans.matchbook"]
 
         fees_mod = sys.modules.get("fees")
         if fees_mod is None:

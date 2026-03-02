@@ -53,12 +53,26 @@ echo "Pushed: $ECR_URI:latest and $ECR_URI:$TIMESTAMP"
 echo ""
 
 # -----------------------------------------------------------------------
-# 4. Force new deployment
+# 4. Register updated task definition
+# -----------------------------------------------------------------------
+echo "--- Registering task definition ---"
+sed "s/ACCOUNT_ID/$ACCOUNT_ID/g" infra/task-definition.json > /tmp/task-def.json
+TASK_DEF_ARN=$(aws ecs register-task-definition \
+  --cli-input-json file:///tmp/task-def.json \
+  --region "$REGION" \
+  --query 'taskDefinition.taskDefinitionArn' \
+  --output text)
+echo "Registered: $TASK_DEF_ARN"
+echo ""
+
+# -----------------------------------------------------------------------
+# 5. Force new deployment with updated task definition
 # -----------------------------------------------------------------------
 echo "--- Updating ECS service ---"
 aws ecs update-service \
   --cluster "$CLUSTER" \
   --service "$SERVICE" \
+  --task-definition "$TASK_DEF_ARN" \
   --force-new-deployment \
   --region "$REGION" \
   --query "service.deployments[0].{status:status,desired:desiredCount,running:runningCount}" \
@@ -66,7 +80,7 @@ aws ecs update-service \
 echo ""
 
 # -----------------------------------------------------------------------
-# 5. Wait for stability
+# 6. Wait for stability
 # -----------------------------------------------------------------------
 echo "--- Waiting for service to stabilize (this may take a few minutes) ---"
 aws ecs wait services-stable \

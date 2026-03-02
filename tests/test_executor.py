@@ -565,6 +565,19 @@ class TestCrossRevalidationStrategy:
 # ---------------------------------------------------------------------------
 
 class TestBuildCrossAllLegs:
+    def _patch_all_platforms(self):
+        """Return a combined context manager enabling all platforms."""
+        all_plats = frozenset([
+            "polymarket", "kalshi", "betfair", "smarkets",
+            "sxbet", "matchbook", "gemini", "ibkr",
+        ])
+        no_mins = {p: 0.01 for p in all_plats}
+        import executor as _ex
+        return (
+            patch.object(_ex, "ENABLED_EXECUTION_PLATFORMS", all_plats),
+            patch.object(_ex, "PLATFORM_MIN_ORDER_SIZE", no_mins),
+        )
+
     def test_polymarket_smarkets_legs(self, executor):
         """Polymarket + Smarkets: should produce 2 legs with correct platforms."""
         opp = {
@@ -575,7 +588,9 @@ class TestBuildCrossAllLegs:
             "_platform_b": "smarkets",
             "_sm_market_id": "sm_123",
         }
-        legs = executor._build_cross_all_legs(opp, 5.0)
+        p1, p2 = self._patch_all_platforms()
+        with p1, p2:
+            legs = executor._build_cross_all_legs(opp, 5.0)
         assert len(legs) == 2
         assert legs[0]["platform"] == "polymarket"
         assert legs[0]["price"] == pytest.approx(0.400)
@@ -595,7 +610,9 @@ class TestBuildCrossAllLegs:
             "_market_id": "1.234567",
             "_selection_id": 98765,
         }
-        legs = executor._build_cross_all_legs(opp, 5.0)
+        p1, p2 = self._patch_all_platforms()
+        with p1, p2:
+            legs = executor._build_cross_all_legs(opp, 5.0)
         assert len(legs) == 2
         assert legs[0]["platform"] == "polymarket"
         assert legs[0]["price"] == pytest.approx(0.450)
@@ -614,7 +631,9 @@ class TestBuildCrossAllLegs:
             "_platform_b": "sxbet",
             "_sx_market_hash": "0xabc123",
         }
-        legs = executor._build_cross_all_legs(opp, 5.0)
+        p1, p2 = self._patch_all_platforms()
+        with p1, p2:
+            legs = executor._build_cross_all_legs(opp, 5.0)
         assert len(legs) == 2
         assert legs[0]["platform"] == "polymarket"
         assert legs[0]["price"] == pytest.approx(0.350)
@@ -1081,6 +1100,19 @@ class TestSequentialLegExecution:
 # ---------------------------------------------------------------------------
 
 class TestBuildLegsTriangularCross:
+    def _patch_all_platforms(self):
+        """Return context managers enabling all platforms."""
+        all_plats = frozenset([
+            "polymarket", "kalshi", "betfair", "smarkets",
+            "sxbet", "matchbook", "gemini", "ibkr",
+        ])
+        no_mins = {p: 0.01 for p in all_plats}
+        import executor as _ex
+        return (
+            patch.object(_ex, "ENABLED_EXECUTION_PLATFORMS", all_plats),
+            patch.object(_ex, "PLATFORM_MIN_ORDER_SIZE", no_mins),
+        )
+
     def test_triangular_cross_routes_to_cross_all(self, executor):
         """TriangularCross should use _build_cross_all_legs via same price format."""
         opp = {
@@ -1112,7 +1144,9 @@ class TestBuildLegsTriangularCross:
             "_sm_market_id": "sm_456",
             "_token_ids": [],
         }
-        legs = executor._build_legs(opp, 5.0)
+        p1, p2 = self._patch_all_platforms()
+        with p1, p2:
+            legs = executor._build_legs(opp, 5.0)
         assert len(legs) == 2
         assert legs[0]["platform"] == "betfair"
         assert legs[0]["price"] == pytest.approx(0.400)
@@ -1625,3 +1659,131 @@ class TestBuildLegsEventDivergenceExchanges:
         assert len(legs) == 1
         assert legs[0]["platform"] == "matchbook"
         assert legs[0]["side"] == "lay"
+
+
+# ---------------------------------------------------------------------------
+# Platform execution whitelist
+# ---------------------------------------------------------------------------
+
+class TestPlatformWhitelist:
+
+    def test_execute_single_leg_rejects_non_whitelisted_platform(self, executor):
+        """Leg on a platform not in ENABLED_EXECUTION_PLATFORMS returns False."""
+        leg = {"platform": "betfair", "side": "BACK", "price": 0.50}
+        opp = {"type": "BetfairBackLay"}
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS", frozenset(["polymarket", "kalshi"])):
+            success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
+        assert success is False
+        assert order_id is None
+
+    def test_execute_single_leg_allows_whitelisted_platform(self, executor):
+        """Leg on a whitelisted platform proceeds past the guard."""
+        leg = {"platform": "polymarket", "side": "BUY", "price": 0.50,
+               "_token_id": "tok123"}
+        opp = {"type": "Binary"}
+        executor.pm_trader.place_order.return_value = {
+            "success": True, "orderID": "ord1"
+        }
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS", frozenset(["polymarket", "kalshi"])):
+            with patch.object(executor, "_confirm_fill_pm", return_value=0.50):
+                success, order_id, fill_price = executor._execute_single_leg(
+                    leg, 5.0, opp)
+        assert success is True
+        assert order_id == "ord1"
+
+    def test_cross_all_legs_rejected_when_platform_not_whitelisted(self, executor):
+        """Cross-all with a non-whitelisted platform returns empty legs."""
+        opp = {
+            "type": "CrossAll",
+            "prices": "polymarket_Y=0.45 smarkets_N=0.50",
+            "_platform_a": "polymarket",
+            "_platform_b": "smarkets",
+            "_token_ids": ["tok1"],
+        }
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS", frozenset(["polymarket", "kalshi"])):
+            legs = executor._build_cross_all_legs(opp, 5.0)
+        assert legs == []
+
+    def test_cross_all_legs_allowed_when_both_whitelisted(self, executor):
+        """Cross-all with both platforms whitelisted builds legs normally."""
+        opp = {
+            "type": "CrossAll",
+            "prices": "polymarket_Y=0.45 kalshi_N=0.50",
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok1"],
+        }
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])):
+            legs = executor._build_cross_all_legs(opp, 5.0)
+        assert len(legs) == 2
+
+
+# ---------------------------------------------------------------------------
+# Minimum order size enforcement
+# ---------------------------------------------------------------------------
+
+class TestMinOrderSize:
+
+    def test_rejects_order_below_platform_minimum(self, executor):
+        """Order below platform min returns False without calling API."""
+        leg = {"platform": "smarkets", "side": "BACK", "price": 0.50}
+        opp = {"type": "SmarketsBackAll"}
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi", "smarkets"])):
+            with patch("executor.PLATFORM_MIN_ORDER_SIZE",
+                       {"smarkets": 6.25, "polymarket": 0.01, "kalshi": 0.01}):
+                success, order_id, fill_price = executor._execute_single_leg(
+                    leg, 3.0, opp)
+        assert success is False
+        assert order_id is None
+
+    def test_allows_order_above_platform_minimum(self, executor):
+        """Order above platform min proceeds past the guard."""
+        leg = {"platform": "kalshi", "side": "yes", "action": "buy",
+               "price": 0.50, "_ticker": "TICK-1"}
+        opp = {"type": "KalshiBinary"}
+        executor.kalshi_client.place_order.return_value = {
+            "order": {"order_id": "k1", "status": "executed"},
+        }
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])):
+            with patch("executor.PLATFORM_MIN_ORDER_SIZE",
+                       {"kalshi": 0.01, "polymarket": 0.01}):
+                success, order_id, fill_price = executor._execute_single_leg(
+                    leg, 3.0, opp)
+        assert success is True
+
+    def test_cross_all_rejects_when_per_leg_size_below_minimum(self, executor):
+        """Cross-all with per-leg size below platform min returns empty."""
+        opp = {
+            "type": "CrossAll",
+            "prices": "polymarket_Y=0.45 betfair_N=0.50",
+            "_platform_a": "polymarket",
+            "_platform_b": "betfair",
+            "_token_ids": ["tok1"],
+        }
+        # size=4.0, per-leg=2.0, betfair min=2.50 -> rejected
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "betfair"])):
+            with patch("executor.PLATFORM_MIN_ORDER_SIZE",
+                       {"polymarket": 0.01, "betfair": 2.50}):
+                legs = executor._build_cross_all_legs(opp, 4.0)
+        assert legs == []
+
+    def test_cross_all_allows_when_per_leg_size_above_minimum(self, executor):
+        """Cross-all with per-leg size above platform min builds legs."""
+        opp = {
+            "type": "CrossAll",
+            "prices": "polymarket_Y=0.45 betfair_N=0.50",
+            "_platform_a": "polymarket",
+            "_platform_b": "betfair",
+            "_token_ids": ["tok1"],
+        }
+        # size=6.0, per-leg=3.0, betfair min=2.50 -> allowed
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "betfair"])):
+            with patch("executor.PLATFORM_MIN_ORDER_SIZE",
+                       {"polymarket": 0.01, "betfair": 2.50}):
+                legs = executor._build_cross_all_legs(opp, 6.0)
+        assert len(legs) == 2

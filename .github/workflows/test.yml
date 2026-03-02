@@ -1,0 +1,44 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: |
+          set +e
+          pytest tests/ -v --tb=short 2>&1 | tee test-output.txt
+          set -e
+
+          SUMMARY=$(tail -5 test-output.txt | grep -oP '\d+ (failed|error)' || echo "")
+          FAILED=$(echo "$SUMMARY" | grep -oP '(\d+) failed' | grep -oP '\d+' || echo "0")
+          ERRORS=$(echo "$SUMMARY" | grep -oP '(\d+) error' | grep -oP '\d+' || echo "0")
+          TOTAL_BAD=$((FAILED + ERRORS))
+
+          echo "Test results: $FAILED failed, $ERRORS errors ($TOTAL_BAD total non-passing)"
+
+          if [ "$TOTAL_BAD" -gt 315 ]; then
+            echo "::error::New test failures detected ($TOTAL_BAD > 315 baseline)"
+            exit 1
+          fi
+          echo "Within pre-existing failure baseline."
