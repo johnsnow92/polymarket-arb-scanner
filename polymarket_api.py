@@ -259,14 +259,31 @@ def get_negrisk_events(events: list[dict]) -> list[dict]:
 class PolymarketTrader:
     """CLOB trading client for Polymarket using py-clob-client."""
 
-    def __init__(self, private_key: str, chain_id: int = 137):
-        self.client = ClobClient(
+    def __init__(self, private_key: str, chain_id: int = 137,
+                 funder: str | None = None, signature_type: int = 0):
+        """Initialise the CLOB trading client.
+
+        Args:
+            private_key: Ethereum private key for signing orders.
+            chain_id: Polygon chain ID (default 137 mainnet).
+            funder: Proxy/funder wallet address that holds the USDC funds.
+                Required for email/Magic wallets where the signing key
+                differs from the funded address.
+            signature_type: 0 = EOA (MetaMask/hardware), 1 = email/Magic
+                wallet, 2 = browser proxy wallet.
+        """
+        kwargs: dict = dict(
             host=CLOB_BASE,
             key=private_key,
             chain_id=chain_id,
         )
-        # Derive L2 API creds for authenticated trading endpoints
-        self.client.set_api_creds(self.client.derive_api_key())
+        if funder:
+            kwargs["funder"] = funder
+        if signature_type:
+            kwargs["signature_type"] = signature_type
+        self.client = ClobClient(**kwargs)
+        # Derive or create L2 API creds for authenticated trading endpoints
+        self.client.set_api_creds(self.client.create_or_derive_api_creds())
 
     def get_balance(self) -> float | None:
         """Get USDC balance available for trading."""

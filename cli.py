@@ -525,9 +525,17 @@ def main():
     pm_private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
     if pm_private_key and not dry_run:
         pm_chain_id = int(os.getenv("POLYMARKET_CHAIN_ID", "137"))
+        pm_funder = os.getenv("POLYMARKET_FUNDER_ADDRESS")
+        pm_sig_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
         try:
-            pm_trader = PolymarketTrader(pm_private_key, pm_chain_id)
-            logger.info("Polymarket trader initialized.")
+            pm_trader = PolymarketTrader(
+                pm_private_key, pm_chain_id,
+                funder=pm_funder, signature_type=pm_sig_type,
+            )
+            logger.info(
+                "Polymarket trader initialized (sig_type=%d, funder=%s).",
+                pm_sig_type, pm_funder or "none",
+            )
         except Exception as e:
             logger.warning("Polymarket trader init failed: %s", e)
 
