@@ -877,20 +877,52 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 # Rebuild opportunity index for WS-triggered execution
                 opp_index.rebuild(all_opportunities)
 
-                # Subscribe to WebSocket feeds for discovered markets
+                # Subscribe to WebSocket feeds for discovered markets.
+                # We subscribe to opportunity tokens AND also to broader
+                # market tokens from cross-platform matched pairs so we
+                # can detect arbs that appear between scan cycles.
+                poly_sub_ids, kalshi_sub_tickers = opp_index.get_subscription_tokens(ws_sub_limit)
+
+                # Broaden subscriptions: include top cross-platform matched
+                # Kalshi tickers and Polymarket tokens even if no arb exists
+                # yet.  This lets the WS trigger fire when prices move into
+                # profitable range between polling scans.
+                if poly_markets:
+                    for pm in poly_markets[:ws_sub_limit]:
+                        for tok in pm.get("tokens", []):
+                            tid = tok.get("token_id", "")
+                            if tid and tid not in poly_sub_ids:
+                                poly_sub_ids.append(tid)
+                        if len(poly_sub_ids) >= ws_sub_limit:
+                            break
+
+                # Extract individual market tickers from Kalshi data.
+                # kalshi_data is (events, markets_by_event, event_titles).
+                # WS needs market tickers (e.g. KXBTCD-...), not event tickers.
+                if kalshi_data and len(kalshi_data) >= 2 and kalshi_data[1]:
+                    for _evt_ticker, _markets in kalshi_data[1].items():
+                        for km in _markets:
+                            kt = km.get("ticker", "")
+                            if kt and kt not in kalshi_sub_tickers:
+                                kalshi_sub_tickers.append(kt)
+                            if len(kalshi_sub_tickers) >= ws_sub_limit:
+                                break
+                        if len(kalshi_sub_tickers) >= ws_sub_limit:
+                            break
+
                 if scan_count == 1 and not ws_task:
-                    # Initial subscription from opportunity index
-                    poly_token_ids, kalshi_tickers = opp_index.get_subscription_tokens(ws_sub_limit)
-                    feed_manager.subscribe_polymarket(poly_token_ids)
+                    feed_manager.subscribe_polymarket(poly_sub_ids)
                     if kalshi_client:
-                        feed_manager.subscribe_kalshi(kalshi_tickers)
+                        feed_manager.subscribe_kalshi(kalshi_sub_tickers)
                     ws_task = asyncio.create_task(feed_manager.run())
+                    logger.info(
+                        "WS feeds started: %d Polymarket tokens, %d Kalshi tickers",
+                        len(poly_sub_ids), len(kalshi_sub_tickers),
+                    )
                 elif ws_task and not ws_task.done():
-                    # Dynamic subscription update after each scan
-                    poly_token_ids, kalshi_tickers = opp_index.get_subscription_tokens(ws_sub_limit)
                     feed_manager.update_subscriptions(
-                        poly_token_ids=poly_token_ids,
-                        kalshi_tickers=kalshi_tickers,
+                        poly_token_ids=poly_sub_ids,
+                        kalshi_tickers=kalshi_sub_tickers,
                     )
 
             except Exception as e:

@@ -679,6 +679,7 @@ def main():
     notifier = None
     if webhook_url:
         notifier = WebhookNotifier(webhook_url, min_profit=CONFIG_WEBHOOK_MIN_PROFIT)
+        executor.notifier = notifier
         logger.info("Webhook notifications enabled.")
 
     # Start dashboard

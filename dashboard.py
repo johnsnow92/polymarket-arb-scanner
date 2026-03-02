@@ -228,6 +228,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/history": self._handle_history,
             "/api/slippage": self._handle_slippage,
             "/api/pause": self._handle_pause_get,
+            "/api/db-stats": self._handle_db_stats,
         }
 
         handler_fn = routes.get(path)
@@ -259,6 +260,7 @@ class _Handler(BaseHTTPRequestHandler):
         post_routes = {
             "/api/pause": self._handle_pause_post,
             "/api/resume": self._handle_resume_post,
+            "/api/purge": self._handle_purge_post,
         }
 
         handler_fn = post_routes.get(path)
@@ -435,6 +437,19 @@ class _Handler(BaseHTTPRequestHandler):
     # Kill switch endpoints
     # -------------------------------------------------------------------
 
+    def _handle_db_stats(self):
+        """GET /api/db-stats — row counts for all tables."""
+        db = _get_db()
+        if not db:
+            _send_json(self, {"error": "database unavailable"}, 500)
+            return
+        try:
+            stats = db.get_db_stats()
+        except Exception as e:
+            _send_json(self, {"error": str(e)}, 500)
+            return
+        _send_json(self, stats)
+
     def _handle_pause_get(self):
         """GET /api/pause — return current kill switch state."""
         _send_json(self, get_pause_state())
@@ -453,6 +468,34 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_resume_post(self, body: bytes = b""):
         """POST /api/resume — disengage the kill switch."""
         _send_json(self, resume())
+
+    def _handle_purge_post(self, body: bytes = b""):
+        """POST /api/purge — delete all opportunities/trades for a given type.
+
+        Request body: {"type": "SpreadKalshi"}
+        """
+        try:
+            if not body:
+                _send_json(self, {"error": "Request body required with 'type' field"}, 400)
+                return
+            parsed = json.loads(body)
+            opp_type = parsed.get("type", "")
+            if not opp_type:
+                _send_json(self, {"error": "'type' field is required"}, 400)
+                return
+        except json.JSONDecodeError:
+            _send_json(self, {"error": "Invalid JSON"}, 400)
+            return
+
+        db = _get_db()
+        if not db:
+            _send_json(self, {"error": "database unavailable"}, 500)
+            return
+        try:
+            result = db.purge_opportunities_by_type(opp_type)
+            _send_json(self, {"purged": result, "type": opp_type})
+        except Exception as e:
+            _send_json(self, {"error": str(e)}, 500)
 
     # -------------------------------------------------------------------
 

@@ -467,5 +467,73 @@ class TradeDB:
             ).fetchone()
             return round(row["total"], 4)
 
+    # ---------------------------------------------------------------------------
+    # Admin / maintenance
+    # ---------------------------------------------------------------------------
+
+    def purge_opportunities_by_type(self, opp_type: str) -> dict:
+        """Delete all opportunities and their associated trades for a given type.
+
+        Also removes any positions and partial fills linked to those opportunities.
+        Returns a summary dict with counts of deleted rows.
+
+        Args:
+            opp_type: The opportunity type to purge (e.g. 'SpreadKalshi').
+
+        Returns:
+            Dict with keys 'opportunities', 'trades', 'positions', 'partial_fills'.
+        """
+        with self._lock:
+            # Get opportunity IDs first
+            rows = self.conn.execute(
+                "SELECT id FROM opportunities WHERE type = ?", (opp_type,)
+            ).fetchall()
+            opp_ids = [r["id"] for r in rows]
+
+            if not opp_ids:
+                return {"opportunities": 0, "trades": 0, "positions": 0, "partial_fills": 0}
+
+            placeholders = ",".join("?" for _ in opp_ids)
+
+            # Delete in dependency order: partial_fills -> trades -> positions -> opportunities
+            pf_cur = self.conn.execute(
+                f"DELETE FROM partial_fills WHERE opportunity_id IN ({placeholders})",
+                opp_ids,
+            )
+            tr_cur = self.conn.execute(
+                f"DELETE FROM trades WHERE opportunity_id IN ({placeholders})",
+                opp_ids,
+            )
+            pos_cur = self.conn.execute(
+                f"DELETE FROM positions WHERE opportunity_id IN ({placeholders})",
+                opp_ids,
+            )
+            opp_cur = self.conn.execute(
+                f"DELETE FROM opportunities WHERE type = ?", (opp_type,)
+            )
+            self.conn.commit()
+
+            result = {
+                "opportunities": opp_cur.rowcount,
+                "trades": tr_cur.rowcount,
+                "positions": pos_cur.rowcount,
+                "partial_fills": pf_cur.rowcount,
+            }
+            logger.info("Purged %s: %s", opp_type, result)
+            return result
+
+    def get_db_stats(self) -> dict:
+        """Get row counts for all tables — useful for dashboard diagnostics.
+
+        Returns:
+            Dict with table names as keys and row counts as values.
+        """
+        with self._lock:
+            stats = {}
+            for table in ("opportunities", "trades", "positions", "partial_fills"):
+                row = self.conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
+                stats[table] = row["cnt"]
+            return stats
+
     def close(self):
         self.conn.close()

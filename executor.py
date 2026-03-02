@@ -70,6 +70,7 @@ class ArbitrageExecutor:
         dynamic_sizing: bool = False,
         sizing_aggressiveness: float = 0.5,
         concurrent_execution: bool = False,
+        notifier=None,
     ):
         self.pm_trader = pm_trader
         self.kalshi_client = kalshi_client
@@ -80,6 +81,7 @@ class ArbitrageExecutor:
         self.gemini_client = gemini_client
         self.ibkr_client = ibkr_client
         self.gas_monitor = gas_monitor
+        self.notifier = notifier
         self.db = db
         self.risk = risk_manager
         self.dry_run = dry_run
@@ -1383,6 +1385,8 @@ class ArbitrageExecutor:
             )
             # Invalidate balance cache after a successful trade
             self.invalidate_balance_cache()
+            # Notify on successful trade
+            self._notify_trade(opportunity, legs, size, success=True)
         else:
             # Partial fill detected — attempt hedging on filled legs
             logger.warning("Partial fill detected. Attempting hedge...")
@@ -1413,7 +1417,7 @@ class ArbitrageExecutor:
                         # Attempt immediate hedge
                         hedger.process_pending_hedges()
             else:
-                # Legacy fallback: cancel + orphan
+                    # Legacy fallback: cancel + orphan
                 for i, leg in enumerate(legs):
                     if results.get(i) and leg.get("_order_id"):
                         cancel_ok = self._cancel_leg(leg)
@@ -1422,6 +1426,8 @@ class ArbitrageExecutor:
                             if trade_id:
                                 self.db.update_trade_status(trade_id, "orphaned")
                             logger.warning(f"Leg {i+1} cancel failed -- marked as orphaned.")
+            # Notify on failed trade
+            self._notify_trade(opportunity, legs, size, success=False)
 
         return all_filled
 
@@ -1526,6 +1532,7 @@ class ArbitrageExecutor:
                 platform=platform,
                 expected_pnl=opportunity.get("net_profit", 0),
             )
+            self._notify_trade(opportunity, legs, size, success=True)
         else:
             # Hedge any filled legs
             logger.warning("Concurrent execution: partial fill detected. Attempting hedge...")
@@ -1554,6 +1561,7 @@ class ArbitrageExecutor:
                             opportunity_id=opp_id,
                         )
                 hedger.process_pending_hedges()
+            self._notify_trade(opportunity, legs, size, success=False)
 
         return all_filled
 
@@ -1947,6 +1955,59 @@ class ArbitrageExecutor:
         elif platform == "ibkr" and self.ibkr_client:
             return self.ibkr_client.cancel_order(order_id)
         return False
+
+    def _notify_trade(self, opportunity: dict, legs: list[dict], size: float,
+                      success: bool):
+        """Send a webhook notification about a trade execution result.
+
+        Args:
+            opportunity: The opportunity dict that was executed.
+            legs: List of execution leg dicts.
+            size: Trade size in dollars.
+            success: True if all legs filled, False if partial/failed.
+        """
+        if not self.notifier or not hasattr(self.notifier, "url") or not self.notifier.url:
+            return
+
+        import threading as _threading
+
+        market = opportunity.get("market", "Unknown")
+        opp_type = opportunity.get("type", "")
+        profit = opportunity.get("net_profit", 0)
+        platforms = ", ".join(set(leg["platform"] for leg in legs))
+
+        if success:
+            status = "FILLED"
+            msg = (f"TRADE FILLED: {opp_type} | {market[:60]} | "
+                   f"${size:.2f} on {platforms} | expected profit ${profit:.4f}")
+        else:
+            status = "FAILED"
+            filled = sum(1 for leg in legs if leg.get("_trade_id"))
+            msg = (f"TRADE FAILED: {opp_type} | {market[:60]} | "
+                   f"${size:.2f} on {platforms} | {filled}/{len(legs)} legs filled")
+
+        url = self.notifier.url
+        if "hooks.slack.com" in url:
+            emoji = ":white_check_mark:" if success else ":x:"
+            payload = {"text": f"{emoji} {msg}"}
+        elif "discord.com/api/webhooks" in url:
+            emoji = "+" if success else "x"
+            payload = {"content": msg}
+        else:
+            payload = {
+                "event": "trade_execution",
+                "status": status,
+                "type": opp_type,
+                "market": market,
+                "size": size,
+                "profit": profit,
+                "platforms": platforms,
+                "legs": len(legs),
+            }
+
+        thread = _threading.Thread(
+            target=self.notifier._send_raw, args=(payload,), daemon=True)
+        thread.start()
 
     def _log_skipped(self, opportunity: dict, reason: str):
         """Log a skipped opportunity."""
