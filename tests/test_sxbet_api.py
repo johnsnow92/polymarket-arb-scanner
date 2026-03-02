@@ -36,7 +36,7 @@ class TestSXBetLogin:
         c.session.get.return_value = resp
         assert c.login("my_key") is True
         assert c.authenticated is True
-        assert c.api_key == "my_key"
+        assert c.wallet_address == "my_key"
 
     def test_login_env_var_fallback(self):
         c = SXBetClient()
@@ -44,7 +44,7 @@ class TestSXBetLogin:
         c.session.get.return_value = MagicMock(status_code=200)
         with patch.dict(os.environ, {"SXBET_API_KEY": "env_key"}):
             assert c.login() is True
-        assert c.api_key == "env_key"
+        assert c.wallet_address == "env_key"
 
     def test_login_fails_missing_key(self):
         c = SXBetClient()
@@ -151,12 +151,16 @@ class TestSXBetOrders:
         assert client.cancel_order("ord1") is False
 
     def test_get_balance_uses_balance_key(self, client):
-        with patch.object(client, "_request", return_value={"balance": "42.5"}):
-            assert client.get_balance() == 42.5
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"balance": "42.5"}
+        client.session.get.return_value = resp
+        assert client.get_balance() == 42.5
 
     def test_get_balance_falls_back_to_available(self, client):
-        with patch.object(client, "_request", return_value={"availableBalance": "99.0"}):
-            assert client.get_balance() == 99.0
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"availableBalance": "99.0"}
+        client.session.get.return_value = resp
+        assert client.get_balance() == 99.0
 
 
 # ---------------------------------------------------------------------------
