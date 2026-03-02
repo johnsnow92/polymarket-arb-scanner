@@ -1,4 +1,7 @@
-"""Webhook notifier for arbitrage opportunities."""
+"""Webhook notifier for arbitrage opportunities.
+
+Supports Telegram, Slack, Discord, CallMeBot WhatsApp, and generic webhooks.
+"""
 
 import json
 import logging
@@ -12,14 +15,16 @@ logger = logging.getLogger(__name__)
 
 
 class WebhookNotifier:
-    """Send opportunity alerts to a webhook URL (Slack, Discord, CallMeBot, or generic)."""
+    """Send opportunity alerts via Telegram, Slack, Discord, CallMeBot, or generic webhook."""
 
     def __init__(self, url: str, min_profit: float = 0.01):
         """
         Args:
-            url: Webhook URL to POST JSON payloads to.  For CallMeBot WhatsApp,
-                set url to "callmebot" (or "callmebot://") and provide
-                CALLMEBOT_PHONE and CALLMEBOT_APIKEY env vars.
+            url: Webhook URL to POST JSON payloads to.  Special sentinel values:
+                - "telegram" or "telegram://": uses TELEGRAM_BOT_TOKEN and
+                  TELEGRAM_CHAT_ID env vars.
+                - "callmebot" or "callmebot://": uses CALLMEBOT_PHONE and
+                  CALLMEBOT_APIKEY env vars.
             min_profit: Only notify for opportunities with net_profit >= this value.
         """
         self.url = url
@@ -27,12 +32,23 @@ class WebhookNotifier:
         self._session = requests.Session()
         self._session.headers["Content-Type"] = "application/json"
 
+        # Telegram support
+        self._telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        self._telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        self._is_telegram = url.startswith("telegram")
+        if self._is_telegram and (not self._telegram_token or not self._telegram_chat_id):
+            logger.warning("WEBHOOK_URL set to telegram but TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set.")
+
         # CallMeBot WhatsApp support
         self._callmebot_phone = os.getenv("CALLMEBOT_PHONE")
         self._callmebot_apikey = os.getenv("CALLMEBOT_APIKEY")
         self._is_callmebot = url.startswith("callmebot")
         if self._is_callmebot and (not self._callmebot_phone or not self._callmebot_apikey):
             logger.warning("WEBHOOK_URL set to callmebot but CALLMEBOT_PHONE / CALLMEBOT_APIKEY not set.")
+
+    # ---------------------------------------------------------------------------
+    # Public API
+    # ---------------------------------------------------------------------------
 
     def notify(self, opportunities: list[dict]):
         """Send notification for qualifying opportunities (async, non-blocking)."""
@@ -43,9 +59,36 @@ class WebhookNotifier:
         thread = threading.Thread(target=self._send, args=(qualifying,), daemon=True)
         thread.start()
 
+    def notify_partial_fill(self, trade_id: int, platform: str, market: str,
+                            fill_price: float, status: str):
+        """Send urgent notification about a partial fill event."""
+        if not self.url:
+            return
+        msg = f"PARTIAL FILL #{trade_id} on {platform}: {market} @ ${fill_price:.3f} -- {status}"
+        if self._is_telegram:
+            thread = threading.Thread(
+                target=self._send_telegram, args=(f"\u26a0\ufe0f {msg}",), daemon=True)
+            thread.start()
+        elif self._is_callmebot:
+            thread = threading.Thread(
+                target=self._send_callmebot, args=(msg,), daemon=True)
+            thread.start()
+        else:
+            payload = self._build_partial_fill_payload(trade_id, platform, market,
+                                                       fill_price, status)
+            thread = threading.Thread(target=self._send_raw, args=(payload,), daemon=True)
+            thread.start()
+
+    # ---------------------------------------------------------------------------
+    # Internal dispatch
+    # ---------------------------------------------------------------------------
+
     def _send(self, opportunities: list[dict]):
-        """POST opportunity data to the webhook URL."""
+        """POST opportunity data to the configured destination."""
         try:
+            if self._is_telegram:
+                self._send_telegram(self._format_text(opportunities))
+                return
             if self._is_callmebot:
                 self._send_callmebot(self._format_text(opportunities))
                 return
@@ -57,6 +100,92 @@ class WebhookNotifier:
                 logger.warning("Webhook returned %d: %s", resp.status_code, resp.text[:200])
         except requests.RequestException as e:
             logger.warning("Webhook request failed: %s", e)
+
+    def _send_raw(self, payload: dict):
+        """POST a raw payload to the webhook URL."""
+        try:
+            if self._is_telegram:
+                msg = payload.get("text") or payload.get("content") or json.dumps(payload)
+                self._send_telegram(msg)
+                return
+            if self._is_callmebot:
+                msg = payload.get("text") or payload.get("content") or json.dumps(payload)
+                self._send_callmebot(msg)
+                return
+            resp = self._session.post(self.url, json=payload, timeout=10)
+            if resp.status_code >= 300:
+                logger.warning("Webhook returned %d: %s", resp.status_code, resp.text[:200])
+        except requests.RequestException as e:
+            logger.warning("Webhook request failed: %s", e)
+
+    # ---------------------------------------------------------------------------
+    # Telegram Bot API
+    # ---------------------------------------------------------------------------
+
+    def _send_telegram(self, text: str):
+        """Send a message via the Telegram Bot API."""
+        if not self._telegram_token or not self._telegram_chat_id:
+            logger.warning("Telegram not configured: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+            return
+        url = f"https://api.telegram.org/bot{self._telegram_token}/sendMessage"
+        payload = {
+            "chat_id": self._telegram_chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
+        try:
+            resp = self._session.post(url, json=payload, timeout=10)
+            if resp.status_code < 300:
+                logger.debug("Telegram sent: %s", text[:60])
+            else:
+                logger.warning("Telegram returned %d: %s", resp.status_code, resp.text[:200])
+        except requests.RequestException as e:
+            logger.warning("Telegram request failed: %s", e)
+
+    # ---------------------------------------------------------------------------
+    # CallMeBot WhatsApp
+    # ---------------------------------------------------------------------------
+
+    def _send_callmebot(self, text: str):
+        """Send a plain-text message via CallMeBot WhatsApp API."""
+        if not self._callmebot_phone or not self._callmebot_apikey:
+            logger.warning("CallMeBot not configured: missing CALLMEBOT_PHONE or CALLMEBOT_APIKEY")
+            return
+        url = (
+            f"https://api.callmebot.com/whatsapp.php"
+            f"?phone={urlquote(self._callmebot_phone)}"
+            f"&text={urlquote(text)}"
+            f"&apikey={urlquote(self._callmebot_apikey)}"
+        )
+        try:
+            resp = self._session.get(url, timeout=15)
+            if resp.status_code < 300:
+                logger.debug("CallMeBot WhatsApp sent: %s", text[:60])
+            else:
+                logger.warning("CallMeBot returned %d: %s", resp.status_code, resp.text[:200])
+        except requests.RequestException as e:
+            logger.warning("CallMeBot request failed: %s", e)
+
+    # ---------------------------------------------------------------------------
+    # Formatting helpers
+    # ---------------------------------------------------------------------------
+
+    def _format_text(self, opportunities: list[dict]) -> str:
+        """Format opportunities as plain text for Telegram / WhatsApp / text notifications."""
+        lines = [f"*Arb Scanner*: {len(opportunities)} opportunity(s)"]
+        for opp in opportunities:
+            profit = opp.get("net_profit", 0)
+            roi = opp.get("net_roi", "")
+            market = opp.get("market", "")
+            # Truncate long market names for readability
+            if len(market) > 50:
+                market = market[:47] + "..."
+            lines.append(
+                f"  `{opp.get('type', '')}` {market}\n"
+                f"  Profit: ${profit:.4f} | ROI: {roi} | Depth: ${opp.get('_clob_depth', 0):.0f}"
+            )
+        return "\n".join(lines)
 
     def _build_payload(self, opportunities: list[dict]) -> dict:
         """Build the webhook payload, auto-detecting Slack/Discord format."""
@@ -81,74 +210,11 @@ class WebhookNotifier:
         else:
             return {"opportunities": items, "count": len(items)}
 
-    def notify_partial_fill(self, trade_id: int, platform: str, market: str, fill_price: float, status: str):
-        """Send urgent notification about a partial fill event."""
-        if not self.url:
-            return
-        payload = self._build_partial_fill_payload(trade_id, platform, market, fill_price, status)
-        thread = threading.Thread(target=self._send_raw, args=(payload,), daemon=True)
-        thread.start()
-
-    def _send_raw(self, payload: dict):
-        """POST a raw payload to the webhook URL."""
-        try:
-            if self._is_callmebot:
-                # Extract a plain-text message from the payload
-                msg = payload.get("text") or payload.get("content") or json.dumps(payload)
-                self._send_callmebot(msg)
-                return
-            resp = self._session.post(self.url, json=payload, timeout=10)
-            if resp.status_code >= 300:
-                logger.warning("Webhook returned %d: %s", resp.status_code, resp.text[:200])
-        except requests.RequestException as e:
-            logger.warning("Webhook request failed: %s", e)
-
-    # ---------------------------------------------------------------------------
-    # CallMeBot WhatsApp support
-    # ---------------------------------------------------------------------------
-
-    def _send_callmebot(self, text: str):
-        """Send a plain-text message via CallMeBot WhatsApp API."""
-        if not self._callmebot_phone or not self._callmebot_apikey:
-            logger.warning("CallMeBot not configured: missing CALLMEBOT_PHONE or CALLMEBOT_APIKEY")
-            return
-        url = (
-            f"https://api.callmebot.com/whatsapp.php"
-            f"?phone={urlquote(self._callmebot_phone)}"
-            f"&text={urlquote(text)}"
-            f"&apikey={urlquote(self._callmebot_apikey)}"
-        )
-        try:
-            resp = self._session.get(url, timeout=15)
-            if resp.status_code < 300:
-                logger.debug("CallMeBot WhatsApp sent: %s", text[:60])
-            else:
-                logger.warning("CallMeBot returned %d: %s", resp.status_code, resp.text[:200])
-        except requests.RequestException as e:
-            logger.warning("CallMeBot request failed: %s", e)
-
-    def _format_text(self, opportunities: list[dict]) -> str:
-        """Format opportunities as plain text for WhatsApp / text-based notifications."""
-        lines = [f"Arb Scanner: {len(opportunities)} opportunity(s)"]
-        for opp in opportunities:
-            profit = opp.get("net_profit", 0)
-            roi = opp.get("net_roi", "")
-            lines.append(
-                f"*{opp.get('type', '')}* {opp.get('market', '')}: "
-                f"${profit:.4f} ({roi})"
-            )
-        return "\n".join(lines)
-
-    # ---------------------------------------------------------------------------
-    # Partial fill alerts
-    # ---------------------------------------------------------------------------
-
-    def _build_partial_fill_payload(self, trade_id: int, platform: str, market: str, fill_price: float, status: str) -> dict:
-        """Build partial fill alert payload."""
+    def _build_partial_fill_payload(self, trade_id: int, platform: str, market: str,
+                                    fill_price: float, status: str) -> dict:
+        """Build partial fill alert payload for Slack/Discord/generic."""
         msg = f"PARTIAL FILL #{trade_id} on {platform}: {market} @ ${fill_price:.3f} -- {status}"
-        if self._is_callmebot:
-            return {"text": msg}
-        elif "hooks.slack.com" in self.url:
+        if "hooks.slack.com" in self.url:
             return {"text": f":warning: {msg}"}
         elif "discord.com/api/webhooks" in self.url:
             return {"content": f"\u26a0\ufe0f {msg}"}

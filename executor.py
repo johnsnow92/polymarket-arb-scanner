@@ -1996,7 +1996,10 @@ class ArbitrageExecutor:
                    f"${size:.2f} on {platforms} | {filled}/{len(legs)} legs filled")
 
         url = self.notifier.url
-        if getattr(self.notifier, "_is_callmebot", False):
+        if getattr(self.notifier, "_is_telegram", False):
+            emoji = "\u2705" if success else "\u274c"
+            payload = {"text": f"{emoji} {msg}"}
+        elif getattr(self.notifier, "_is_callmebot", False):
             payload = {"text": msg}
         elif "hooks.slack.com" in url:
             emoji = ":white_check_mark:" if success else ":x:"
