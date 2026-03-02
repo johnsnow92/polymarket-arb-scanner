@@ -236,6 +236,43 @@ a:hover { text-decoration: underline; }
 
 /* Footer */
 .footer { text-align: center; padding: 16px; color: var(--text-muted); font-size: 0.76rem; }
+
+/* Kill switch button */
+.kill-btn {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.kill-btn-pause {
+  background: var(--red);
+  color: #fff;
+}
+.kill-btn-pause:hover { background: #dc2626; }
+.kill-btn-resume {
+  background: var(--green);
+  color: #fff;
+}
+.kill-btn-resume:hover { background: #16a34a; }
+.kill-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.paused-banner {
+  background: var(--red-dim);
+  color: var(--red);
+  text-align: center;
+  padding: 8px 16px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--red);
+  display: none;
+}
 </style>
 </head>
 <body>
@@ -247,11 +284,13 @@ a:hover { text-decoration: underline; }
   <h1>Polymarket Arb Scanner</h1>
   <div class="header-right">
     <span id="mode-badge" class="badge badge-dry"><span class="dot dot-yellow dot-pulse"></span> DRY RUN</span>
+    <button id="kill-btn" class="kill-btn kill-btn-pause" onclick="toggleKillSwitch()">Pause Trading</button>
     <span id="uptime" style="color:var(--text-muted)"></span>
     <span id="last-scan" style="color:var(--text-muted)"></span>
     <span class="spinner" id="refresh-spinner" style="display:none"></span>
   </div>
 </div>
+<div class="paused-banner" id="paused-banner">TRADING PAUSED — Kill switch is engaged. Click Resume to re-enable trading.</div>
 
 <!-- ====================================================================== -->
 <!-- Main content                                                            -->
@@ -660,6 +699,43 @@ function renderAlerts(data) {
 }
 
 // ---------------------------------------------------------------------------
+// Kill switch
+// ---------------------------------------------------------------------------
+let _killSwitchState = { paused: false };
+
+function renderKillSwitch(data) {
+  if (!data) return;
+  _killSwitchState = data;
+  const btn = $('kill-btn');
+  const banner = $('paused-banner');
+  if (data.paused) {
+    btn.className = 'kill-btn kill-btn-resume';
+    btn.textContent = 'Resume Trading';
+    banner.style.display = 'block';
+  } else {
+    btn.className = 'kill-btn kill-btn-pause';
+    btn.textContent = 'Pause Trading';
+    banner.style.display = 'none';
+  }
+}
+
+async function toggleKillSwitch() {
+  const btn = $('kill-btn');
+  btn.disabled = true;
+  try {
+    const endpoint = _killSwitchState.paused ? '/api/resume' : '/api/pause';
+    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (r.ok) {
+      const data = await r.json();
+      renderKillSwitch(data);
+    }
+  } catch (e) {
+    console.error('Kill switch toggle failed:', e);
+  }
+  btn.disabled = false;
+}
+
+// ---------------------------------------------------------------------------
 // Main refresh loop
 // ---------------------------------------------------------------------------
 async function refresh() {
@@ -667,7 +743,7 @@ async function refresh() {
   spinner.style.display = 'inline-block';
 
   const [status, health, slippage, history, strategies, positions,
-         platforms, trades, opportunities, alerts] = await Promise.all([
+         platforms, trades, opportunities, alerts, pauseState] = await Promise.all([
     api('/status'),
     api('/api/health'),
     api('/api/slippage'),
@@ -678,6 +754,7 @@ async function refresh() {
     api('/api/trades'),
     api('/api/opportunities'),
     api('/alerts'),
+    api('/api/pause'),
   ]);
 
   renderStatus(status);
@@ -691,6 +768,7 @@ async function refresh() {
   renderOpportunities(opportunities);
   renderAlerts(alerts);
   updatePnlChart(history);
+  renderKillSwitch(pauseState);
 
   // Positions subtitle
   if (platforms && platforms.length > 0) {

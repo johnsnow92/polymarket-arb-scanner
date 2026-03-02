@@ -2,8 +2,8 @@
   "family": "arb-scanner",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
-  "cpu": "1024",
-  "memory": "2048",
+  "cpu": "512",
+  "memory": "1024",
   "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
   "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskRole",
   "containerDefinitions": [
@@ -59,6 +59,14 @@
         {
           "name": "DASHBOARD_PASS",
           "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/dashboard-pass"
+        },
+        {
+          "name": "SXBET_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/sxbet-api-key"
+        },
+        {
+          "name": "SXBET_PRIVATE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:arb-scanner/sxbet-private-key"
         }
       ],
       "mountPoints": [

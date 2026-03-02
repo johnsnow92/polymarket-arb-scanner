@@ -139,6 +139,17 @@ class ArbitrageExecutor:
         """
         opp_type = opportunity.get("type", "")
         market = opportunity.get("market", "Unknown")
+
+        # 0. Kill switch — abort all execution when dashboard pause is engaged
+        try:
+            from dashboard import is_paused
+            if is_paused():
+                logger.info(f"[PAUSED] Kill switch active — skipping: {market} ({opp_type})")
+                self._log_skipped(opportunity, "kill_switch")
+                return False
+        except ImportError:
+            pass  # Dashboard not available (e.g. tests)
+
         prefix = "[DRY RUN] " if self.dry_run else ""
 
         logger.info(f"{prefix}--- Evaluating: {market} ({opp_type}) ---")

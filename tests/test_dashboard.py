@@ -13,7 +13,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dashboard import _DashboardState, _Handler, start_dashboard, state, _check_auth, _send_401
+from dashboard import (
+    _DashboardState, _Handler, start_dashboard, state, _check_auth, _send_401,
+    is_paused, pause, resume, get_pause_state,
+)
 from db import TradeDB
 
 
@@ -48,6 +51,25 @@ def _get(base_url: str, path: str, auth: str | None = None) -> tuple[int, bytes,
     status = resp.status
     conn.close()
     return status, body, resp_headers
+
+
+def _post(base_url: str, path: str, body_data: dict | None = None,
+          auth: str | None = None) -> tuple[int, bytes, dict]:
+    """Make a POST request with JSON body. Returns (status, body, headers_dict)."""
+    host, port_str = base_url.replace("http://", "").split(":")
+    conn = HTTPConnection(host, int(port_str), timeout=5)
+    headers = {"Content-Type": "application/json"}
+    if auth:
+        headers["Authorization"] = auth
+    body_bytes = json.dumps(body_data or {}).encode("utf-8")
+    headers["Content-Length"] = str(len(body_bytes))
+    conn.request("POST", path, body=body_bytes, headers=headers)
+    resp = conn.getresponse()
+    resp_body = resp.read()
+    resp_headers = dict(resp.getheaders())
+    status = resp.status
+    conn.close()
+    return status, resp_body, resp_headers
 
 
 # ---------------------------------------------------------------------------
@@ -557,3 +579,172 @@ class TestDashboardConfigValidation:
             warnings = validate_config()
             auth_warnings = [w for w in warnings if "DASHBOARD_PASS" in w]
             assert len(auth_warnings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Kill switch unit tests (no server needed)
+# ---------------------------------------------------------------------------
+
+class TestKillSwitchFunctions:
+    """Test pause/resume/is_paused/get_pause_state functions."""
+
+    def setup_method(self):
+        """Ensure clean state before each test."""
+        resume()
+
+    def teardown_method(self):
+        """Reset to unpaused after each test."""
+        resume()
+
+    def test_initial_state_is_not_paused(self):
+        assert is_paused() is False
+        state_dict = get_pause_state()
+        assert state_dict["paused"] is False
+        assert state_dict["reason"] == ""
+        assert state_dict["paused_since"] is None
+
+    def test_pause_engages_kill_switch(self):
+        result = pause("test reason")
+        assert result["paused"] is True
+        assert result["reason"] == "test reason"
+        assert result["paused_since"] is not None
+        assert is_paused() is True
+
+    def test_resume_disengages_kill_switch(self):
+        pause("test")
+        assert is_paused() is True
+        result = resume()
+        assert result["paused"] is False
+        assert is_paused() is False
+        assert result["reason"] == ""
+        assert result["paused_since"] is None
+
+    def test_double_pause_is_idempotent(self):
+        pause("first")
+        ts1 = get_pause_state()["paused_since"]
+        pause("second")
+        ts2 = get_pause_state()["paused_since"]
+        assert is_paused() is True
+        # Timestamp updates on second pause
+        assert ts2 >= ts1
+        assert get_pause_state()["reason"] == "second"
+
+    def test_double_resume_is_idempotent(self):
+        resume()
+        result = resume()
+        assert result["paused"] is False
+
+    def test_pause_default_reason(self):
+        result = pause()
+        assert result["reason"] == "manual"
+
+
+# ---------------------------------------------------------------------------
+# Kill switch HTTP endpoint tests
+# ---------------------------------------------------------------------------
+
+class TestKillSwitchEndpoints:
+    """Test GET /api/pause, POST /api/pause, POST /api/resume endpoints."""
+
+    def setup_method(self):
+        resume()
+
+    def teardown_method(self):
+        resume()
+
+    def test_get_pause_returns_state(self):
+        server, url = _start_test_server(18830)
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _get(url, "/api/pause")
+            assert status == 200
+            data = json.loads(body)
+            assert data["paused"] is False
+        finally:
+            server.shutdown()
+
+    def test_post_pause_engages_kill_switch(self):
+        server, url = _start_test_server(18831)
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _post(url, "/api/pause")
+            assert status == 200
+            data = json.loads(body)
+            assert data["paused"] is True
+            assert is_paused() is True
+        finally:
+            server.shutdown()
+
+    def test_post_pause_with_reason(self):
+        server, url = _start_test_server(18832)
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _post(url, "/api/pause",
+                                        body_data={"reason": "emergency"})
+            data = json.loads(body)
+            assert data["reason"] == "emergency"
+        finally:
+            server.shutdown()
+
+    def test_post_resume_disengages(self):
+        pause("test")
+        server, url = _start_test_server(18833)
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _post(url, "/api/resume")
+            assert status == 200
+            data = json.loads(body)
+            assert data["paused"] is False
+            assert is_paused() is False
+        finally:
+            server.shutdown()
+
+    def test_pause_requires_auth(self):
+        server, url = _start_test_server(18834)
+        try:
+            with patch("config.DASHBOARD_PASS", "secret"), \
+                 patch("config.DASHBOARD_USER", "admin"):
+                status, _, _ = _post(url, "/api/pause")
+            assert status == 401
+        finally:
+            server.shutdown()
+
+    def test_resume_requires_auth(self):
+        server, url = _start_test_server(18835)
+        try:
+            with patch("config.DASHBOARD_PASS", "secret"), \
+                 patch("config.DASHBOARD_USER", "admin"):
+                status, _, _ = _post(url, "/api/resume")
+            assert status == 401
+        finally:
+            server.shutdown()
+
+    def test_post_unknown_route_returns_404(self):
+        server, url = _start_test_server(18836)
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, _, _ = _post(url, "/api/nonexistent")
+            assert status == 404
+        finally:
+            server.shutdown()
+
+    def test_health_includes_paused_field(self):
+        pause("test")
+        server, url = _start_test_server(18837)
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _get(url, "/api/health")
+            data = json.loads(body)
+            assert data["paused"] is True
+        finally:
+            server.shutdown()
+
+    def test_health_paused_false_when_not_paused(self):
+        server, url = _start_test_server(18838)
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _get(url, "/api/health")
+            data = json.loads(body)
+            assert data["paused"] is False
+        finally:
+            server.shutdown()

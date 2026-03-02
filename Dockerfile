@@ -30,8 +30,8 @@ COPY scans/ ./scans/
 # Create data directory for EFS mount (trades.db will live here)
 RUN mkdir -p /data
 
-# Health check via dashboard endpoint
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/status')" || exit 1
+# Health check via unauthenticated healthz endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"DASHBOARD_PORT\",\"8080\")}/healthz')" || exit 1
 
 ENTRYPOINT ["python", "scanner.py", "--continuous"]

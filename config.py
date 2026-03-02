@@ -252,7 +252,9 @@ SNAPSHOT_INTERVAL = _env_int("SNAPSHOT_INTERVAL", "60")
 BACKTEST_INITIAL_BALANCE = _env_float("BACKTEST_INITIAL_BALANCE", "1000.0")
 
 # Dashboard
-DASHBOARD_PORT = _env_int("DASHBOARD_PORT", "0")  # 0 = disabled
+# Railway injects PORT; fall back to it when DASHBOARD_PORT is not set.
+_dashboard_port_default = os.getenv("PORT", "0")
+DASHBOARD_PORT = _env_int("DASHBOARD_PORT", _dashboard_port_default)
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
 DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "")  # empty = no auth
 DASHBOARD_REFRESH_SECONDS = _env_int("DASHBOARD_REFRESH_SECONDS", "15")

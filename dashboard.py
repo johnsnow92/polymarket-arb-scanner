@@ -51,6 +51,65 @@ state = _DashboardState()
 
 
 # ---------------------------------------------------------------------------
+# Kill switch — runtime pause/resume (thread-safe)
+# ---------------------------------------------------------------------------
+
+_pause_lock = threading.Lock()
+_paused = False
+_pause_reason = ""
+_pause_timestamp: float | None = None
+
+
+def is_paused() -> bool:
+    """Check if the kill switch is engaged (trading paused)."""
+    return _paused
+
+
+def pause(reason: str = "manual") -> dict:
+    """Engage the kill switch — stop all trade execution.
+
+    Args:
+        reason: Human-readable reason for pausing (logged and returned).
+
+    Returns:
+        Dict with pause state info.
+    """
+    global _paused, _pause_reason, _pause_timestamp
+    with _pause_lock:
+        _paused = True
+        _pause_reason = reason
+        _pause_timestamp = time.time()
+        logger.warning("KILL SWITCH ENGAGED: trading paused (%s)", reason)
+    return get_pause_state()
+
+
+def resume() -> dict:
+    """Disengage the kill switch — allow trade execution to continue.
+
+    Returns:
+        Dict with pause state info.
+    """
+    global _paused, _pause_reason, _pause_timestamp
+    with _pause_lock:
+        was_paused = _paused
+        _paused = False
+        _pause_reason = ""
+        _pause_timestamp = None
+        if was_paused:
+            logger.warning("KILL SWITCH DISENGAGED: trading resumed")
+    return get_pause_state()
+
+
+def get_pause_state() -> dict:
+    """Return current kill switch state as a dict."""
+    return {
+        "paused": _paused,
+        "reason": _pause_reason,
+        "paused_since": _pause_timestamp,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Auth helper
 # ---------------------------------------------------------------------------
 
@@ -168,6 +227,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/strategies": self._handle_strategies,
             "/api/history": self._handle_history,
             "/api/slippage": self._handle_slippage,
+            "/api/pause": self._handle_pause_get,
         }
 
         handler_fn = routes.get(path)
@@ -176,6 +236,37 @@ class _Handler(BaseHTTPRequestHandler):
                 handler_fn()
             except Exception as e:
                 logger.warning("Dashboard handler error on %s: %s", path, e)
+                _send_json(self, {"error": str(e)}, 500)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+
+        # Read the full request body upfront to avoid connection resets
+        post_body = b""
+        try:
+            content_len = int(self.headers.get("Content-Length", 0))
+            if content_len > 0:
+                post_body = self.rfile.read(content_len)
+        except Exception:
+            pass
+
+        if not _check_auth(self):
+            return
+
+        post_routes = {
+            "/api/pause": self._handle_pause_post,
+            "/api/resume": self._handle_resume_post,
+        }
+
+        handler_fn = post_routes.get(path)
+        if handler_fn:
+            try:
+                handler_fn(post_body)
+            except Exception as e:
+                logger.warning("Dashboard POST handler error on %s: %s", path, e)
                 _send_json(self, {"error": str(e)}, 500)
         else:
             self.send_response(404)
@@ -253,6 +344,7 @@ class _Handler(BaseHTTPRequestHandler):
             "uptime_seconds": round(uptime, 1),
             "cumulative_pnl": cumulative,
             "metrics": metrics_data,
+            "paused": _paused,
         })
 
     def _handle_positions(self):
@@ -338,6 +430,29 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception:
             avg = 0.0
         _send_json(self, {"avg_slippage": avg})
+
+    # -------------------------------------------------------------------
+    # Kill switch endpoints
+    # -------------------------------------------------------------------
+
+    def _handle_pause_get(self):
+        """GET /api/pause — return current kill switch state."""
+        _send_json(self, get_pause_state())
+
+    def _handle_pause_post(self, body: bytes = b""):
+        """POST /api/pause — engage the kill switch."""
+        reason = "dashboard"
+        try:
+            if body:
+                parsed = json.loads(body)
+                reason = parsed.get("reason", "dashboard")
+        except Exception:
+            pass
+        _send_json(self, pause(reason))
+
+    def _handle_resume_post(self, body: bytes = b""):
+        """POST /api/resume — disengage the kill switch."""
+        _send_json(self, resume())
 
     # -------------------------------------------------------------------
 

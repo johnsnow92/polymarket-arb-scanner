@@ -1,9 +1,9 @@
-name: Deploy to ECS
+name: Deploy to ECS (DISABLED — migrated to Railway)
 
+# Disabled: scanner migrated from ECS Fargate to Railway.
+# Kept for reference. Railway auto-deploys on push via GitHub integration.
 on:
-  push:
-    branches: [master]
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger only
 
 env:
   AWS_REGION: us-east-1
@@ -83,11 +83,27 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Register task definition
+        id: register-task-def
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          # Replace ACCOUNT_ID placeholder and EFS_FILE_SYSTEM_ID in template
+          sed "s/ACCOUNT_ID/$ACCOUNT_ID/g" infra/task-definition.json > /tmp/task-def.json
+          # Register the task definition
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/task-def.json \
+            --region $AWS_REGION \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "Registered task definition: $TASK_DEF_ARN"
+          echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
       - name: Deploy to ECS
         run: |
           aws ecs update-service \
             --cluster $ECS_CLUSTER \
             --service $ECS_SERVICE \
+            --task-definition ${{ steps.register-task-def.outputs.task_def_arn }} \
             --force-new-deployment \
             --region $AWS_REGION
 
