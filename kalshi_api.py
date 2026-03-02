@@ -43,6 +43,9 @@ def _load_private_key(file_path: str):
             f.read(),
             password=None,
             backend=default_backend(),
+            # Kalshi-generated keys may have non-standard CRT parameters
+            # that fail strict validation in newer cryptography versions.
+            unsafe_skip_rsa_key_validation=True,
         )
 
 
@@ -53,6 +56,7 @@ def _load_private_key_from_base64(b64_string: str):
         pem_bytes,
         password=None,
         backend=default_backend(),
+        unsafe_skip_rsa_key_validation=True,
     )
 
 
