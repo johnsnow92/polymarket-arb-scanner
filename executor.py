@@ -95,6 +95,11 @@ class ArbitrageExecutor:
         self._balance_cache: dict = {}
         self._balance_cache_ts: float = 0.0
         self._balance_cache_type: str = ""
+        # Failed-trade cooldown: ticker/market -> earliest retry time.
+        # Prevents catastrophic loops when the same bogus opportunity keeps
+        # failing (e.g. insufficient liquidity) and is re-presented.
+        self._failed_cooldowns: dict[str, float] = {}
+        self._FAILED_COOLDOWN_SECS = 300  # 5-minute cooldown after failure
 
     def _get_cached_balances(self, opp_type: str) -> dict | None:
         """Return cached balances if fresh, otherwise fetch and cache.
@@ -149,6 +154,15 @@ class ArbitrageExecutor:
                 return False
         except ImportError:
             pass  # Dashboard not available (e.g. tests)
+
+        # 0b. Failed-trade cooldown — prevent re-execution loops
+        cooldown_key = opportunity.get("_kalshi_ticker") or market
+        cooldown_until = self._failed_cooldowns.get(cooldown_key, 0)
+        if time.time() < cooldown_until:
+            remaining = int(cooldown_until - time.time())
+            logger.debug(f"Cooldown active for {cooldown_key} ({remaining}s remaining). Skipping.")
+            self._log_skipped(opportunity, "failed_cooldown")
+            return False
 
         prefix = "[DRY RUN] " if self.dry_run else ""
 
@@ -232,6 +246,11 @@ class ArbitrageExecutor:
                     _metrics.inc("trades_executed", {"platform": opp_type, "status": "filled"})
                 else:
                     _metrics.inc("trades_failed", {"platform": opp_type, "reason": "execution"})
+            # On failure, set a cooldown so the same opportunity is not
+            # re-attempted immediately (prevents catastrophic retry loops).
+            if not result:
+                self._failed_cooldowns[cooldown_key] = time.time() + self._FAILED_COOLDOWN_SECS
+                logger.info(f"Cooldown set for {cooldown_key} ({self._FAILED_COOLDOWN_SECS}s)")
             return result
 
     def _revalidate(self, opportunity: dict, price_cache: dict | None = None) -> bool:
