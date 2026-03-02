@@ -176,7 +176,7 @@ class TestSXBetFetchData:
         markets_s2 = {"data": [{"marketHash": "0xb"}, {"marketHash": "0xc"}]}
 
         def mock_request(method, endpoint, params=None, json_data=None):
-            if endpoint == "/sports/active":
+            if endpoint == "/sports":
                 return sports_resp
             if params and params.get("sportId") == 1:
                 return markets_s1

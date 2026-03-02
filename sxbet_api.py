@@ -9,7 +9,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-SXBET_API_URL = "https://api.sx.bet/v2"
+SXBET_API_URL = "https://api.sx.bet"
 
 # Rate limiting (thread-safe)
 _last_request_time = 0
@@ -68,10 +68,10 @@ class SXBetClient:
             logger.error("SX Bet wallet address not provided")
             return False
 
-        # Verify by fetching active sports (no auth header needed)
+        # Verify by fetching sports list (no auth header needed)
         _rate_limit()
         try:
-            resp = self.session.get(f"{SXBET_API_URL}/sports/active", timeout=15)
+            resp = self.session.get(f"{SXBET_API_URL}/sports", timeout=15)
             if resp.status_code == 200:
                 self.authenticated = True
                 logger.info("SX Bet connected (wallet=%s…%s)",
@@ -127,8 +127,8 @@ class SXBetClient:
         """
         all_markets = []
 
-        # Get active sports first
-        sports = self._request("GET", "/sports/active")
+        # Get sports list
+        sports = self._request("GET", "/sports")
         if not sports or "data" not in sports:
             return all_markets
 
