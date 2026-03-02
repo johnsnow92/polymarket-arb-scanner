@@ -690,7 +690,8 @@ def main():
         run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                        kalshi_private_key_path, executor, db, price_cache,
                        extra_clients, notifier=notifier, pm_trader=pm_trader,
-                       event_monitor=event_monitor)
+                       event_monitor=event_monitor,
+                       kalshi_private_key_base64=kalshi_private_key_b64)
     else:
         _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients,
                      notifier=notifier, event_monitor=event_monitor)

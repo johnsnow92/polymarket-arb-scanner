@@ -439,7 +439,7 @@ def _get_market_lock(market: str) -> threading.Lock:
 def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                    kalshi_private_key_path, executor, db, price_cache,
                    extra_clients=None, notifier=None, pm_trader=None,
-                   event_monitor=None):
+                   event_monitor=None, kalshi_private_key_base64=None):
     """Run the scanner in continuous mode with WebSocket price feeds.
 
     Sets up WebSocket connections to all configured platforms, runs periodic
@@ -569,6 +569,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         on_price_update=on_price_update,
         kalshi_api_key_id=kalshi_api_key_id,
         kalshi_private_key_path=kalshi_private_key_path,
+        kalshi_private_key_base64=kalshi_private_key_base64,
     )
 
     async def _continuous_loop():
@@ -888,11 +889,19 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 # yet.  This lets the WS trigger fire when prices move into
                 # profitable range between polling scans.
                 if poly_markets:
+                    import json as _json
                     for pm in poly_markets[:ws_sub_limit]:
-                        for tok in pm.get("tokens", []):
-                            tid = tok.get("token_id", "")
-                            if tid and tid not in poly_sub_ids:
-                                poly_sub_ids.append(tid)
+                        raw = pm.get("clobTokenIds")
+                        if not raw:
+                            continue
+                        try:
+                            tids = _json.loads(raw) if isinstance(raw, str) else raw
+                        except Exception:
+                            continue
+                        if isinstance(tids, list):
+                            for tid in tids:
+                                if tid and tid not in poly_sub_ids:
+                                    poly_sub_ids.append(tid)
                         if len(poly_sub_ids) >= ws_sub_limit:
                             break
 

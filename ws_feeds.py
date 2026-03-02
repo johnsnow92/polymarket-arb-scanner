@@ -25,7 +25,7 @@ except Exception:
 
 import websockets
 
-from kalshi_api import KALSHI_BASE_URL, KALSHI_API_PATH, _sign_pss, _load_private_key
+from kalshi_api import KALSHI_BASE_URL, KALSHI_API_PATH, _sign_pss, _load_private_key, _load_private_key_from_base64
 
 # Proxy support for WebSocket connections
 try:
@@ -51,6 +51,7 @@ class FeedManager:
         on_price_update: Callable[[str, str, dict], None],
         kalshi_api_key_id: str | None = None,
         kalshi_private_key_path: str | None = None,
+        kalshi_private_key_base64: str | None = None,
         betfair_app_key: str | None = None,
         betfair_session_token: str | None = None,
     ):
@@ -58,14 +59,20 @@ class FeedManager:
         Args:
             on_price_update: Callback(platform, ticker/token_id, price_data)
             kalshi_api_key_id: Kalshi API key ID for WS auth
-            kalshi_private_key_path: Path to Kalshi RSA private key
+            kalshi_private_key_path: Path to Kalshi RSA private key PEM file
+            kalshi_private_key_base64: Base64-encoded RSA private key (alternative to path)
             betfair_app_key: Betfair API application key for stream auth
             betfair_session_token: Betfair SSO session token (ssoid)
         """
         self.on_price_update = on_price_update
         self.kalshi_api_key_id = kalshi_api_key_id
         self.kalshi_private_key = None
-        if kalshi_private_key_path:
+        if kalshi_private_key_base64:
+            try:
+                self.kalshi_private_key = _load_private_key_from_base64(kalshi_private_key_base64)
+            except Exception as e:
+                logger.warning("Could not load Kalshi private key from base64 for WS: %s", e)
+        elif kalshi_private_key_path:
             try:
                 self.kalshi_private_key = _load_private_key(kalshi_private_key_path)
             except Exception as e:
