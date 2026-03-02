@@ -929,6 +929,9 @@ class ArbitrageExecutor:
                  "_market_id": market_id, "_runner_id": runner_id},
             ]
         elif opp_type == "GeminiBinary":
+            if "gemini" not in ENABLED_EXECUTION_PLATFORMS:
+                logger.debug("Skipping GeminiBinary: gemini not in ENABLED_EXECUTION_PLATFORMS")
+                return []
             yes_price = opportunity.get("_gm_yes_price", self._parse_price(opportunity, "Y="))
             no_price = opportunity.get("_gm_no_price", self._parse_price(opportunity, "N="))
             if yes_price is None or no_price is None:
@@ -940,6 +943,9 @@ class ArbitrageExecutor:
                  "side": "buy", "outcome": "no", "price": no_price},
             ]
         elif opp_type == "GeminiMulti":
+            if "gemini" not in ENABLED_EXECUTION_PLATFORMS:
+                logger.debug("Skipping GeminiMulti: gemini not in ENABLED_EXECUTION_PLATFORMS")
+                return []
             symbols = opportunity.get("_gm_symbols", [])
             prices = opportunity.get("_gm_prices", [])
             for symbol, price in zip(symbols, prices):
@@ -948,6 +954,9 @@ class ArbitrageExecutor:
                     "side": "buy", "outcome": "yes", "price": price,
                 })
         elif opp_type == "IBKRBinary":
+            if "ibkr" not in ENABLED_EXECUTION_PLATFORMS:
+                logger.debug("Skipping IBKRBinary: ibkr not in ENABLED_EXECUTION_PLATFORMS")
+                return []
             yes_price = opportunity.get("_ibkr_yes_price", self._parse_price(opportunity, "Y="))
             no_price = opportunity.get("_ibkr_no_price", self._parse_price(opportunity, "N="))
             if yes_price is None or no_price is None:

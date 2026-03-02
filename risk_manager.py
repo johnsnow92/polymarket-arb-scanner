@@ -53,6 +53,16 @@ class RiskManager:
                 k_balance = balances.get("kalshi", 0)
                 if k_balance is not None and k_balance < trade_cost:
                     return False, f"Insufficient Kalshi balance (${k_balance:.2f})"
+            elif opp_type.startswith("Gemini"):
+                # Gemini-only arb: entire cost is on Gemini
+                g_balance = balances.get("gemini", 0)
+                if g_balance is not None and g_balance < trade_cost:
+                    return False, f"Insufficient Gemini balance (${g_balance:.2f})"
+            elif opp_type.startswith("IBKR"):
+                # IBKR-only arb: entire cost is on IBKR
+                i_balance = balances.get("ibkr", 0)
+                if i_balance is not None and i_balance < trade_cost:
+                    return False, f"Insufficient IBKR balance (${i_balance:.2f})"
             elif "Cross" in opp_type:
                 # Cross-platform: check both participating platforms
                 half_cost = trade_cost / 2
