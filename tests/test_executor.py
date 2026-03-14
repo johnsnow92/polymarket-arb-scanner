@@ -1318,6 +1318,173 @@ class TestRevalidateTriangular:
 
 
 # ---------------------------------------------------------------------------
+# _revalidate_negrisk
+# ---------------------------------------------------------------------------
+
+class TestRevalidateNegRisk:
+    def test_passes_when_profit_above_threshold(self, executor):
+        """NegRisk revalidation passes when profit stays above 90% of original."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "NegRiskInternal",
+            "net_profit": 0.10,
+            "total_cost": "$0.9000",
+            "prices": "Y1=0.45 Y2=0.45",
+            "_token_ids": ["tok_y1", "tok_y2"],
+        }
+        mock_book = {"asks": [{"price": "0.45", "size": "100"}]}
+        mock_bid_ask = {"bid": 0.44, "ask": 0.45}
+
+        with mpatch("executor.fetch_order_book", return_value=mock_book), \
+             mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
+             mpatch("executor.net_profit_negrisk_internal", return_value={"net_profit": 0.095}):
+            result = executor._revalidate(opp, None)
+            assert result is True
+
+    def test_fails_when_no_token_ids(self, executor):
+        """NegRisk revalidation fails with empty _token_ids."""
+        opp = {
+            "type": "NegRiskInternal",
+            "net_profit": 0.10,
+            "_token_ids": [],
+        }
+        result = executor._revalidate(opp, None)
+        assert result is False
+
+    def test_fails_when_order_book_empty(self, executor):
+        """NegRisk revalidation fails when fetch_order_book returns None."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "NegRiskInternal",
+            "net_profit": 0.10,
+            "total_cost": "$0.9000",
+            "_token_ids": ["tok_y1"],
+        }
+        with mpatch("executor.fetch_order_book", return_value=None):
+            result = executor._revalidate(opp, None)
+            assert result is False
+
+    def test_fails_when_profit_degrades(self, executor):
+        """NegRisk revalidation fails when new profit < 90% of original."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "NegRiskInternal",
+            "net_profit": 0.10,
+            "total_cost": "$0.9000",
+            "prices": "Y1=0.45 Y2=0.45",
+            "_token_ids": ["tok_y1", "tok_y2"],
+        }
+        mock_book = {"asks": [{"price": "0.50", "size": "100"}]}
+        mock_bid_ask = {"bid": 0.49, "ask": 0.50}
+
+        with mpatch("executor.fetch_order_book", return_value=mock_book), \
+             mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
+             mpatch("executor.net_profit_negrisk_internal", return_value={"net_profit": 0.02}):
+            result = executor._revalidate(opp, None)
+            assert result is False
+
+    def test_uses_ws_cache_when_available(self, executor):
+        """NegRisk revalidation uses WS price cache, skipping fetch_order_book."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "NegRiskInternal",
+            "net_profit": 0.10,
+            "total_cost": "$0.9000",
+            "prices": "Y1=0.45 Y2=0.45",
+            "_token_ids": ["tok_y1", "tok_y2"],
+        }
+        price_cache = {
+            ("polymarket", "tok_y1"): {"price": 0.45, "_ts": time.time()},
+            ("polymarket", "tok_y2"): {"price": 0.46, "_ts": time.time()},
+        }
+        with mpatch("executor.fetch_order_book") as mock_fetch, \
+             mpatch("executor.net_profit_negrisk_internal", return_value={"net_profit": 0.095}):
+            result = executor._revalidate(opp, price_cache)
+            assert result is True
+            mock_fetch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _revalidate_kalshi_multi
+# ---------------------------------------------------------------------------
+
+class TestRevalidateKalshiMulti:
+    def test_passes_when_profit_above_threshold(self, executor):
+        """KalshiMulti revalidation passes when profit stays above threshold."""
+        opp = {
+            "type": "KalshiMultiOutcome",
+            "net_profit": 0.10,
+            "total_cost": "$0.8000",
+            "_kalshi_tickers": ["TICKER-A", "TICKER-B"],
+        }
+        mock_book = {
+            "orderbook": {
+                "yes": [["45", "100"]],
+                "no": [],
+            }
+        }
+        executor.kalshi_client.fetch_order_book.return_value = mock_book
+        with patch("executor.net_profit_kalshi_multi", return_value={"net_profit": 0.095}):
+            result = executor._revalidate(opp, None)
+            assert result is True
+
+    def test_fails_when_no_tickers(self, executor):
+        """KalshiMulti revalidation fails with empty _kalshi_tickers."""
+        opp = {
+            "type": "KalshiMultiOutcome",
+            "net_profit": 0.10,
+            "_kalshi_tickers": [],
+        }
+        result = executor._revalidate(opp, None)
+        assert result is False
+
+    def test_fails_when_no_kalshi_client(self, ArbitrageExecutor, db, risk_manager):
+        """KalshiMulti revalidation fails when kalshi_client is None."""
+        ex = ArbitrageExecutor(
+            pm_trader=MagicMock(), kalshi_client=None,
+            db=db, risk_manager=risk_manager, dry_run=True,
+        )
+        opp = {
+            "type": "KalshiMultiOutcome",
+            "net_profit": 0.10,
+            "_kalshi_tickers": ["TICKER-A"],
+        }
+        result = ex._revalidate(opp, None)
+        assert result is False
+
+    def test_fails_when_order_book_missing(self, executor):
+        """KalshiMulti revalidation fails when order book returns None."""
+        opp = {
+            "type": "KalshiMultiOutcome",
+            "net_profit": 0.10,
+            "total_cost": "$0.8000",
+            "_kalshi_tickers": ["TICKER-A", "TICKER-B"],
+        }
+        executor.kalshi_client.fetch_order_book.return_value = None
+        result = executor._revalidate(opp, None)
+        assert result is False
+
+    def test_fails_when_profit_degrades(self, executor):
+        """KalshiMulti revalidation fails when profit drops below threshold."""
+        opp = {
+            "type": "KalshiMultiOutcome",
+            "net_profit": 0.10,
+            "total_cost": "$0.8000",
+            "_kalshi_tickers": ["TICKER-A", "TICKER-B"],
+        }
+        mock_book = {
+            "orderbook": {
+                "yes": [["50", "100"]],
+                "no": [],
+            }
+        }
+        executor.kalshi_client.fetch_order_book.return_value = mock_book
+        with patch("executor.net_profit_kalshi_multi", return_value={"net_profit": 0.02}):
+            result = executor._revalidate(opp, None)
+            assert result is False
+
+
+# ---------------------------------------------------------------------------
 # Fill confirmation for exchange platforms
 # ---------------------------------------------------------------------------
 
@@ -1346,7 +1513,7 @@ class TestFillConfirmationExchanges:
         with mpatch("executor.FILL_POLL_TIMEOUT", 0.01), \
              mpatch("executor.FILL_POLL_INTERVAL", 0.005):
             result = ex._confirm_fill_betfair("bet123", 0.40)
-        assert result == pytest.approx(0.40)
+        assert result is None  # timeout returns None, not expected_price
 
     def test_confirm_fill_betfair_no_client(self, executor):
         """Returns expected_price when no betfair client."""
