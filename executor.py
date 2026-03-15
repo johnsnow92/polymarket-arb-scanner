@@ -10,6 +10,8 @@ from config import (
     FILL_POLL_INTERVAL, FILL_POLL_TIMEOUT, HEDGE_ENABLED,
     CONCURRENT_EXECUTION, BALANCE_CACHE_TTL,
     ENABLED_EXECUTION_PLATFORMS, PLATFORM_MIN_ORDER_SIZE,
+    ORDER_TIME_IN_FORCE, GTC_ORDER_TIMEOUT,
+    FAILED_TRADE_COOLDOWN, WS_CACHE_MAX_AGE_REVALIDATION,
 )
 
 # Conditional metrics import — never breaks if metrics.py is missing
@@ -40,6 +42,7 @@ from fees import (
     net_profit_triangular,
     net_profit_gemini_binary,
     net_profit_ibkr_binary,
+    net_profit_multi_cross,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,7 +104,7 @@ class ArbitrageExecutor:
         # Prevents catastrophic loops when the same bogus opportunity keeps
         # failing (e.g. insufficient liquidity) and is re-presented.
         self._failed_cooldowns: dict[str, float] = {}
-        self._FAILED_COOLDOWN_SECS = 300  # 5-minute cooldown after failure
+        self._FAILED_COOLDOWN_SECS = FAILED_TRADE_COOLDOWN
 
     def _get_cached_balances(self, opp_type: str) -> dict | None:
         """Return cached balances if fresh, otherwise fetch and cache.
@@ -291,10 +294,16 @@ class ArbitrageExecutor:
                 return True  # Gemini prices are from order book
             elif opp_type == "IBKRBinary":
                 return True  # IBKR prices are from snapshot
+            elif opp_type.startswith("MultiCross"):
+                return self._revalidate_multi_cross(opportunity, original_profit, price_cache)
             elif opp_type == "TriangularCross":
                 return self._revalidate_triangular(opportunity, original_profit, price_cache)
             elif opp_type == "EventDivergence":
                 return True  # Signal-based — no stale mid-price to revalidate
+            elif opp_type in ("StalePriceOpp", "ResolutionSnipeOpp", "ConvergenceOpp"):
+                return True  # Signal/time-based — directional, no mid-price revalidation
+            elif opp_type == "MarketMake":
+                return True  # MM quotes are continuously refreshed by the MM engine
             # Unknown type — proceed cautiously
             return True
         except Exception as e:
@@ -574,6 +583,38 @@ class ArbitrageExecutor:
 
         # Update opportunity with fresh prices
         opp["prices"] = f"{platform_a}_Y={yes_price:.3f} {platform_b}_N={no_price:.3f}"
+        opp["net_profit"] = result["net_profit"]
+        return True
+
+    def _revalidate_multi_cross(self, opp: dict, original_profit: float, price_cache: dict | None) -> bool:
+        """Revalidate a MultiCross opportunity by re-checking each leg's price."""
+        outcome_legs = opp.get("_outcome_legs", [])
+        if not outcome_legs:
+            return False
+
+        prices = []
+        platforms = []
+        for leg in outcome_legs:
+            platform = leg.get("platform", "")
+            price = leg.get("price", 0)
+
+            # Try to get a fresh price from WS cache
+            cache_key = leg.get("_token_id") or leg.get("_kalshi_ticker", "")
+            cached = self._check_ws_cache(price_cache, platform, cache_key) if cache_key else None
+            if cached:
+                fresh_price = cached.get("yes_ask") or cached.get("yes", price)
+                prices.append(fresh_price)
+            else:
+                prices.append(price)
+            platforms.append(platform)
+
+        result = net_profit_multi_cross(prices, platforms)
+        threshold = self._get_revalidation_threshold(original_profit, opp)
+
+        if result["net_profit"] < threshold:
+            logger.info(f"Revalidation: multi-cross profit degraded {original_profit:.4f} -> {result['net_profit']:.4f}")
+            return False
+
         opp["net_profit"] = result["net_profit"]
         return True
 
@@ -967,12 +1008,41 @@ class ArbitrageExecutor:
                 {"platform": "ibkr", "conid": opportunity.get("_ibkr_no_conid", ""),
                  "side": "buy", "price": no_price},
             ]
+        elif opp_type.startswith("MultiCross"):
+            # Multi-outcome cross-platform: buy cheapest YES per outcome across platforms
+            outcome_legs = opportunity.get("_outcome_legs", [])
+            for leg in outcome_legs:
+                plat = leg.get("platform", "")
+                if plat and plat not in ENABLED_EXECUTION_PLATFORMS:
+                    logger.info(
+                        "MultiCross leg on '%s' blocked — not in ENABLED_EXECUTION_PLATFORMS",
+                        plat,
+                    )
+                    return []
+                if plat == "polymarket":
+                    legs.append({
+                        "platform": "polymarket", "side": "BUY", "token": "yes",
+                        "price": leg["price"],
+                        "_token_id": leg.get("_token_id", ""),
+                    })
+                elif plat == "kalshi":
+                    legs.append({
+                        "platform": "kalshi", "side": "yes", "action": "buy",
+                        "price": leg["price"],
+                        "_ticker": leg.get("_kalshi_ticker", ""),
+                    })
         elif opp_type == "TriangularCross":
             # 3-way cross-platform: cheapest YES + cheapest NO across 3+ platforms
             legs = self._build_cross_all_legs(opportunity, size)
         elif opp_type == "EventDivergence":
             # Single-leg directional trade based on Metaculus divergence signal
             legs = self._build_event_divergence_legs(opportunity, size)
+        elif opp_type in ("StalePriceOpp", "ResolutionSnipeOpp", "ConvergenceOpp"):
+            # Layer 2-4: single-leg directional trades
+            legs = self._build_directional_legs(opportunity, size)
+        elif opp_type == "MarketMake":
+            # Layer 3: market making — bid+ask pair
+            legs = self._build_mm_legs(opportunity, size)
         elif opp_type.startswith("Cross"):
             # One leg on Polymarket, one on Kalshi
             prices_str = opportunity.get("prices", "")
@@ -1200,6 +1270,78 @@ class ArbitrageExecutor:
 
         return [leg]
 
+    def _build_directional_legs(self, opportunity: dict, size: float) -> list[dict]:
+        """Build execution legs for directional opportunities (Stale, Resolution, Convergence).
+
+        These are single-leg trades similar to EventDivergence — buy YES or NO
+        on a single platform based on signal.
+        """
+        platform = opportunity.get("_platform", "")
+        direction = opportunity.get("_direction", "")
+        trade_price = opportunity.get("_trade_price") or opportunity.get("_price", 0)
+
+        if not platform or not direction or not trade_price:
+            return []
+
+        if platform not in ENABLED_EXECUTION_PLATFORMS:
+            logger.info("Directional leg on '%s' blocked — not in ENABLED_EXECUTION_PLATFORMS", platform)
+            return []
+
+        side = "yes" if direction == "BUY_YES" else "no"
+        leg = {"price": trade_price, "side": side}
+
+        if platform == "polymarket":
+            token_ids = opportunity.get("_token_ids", [])
+            token_idx = 0 if side == "yes" else 1
+            leg["platform"] = "polymarket"
+            leg["side"] = "BUY"
+            leg["token"] = side
+            leg["_token_id"] = token_ids[token_idx] if token_idx < len(token_ids) else ""
+        elif platform == "kalshi":
+            leg["platform"] = "kalshi"
+            leg["action"] = "buy"
+            leg["_ticker"] = opportunity.get("_kalshi_ticker", "")
+        elif platform == "gemini":
+            leg["platform"] = "gemini"
+            leg["side"] = "buy"
+            leg["outcome"] = side
+            leg["symbol"] = opportunity.get(
+                "_gm_yes_symbol" if side == "yes" else "_gm_no_symbol", "")
+        elif platform == "ibkr":
+            leg["platform"] = "ibkr"
+            leg["side"] = "buy"
+            leg["conid"] = opportunity.get(
+                "_ibkr_yes_conid" if side == "yes" else "_ibkr_no_conid", "")
+        else:
+            return []
+
+        return [leg]
+
+    def _build_mm_legs(self, opportunity: dict, size: float) -> list[dict]:
+        """Build execution legs for a market making opportunity.
+
+        Market making places both a bid and an ask as resting limit orders.
+        """
+        platform = opportunity.get("_platform", "")
+        bid_price = opportunity.get("_bid_price", 0)
+        ask_price = opportunity.get("_ask_price", 0)
+        market_key = opportunity.get("_market_key", "")
+
+        if not platform or not bid_price or not ask_price:
+            return []
+
+        if platform not in ENABLED_EXECUTION_PLATFORMS:
+            logger.info("MM leg on '%s' blocked — not in ENABLED_EXECUTION_PLATFORMS", platform)
+            return []
+
+        legs = [
+            {"platform": platform, "side": "BUY", "price": bid_price,
+             "token": "yes", "_market_key": market_key, "_mm_side": "bid"},
+            {"platform": platform, "side": "SELL", "price": ask_price,
+             "token": "yes", "_market_key": market_key, "_mm_side": "ask"},
+        ]
+        return legs
+
     def _parse_price(self, opportunity: dict, prefix: str) -> float | None:
         """Extract a price from the opportunity's prices string. Returns None on failure."""
         prices_str = opportunity.get("prices", "")
@@ -1412,7 +1554,7 @@ class ArbitrageExecutor:
                     db=self.db,
                 )
                 for i, leg in enumerate(legs):
-                    if results.get(i) and leg.get("_order_id"):
+                    if results.get(i):
                         fill_price = leg.get("price", 0)
                         hedger.queue_hedge(
                             trade_id=leg.get("_trade_id"),
@@ -1558,7 +1700,7 @@ class ArbitrageExecutor:
                     db=self.db,
                 )
                 for i, leg in enumerate(legs):
-                    if results.get(i) and leg.get("_order_id"):
+                    if results.get(i):
                         fill_price = leg.get("price", 0)
                         hedger.queue_hedge(
                             trade_id=leg.get("_trade_id"),
@@ -1631,12 +1773,23 @@ class ArbitrageExecutor:
             action = leg.get("action", "buy")
             # Convert dollar size to contracts (1 contract = $1 payout)
             count = max(1, int(size / price)) if price > 0 else 1
+
+            # Determine time-in-force based on config and leg position
+            leg_index = leg.get("_leg_index", 0)
+            if ORDER_TIME_IN_FORCE == "gtc":
+                tif = "gtc"
+            elif ORDER_TIME_IN_FORCE == "gtc_first_leg" and leg_index == 0:
+                tif = "gtc"
+            else:
+                tif = "fill_or_kill"
+
             resp = self.kalshi_client.place_order(
                 ticker=ticker,
                 side=side,
                 action=action,
                 count=count,
                 price_dollars=price,
+                time_in_force=tif,
             )
             if resp:
                 order = resp.get("order", resp)
@@ -1652,7 +1805,19 @@ class ArbitrageExecutor:
                         fill_price = price
                     return True, order_id, fill_price
                 elif status == "resting":
+                    # GTC order resting — wait up to GTC_ORDER_TIMEOUT then cancel
+                    timeout = GTC_ORDER_TIMEOUT if tif == "gtc" else FILL_POLL_TIMEOUT
                     fill_price = self._confirm_fill_kalshi(order_id, price)
+                    if fill_price is None and tif == "gtc":
+                        # Cancel unfilled GTC order
+                        logger.warning("Kalshi GTC order timed out (%.0fs), cancelling: %s",
+                                       timeout, order_id)
+                        try:
+                            self.kalshi_client.cancel_order(order_id)
+                        except Exception as e:
+                            logger.warning("Failed to cancel Kalshi GTC order %s: %s",
+                                           order_id, e)
+                        return False, order_id, None
                     return True, order_id, fill_price
                 logger.warning("Kalshi order not filled: status=%s ticker=%s resp=%s",
                                status, ticker, str(resp)[:300])
@@ -1792,8 +1957,8 @@ class ArbitrageExecutor:
 
         return False, None, None
 
-    def _confirm_fill_gemini(self, order_id: str, expected_price: float) -> float:
-        """Poll Gemini for fill confirmation. Returns actual fill price."""
+    def _confirm_fill_gemini(self, order_id: str, expected_price: float) -> float | None:
+        """Poll Gemini for fill confirmation. Returns actual fill price or None on timeout."""
         if not self.gemini_client or not order_id:
             return expected_price
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
@@ -1809,10 +1974,12 @@ class ArbitrageExecutor:
                 elif order_status in ("cancelled", "canceled", "expired"):
                     return expected_price
             time.sleep(FILL_POLL_INTERVAL)
-        return expected_price
+        logger.warning("Fill poll timeout for Gemini order %s after %.1fs — status uncertain",
+                        order_id, FILL_POLL_TIMEOUT)
+        return None
 
-    def _confirm_fill_ibkr(self, order_id: str, expected_price: float) -> float:
-        """Poll IBKR for fill confirmation. Returns actual fill price (dollars)."""
+    def _confirm_fill_ibkr(self, order_id: str, expected_price: float) -> float | None:
+        """Poll IBKR for fill confirmation. Returns actual fill price or None on timeout."""
         if not self.ibkr_client or not order_id:
             return expected_price
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
@@ -1828,10 +1995,12 @@ class ArbitrageExecutor:
                 elif order_status in ("cancelled", "expired", "inactive"):
                     return expected_price
             time.sleep(FILL_POLL_INTERVAL)
-        return expected_price
+        logger.warning("Fill poll timeout for IBKR order %s after %.1fs — status uncertain",
+                        order_id, FILL_POLL_TIMEOUT)
+        return None
 
-    def _confirm_fill_pm(self, order_id: str, expected_price: float) -> float:
-        """Poll Polymarket for fill confirmation. Returns actual fill price."""
+    def _confirm_fill_pm(self, order_id: str, expected_price: float) -> float | None:
+        """Poll Polymarket for fill confirmation. Returns actual fill price or None on timeout."""
         if not self.pm_trader or not order_id:
             return expected_price
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
@@ -1844,10 +2013,12 @@ class ArbitrageExecutor:
                 elif order_status in ("canceled", "expired"):
                     return expected_price
             time.sleep(FILL_POLL_INTERVAL)
-        return expected_price
+        logger.warning("Fill poll timeout for Polymarket order %s after %.1fs — status uncertain",
+                        order_id, FILL_POLL_TIMEOUT)
+        return None
 
-    def _confirm_fill_kalshi(self, order_id: str, expected_price: float) -> float:
-        """Poll Kalshi for fill confirmation. Returns actual fill price."""
+    def _confirm_fill_kalshi(self, order_id: str, expected_price: float) -> float | None:
+        """Poll Kalshi for fill confirmation. Returns actual fill price or None on timeout."""
         if not self.kalshi_client or not order_id:
             return expected_price
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
@@ -1863,10 +2034,12 @@ class ArbitrageExecutor:
                 elif order_status in ("canceled", "expired"):
                     return expected_price
             time.sleep(FILL_POLL_INTERVAL)
-        return expected_price
+        logger.warning("Fill poll timeout for Kalshi order %s after %.1fs — status uncertain",
+                        order_id, FILL_POLL_TIMEOUT)
+        return None
 
-    def _confirm_fill_betfair(self, bet_id: str, expected_price: float) -> float:
-        """Poll Betfair for fill confirmation. Returns actual fill price."""
+    def _confirm_fill_betfair(self, bet_id: str, expected_price: float) -> float | None:
+        """Poll Betfair for fill confirmation. Returns actual fill price or None on timeout."""
         if not self.betfair_client or not bet_id:
             return expected_price
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
@@ -1882,10 +2055,12 @@ class ArbitrageExecutor:
                 elif order_status in ("CANCELLED", "EXPIRED", "LAPSED"):
                     return expected_price
             time.sleep(FILL_POLL_INTERVAL)
-        return expected_price
+        logger.warning("Fill poll timeout for Betfair bet %s after %.1fs — status uncertain",
+                        bet_id, FILL_POLL_TIMEOUT)
+        return None
 
-    def _confirm_fill_smarkets(self, order_id: str, expected_price: float) -> float:
-        """Poll Smarkets for fill confirmation. Returns actual fill price."""
+    def _confirm_fill_smarkets(self, order_id: str, expected_price: float) -> float | None:
+        """Poll Smarkets for fill confirmation. Returns actual fill price or None on timeout."""
         if not self.smarkets_client or not order_id:
             return expected_price
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
@@ -1901,10 +2076,12 @@ class ArbitrageExecutor:
                 elif order_status in ("cancelled", "expired"):
                     return expected_price
             time.sleep(FILL_POLL_INTERVAL)
-        return expected_price
+        logger.warning("Fill poll timeout for Smarkets order %s after %.1fs — status uncertain",
+                        order_id, FILL_POLL_TIMEOUT)
+        return None
 
-    def _confirm_fill_sxbet(self, order_id: str, expected_price: float) -> float:
-        """Poll SX Bet for fill confirmation. Returns actual fill price."""
+    def _confirm_fill_sxbet(self, order_id: str, expected_price: float) -> float | None:
+        """Poll SX Bet for fill confirmation. Returns actual fill price or None on timeout."""
         if not self.sxbet_client or not order_id:
             return expected_price
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
@@ -1920,10 +2097,12 @@ class ArbitrageExecutor:
                 elif order_status in ("CANCELLED", "EXPIRED"):
                     return expected_price
             time.sleep(FILL_POLL_INTERVAL)
-        return expected_price
+        logger.warning("Fill poll timeout for SX Bet order %s after %.1fs — status uncertain",
+                        order_id, FILL_POLL_TIMEOUT)
+        return None
 
-    def _confirm_fill_matchbook(self, order_id: str, expected_price: float) -> float:
-        """Poll Matchbook for fill confirmation. Returns actual fill price."""
+    def _confirm_fill_matchbook(self, order_id: str, expected_price: float) -> float | None:
+        """Poll Matchbook for fill confirmation. Returns actual fill price or None on timeout."""
         if not self.matchbook_client or not order_id:
             return expected_price
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
@@ -1939,7 +2118,9 @@ class ArbitrageExecutor:
                 elif order_status in ("cancelled", "expired"):
                     return expected_price
             time.sleep(FILL_POLL_INTERVAL)
-        return expected_price
+        logger.warning("Fill poll timeout for Matchbook order %s after %.1fs — status uncertain",
+                        order_id, FILL_POLL_TIMEOUT)
+        return None
 
     def _cancel_leg(self, leg: dict) -> bool:
         """Attempt to cancel a filled/resting order for cleanup. Returns True if successful."""

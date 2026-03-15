@@ -6,8 +6,14 @@ import threading
 import time
 
 import requests
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
+
+
+class _RateLimitError(Exception):
+    """Raised when Betfair returns HTTP 429 — triggers tenacity retry."""
+
 
 BETFAIR_SSO_URL = "https://identitysso.betfair.com/api/login"
 BETFAIR_EXCHANGE_URL = "https://api.betfair.com/exchange/betting/rest/v1.0"
@@ -34,6 +40,9 @@ class BetfairClient:
 
     def __init__(self):
         self.session = requests.Session()
+        proxy_url = os.getenv("BETFAIR_PROXY_URL")
+        if proxy_url:
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
         self.api_key = None
         self.ssoid = None
         self.authenticated = False
@@ -91,6 +100,12 @@ class BetfairClient:
             logger.error("Betfair login request failed: %s", e)
             return False
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout, _RateLimitError)),
+        reraise=True,
+    )
     def _request(self, endpoint: str, params: dict = None) -> dict | None:
         """Make an authenticated request to the Betfair Exchange API.
 
@@ -114,8 +129,13 @@ class BetfairClient:
             )
             if resp.status_code == 200:
                 return resp.json()
+            if resp.status_code == 429:
+                logger.warning("Betfair rate limited on %s, retrying...", endpoint)
+                raise _RateLimitError(f"Betfair 429 on {endpoint}")
             logger.warning("Betfair %s returned %s: %s", endpoint, resp.status_code, resp.text[:200])
             return None
+        except (requests.ConnectionError, requests.Timeout, _RateLimitError):
+            raise  # Let tenacity retry these
         except requests.RequestException as e:
             logger.warning("Betfair %s failed: %s", endpoint, e)
             return None

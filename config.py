@@ -111,6 +111,10 @@ REENTRY_IMPROVEMENT_THRESHOLD = _env_float("REENTRY_IMPROVEMENT_THRESHOLD", "0.2
 DYNAMIC_SIZING_ENABLED = _env_bool("DYNAMIC_SIZING_ENABLED", "true")
 SIZING_AGGRESSIVENESS = _env_float("SIZING_AGGRESSIVENESS", "0.5")
 
+# Kelly criterion position sizing
+KELLY_FRACTION = _env_float("KELLY_FRACTION", "0.5")
+KELLY_MAX_FRACTION = _env_float("KELLY_MAX_FRACTION", "0.25")
+
 # Execution
 DRY_RUN = _env_bool("DRY_RUN", "true")
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "semi-auto")
@@ -156,7 +160,7 @@ MIN_PROFIT_AMOUNT = _env_float("MIN_PROFIT_AMOUNT", "0.02")
 
 # Fill polling (Polymarket only; Kalshi FOK fills instantly)
 FILL_POLL_INTERVAL = _env_float("FILL_POLL_INTERVAL", "0.1")
-FILL_POLL_TIMEOUT = _env_float("FILL_POLL_TIMEOUT", "2.0")
+FILL_POLL_TIMEOUT = _env_float("FILL_POLL_TIMEOUT", "5.0")
 
 # Partial fill hedging
 HEDGE_ENABLED = _env_bool("HEDGE_ENABLED", "true")
@@ -176,6 +180,11 @@ SMARKETS_COMMISSION_RATE = _env_float("SMARKETS_COMMISSION_RATE", "0.02")
 # Proxy configuration
 POLYMARKET_PROXY_URL = os.getenv("POLYMARKET_PROXY_URL")
 KALSHI_PROXY_URL = os.getenv("KALSHI_PROXY_URL")
+BETFAIR_PROXY_URL = os.getenv("BETFAIR_PROXY_URL")
+SMARKETS_PROXY_URL = os.getenv("SMARKETS_PROXY_URL")
+SXBET_PROXY_URL = os.getenv("SXBET_PROXY_URL")
+MATCHBOOK_PROXY_URL = os.getenv("MATCHBOOK_PROXY_URL")
+GEMINI_PROXY_URL = os.getenv("GEMINI_PROXY_URL")
 
 # Platform credentials (presence-checked, not stored)
 POLYMARKET_PRIVATE_KEY = os.getenv("POLYMARKET_PRIVATE_KEY")
@@ -215,6 +224,7 @@ IBKR_ORDER_RATE_LIMIT = _env_float("IBKR_ORDER_RATE_LIMIT", "5.0")
 
 # Metaculus (read-only signal source, works without API key)
 METACULUS_API_KEY = os.getenv("METACULUS_API_KEY")
+METACULUS_CACHE_TTL = _env_float("METACULUS_CACHE_TTL", "300")
 
 # Dynamic fee arbitrage (GasMonitor)
 POLYGON_RPC_URL = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
@@ -225,6 +235,29 @@ GAS_PRICE_CACHE_TTL = _env_float("GAS_PRICE_CACHE_TTL", "15.0")
 EVENT_DIVERGENCE_THRESHOLD = _env_float("EVENT_DIVERGENCE_THRESHOLD", "0.10")
 EVENT_MONITOR_ENABLED = _env_bool("EVENT_MONITOR_ENABLED", "false")
 
+# Stale price detection
+STALE_PRICE_THRESHOLD = _env_float("STALE_PRICE_THRESHOLD", "30.0")
+STALE_PRICE_MOVE_PCT = _env_float("STALE_PRICE_MOVE_PCT", "0.03")
+
+# Market making
+MM_ENABLED = _env_bool("MM_ENABLED", "false")
+MM_MIN_SPREAD = _env_float("MM_MIN_SPREAD", "0.03")
+MM_QUOTE_SIZE = _env_float("MM_QUOTE_SIZE", "5.0")
+MM_MAX_INVENTORY = _env_float("MM_MAX_INVENTORY", "50.0")
+MM_MAX_TOTAL_EXPOSURE = _env_float("MM_MAX_TOTAL_EXPOSURE", "500.0")
+MM_REFRESH_INTERVAL = _env_float("MM_REFRESH_INTERVAL", "10.0")
+
+# Convergence detection
+CONVERGENCE_MIN_DIVERGENCE = _env_float("CONVERGENCE_MIN_DIVERGENCE", "0.05")
+CONVERGENCE_MIN_PLATFORMS = _env_int("CONVERGENCE_MIN_PLATFORMS", "3")
+
+# Signal aggregation
+SIGNAL_CACHE_TTL = _env_float("SIGNAL_CACHE_TTL", "300.0")
+
+# Kelly criterion position sizing
+KELLY_FRACTION = _env_float("KELLY_FRACTION", "0.5")
+KELLY_MAX_FRACTION = _env_float("KELLY_MAX_FRACTION", "0.25")
+
 # Notifications
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Slack/Discord/generic URL
 WEBHOOK_MIN_PROFIT = _env_float("WEBHOOK_MIN_PROFIT", "0.01")
@@ -234,6 +267,19 @@ DATA_DIR = os.getenv("DATA_DIR", ".")
 
 # Concurrent execution (submit both legs simultaneously for supported platforms)
 CONCURRENT_EXECUTION = _env_bool("CONCURRENT_EXECUTION", "true")
+
+# Order time-in-force strategy.
+# "fok" = Fill-or-Kill (default): taker orders, immediate fill or cancel.
+#   Safest for arb — you know instantly if you got filled.
+# "gtc" = Good-Til-Cancelled: maker/limit orders that rest on the book.
+#   Saves taker fees (e.g. Kalshi 7%), but risk of partial/no fill.
+# "gtc_first_leg" = Use GTC for the first leg only (capture maker pricing),
+#   then FOK for the hedge leg (guarantee execution).
+ORDER_TIME_IN_FORCE = os.getenv("ORDER_TIME_IN_FORCE", "fok").lower()
+
+# Maximum seconds to wait for a GTC order to fill before cancelling.
+# Only applies when ORDER_TIME_IN_FORCE is "gtc" or "gtc_first_leg".
+GTC_ORDER_TIMEOUT = _env_float("GTC_ORDER_TIMEOUT", "30.0")
 
 # Balance caching (avoids redundant balance API calls within a scan cycle)
 BALANCE_CACHE_TTL = _env_float("BALANCE_CACHE_TTL", "10.0")
@@ -260,6 +306,34 @@ DASHBOARD_PORT = _env_int("DASHBOARD_PORT", _dashboard_port_default)
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
 DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "")  # empty = no auth
 DASHBOARD_REFRESH_SECONDS = _env_int("DASHBOARD_REFRESH_SECONDS", "15")
+
+# ---------------------------------------------------------------------------
+# Previously hardcoded constants — extracted for tunability
+# ---------------------------------------------------------------------------
+
+# Executor: cooldown (seconds) after a failed trade before retrying same opp
+FAILED_TRADE_COOLDOWN = _env_float("FAILED_TRADE_COOLDOWN", "300")
+
+# Continuous mode: max concurrent WS-triggered executions (semaphore count)
+MAX_CONCURRENT_WS_EXECUTIONS = _env_int("MAX_CONCURRENT_WS_EXECUTIONS", "5")
+
+# Price cache staleness (seconds) — different thresholds per use-case
+PRICE_CACHE_EVICTION_AGE = _env_float("PRICE_CACHE_EVICTION_AGE", "60")
+WS_CACHE_MAX_AGE_SCAN = _env_float("WS_CACHE_MAX_AGE_SCAN", "30")
+WS_CACHE_MAX_AGE_REVALIDATION = _env_float("WS_CACHE_MAX_AGE_REVALIDATION", "5")
+
+# WS feed stale detection threshold (seconds without any message)
+WS_STALE_FEED_SECONDS = _env_float("WS_STALE_FEED_SECONDS", "120")
+
+# Parallel workers for depth/order book fetches (separate from scan workers)
+DEPTH_FETCH_WORKERS = _env_int("DEPTH_FETCH_WORKERS", "8")
+
+# Market title truncation length (for display and DB storage)
+MARKET_TITLE_MAX_LEN = _env_int("MARKET_TITLE_MAX_LEN", "60")
+
+# Dashboard query limits
+DASHBOARD_RECENT_TRADES_LIMIT = _env_int("DASHBOARD_RECENT_TRADES_LIMIT", "100")
+DASHBOARD_PNL_HISTORY_DAYS = _env_int("DASHBOARD_PNL_HISTORY_DAYS", "30")
 
 # Metrics & Alerting
 METRICS_ENABLED = _env_bool("METRICS_ENABLED", "true")
@@ -331,6 +405,7 @@ def validate_config() -> list[str]:
         "BALANCE_CACHE_TTL": BALANCE_CACHE_TTL,
         "ALERT_RATE_LIMIT_SECONDS": ALERT_RATE_LIMIT_SECONDS,
         "ALERT_LOSS_STREAK_THRESHOLD": ALERT_LOSS_STREAK_THRESHOLD,
+        "STALE_PRICE_THRESHOLD": STALE_PRICE_THRESHOLD,
     }
     for name, val in _positive.items():
         if val <= 0:
@@ -356,6 +431,14 @@ def validate_config() -> list[str]:
     if not (0 <= SIZING_AGGRESSIVENESS <= 1):
         raise ConfigError(
             f"SIZING_AGGRESSIVENESS={SIZING_AGGRESSIVENESS} must be in [0, 1]"
+        )
+    if not (0 < KELLY_FRACTION <= 1):
+        raise ConfigError(
+            f"KELLY_FRACTION={KELLY_FRACTION} must be in (0, 1]"
+        )
+    if not (0 < KELLY_MAX_FRACTION <= 1):
+        raise ConfigError(
+            f"KELLY_MAX_FRACTION={KELLY_MAX_FRACTION} must be in (0, 1]"
         )
     if not (0 <= BETFAIR_COMMISSION_RATE < 1):
         raise ConfigError(
@@ -396,6 +479,11 @@ def validate_config() -> list[str]:
         raise ConfigError(
             f"SEMANTIC_MATCH_THRESHOLD={SEMANTIC_MATCH_THRESHOLD} "
             f"must be in (0, 1]"
+        )
+    if not (0 < STALE_PRICE_MOVE_PCT < 1):
+        raise ConfigError(
+            f"STALE_PRICE_MOVE_PCT={STALE_PRICE_MOVE_PCT} "
+            f"must be in (0, 1)"
         )
 
     # --- Relationship checks ---

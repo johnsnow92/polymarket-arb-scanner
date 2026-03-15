@@ -31,7 +31,7 @@ from scans.cross import (  # noqa: F401
     _CROSS_FEE_FUNCS,
 )
 from scans.kalshi import scan_kalshi_binary, scan_kalshi_multi, _fetch_kalshi_data  # noqa: F401
-from scans.spread import scan_spread_polymarket, scan_spread_kalshi  # noqa: F401
+from scans.spread import scan_spread_polymarket  # noqa: F401
 from scans.betfair import scan_betfair_backall, scan_betfair_backlay  # noqa: F401
 from scans.smarkets import scan_smarkets_backall, scan_smarkets_backlay  # noqa: F401
 from scans.sxbet import scan_sxbet_backall, scan_sxbet_backlay  # noqa: F401
@@ -39,6 +39,10 @@ from scans.matchbook import scan_matchbook_backall, scan_matchbook_backlay  # no
 from scans.gemini import scan_gemini_binary, scan_gemini_multi  # noqa: F401
 from scans.ibkr import scan_ibkr_binary  # noqa: F401
 from scans.triangular import scan_triangular  # noqa: F401
+from scans.multi_cross import scan_multi_cross  # noqa: F401
+from scans.stale import scan_stale_prices  # noqa: F401
+from scans.resolution import scan_resolution_snipes  # noqa: F401
+from scans.convergence import scan_convergence  # noqa: F401
 from display import display_results as _display_results  # noqa: F401
 from continuous import check_settlements as _check_settlements, run_continuous as _run_continuous  # noqa: F401
 from cli import main, _run_oneshot  # noqa: F401

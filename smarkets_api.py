@@ -6,8 +6,14 @@ import threading
 import time
 
 import requests
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
+
+
+class _RateLimitError(Exception):
+    """Raised when Smarkets returns HTTP 429 — triggers tenacity retry."""
+
 
 SMARKETS_API_URL = "https://api.smarkets.com/v3"
 SMARKETS_AUTH_URL = "https://api.smarkets.com/v3/sessions/"
@@ -33,6 +39,9 @@ class SmarketsClient:
 
     def __init__(self):
         self.session = requests.Session()
+        proxy_url = os.getenv("SMARKETS_PROXY_URL")
+        if proxy_url:
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
         self.token = None
         self.authenticated = False
 
@@ -73,6 +82,12 @@ class SmarketsClient:
             logger.error("Smarkets auth request failed: %s", exc)
             return False
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout, _RateLimitError)),
+        reraise=True,
+    )
     def _request(self, method: str, endpoint: str, params: dict = None,
                  json_data: dict = None) -> dict | None:
         """Make an authenticated API request.
@@ -97,9 +112,14 @@ class SmarketsClient:
                                         json=json_data, timeout=30)
             if resp.status_code == 200:
                 return resp.json()
+            if resp.status_code == 429:
+                logger.warning("Smarkets rate limited on %s %s, retrying...", method, endpoint)
+                raise _RateLimitError(f"Smarkets 429 on {method} {endpoint}")
             logger.warning("Smarkets %s %s returned %s: %s",
                            method, endpoint, resp.status_code, resp.text[:200])
             return None
+        except (requests.ConnectionError, requests.Timeout, _RateLimitError):
+            raise  # Let tenacity retry these
         except requests.RequestException as exc:
             logger.warning("Smarkets %s %s failed: %s", method, endpoint, exc)
             return None

@@ -48,7 +48,6 @@ from scans import (
     _fetch_kalshi_data,
     capital_efficiency_score,
     scan_spread_polymarket,
-    scan_spread_kalshi,
     scan_betfair_backall,
     scan_betfair_backlay,
     scan_smarkets_backall,
@@ -61,6 +60,10 @@ from scans import (
     scan_gemini_multi,
     scan_ibkr_binary,
     scan_triangular,
+    scan_multi_cross,
+    scan_stale_prices,
+    scan_resolution_snipes,
+    scan_convergence,
 )
 from config import (
     DEFAULT_MIN_PROFIT,
@@ -206,10 +209,6 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             spread_pm = scan_spread_polymarket(poly_markets, min_profit)
             all_opportunities.extend(spread_pm)
             logger.info("Found %d Polymarket spread opportunities.", len(spread_pm))
-        if kalshi_client:
-            spread_k = scan_spread_kalshi(kalshi_client, min_profit, kalshi_data=kalshi_data)
-            all_opportunities.extend(spread_k)
-            logger.info("Found %d Kalshi spread opportunities.", len(spread_k))
 
     if args.mode in ("all", "betfair"):
         betfair = extra_clients.get("betfair")
@@ -324,6 +323,94 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         all_opportunities.extend(tri_opps)
         logger.info("Found %d triangular opportunities.", len(tri_opps))
 
+    # Multi-outcome cross-platform scan
+    if args.mode in ("all", "multi-cross") and poly_events and kalshi_client:
+        logger.info("--- Multi-outcome cross-platform scan ---")
+        mc_opps = scan_multi_cross(
+            poly_events, kalshi_client, min_profit,
+            kalshi_data=kalshi_data,
+        )
+        all_opportunities.extend(mc_opps)
+        logger.info("Found %d multi-cross opportunities.", len(mc_opps))
+
+    # Stale price scan (Layer 2)
+    if args.mode in ("all", "stale"):
+        logger.info("--- Stale price scan ---")
+        try:
+            from price_tracker import PriceTracker
+            from config import STALE_PRICE_THRESHOLD, STALE_PRICE_MOVE_PCT
+            # Build price tracker from current data
+            tracker = PriceTracker(
+                stale_threshold_seconds=STALE_PRICE_THRESHOLD,
+                move_threshold_pct=STALE_PRICE_MOVE_PCT,
+            )
+            # Seed tracker with known prices from cross-platform matches
+            # (stale scan is most useful when we have multi-platform data)
+            stale_opps = scan_stale_prices(
+                tracker, [], min_move_pct=STALE_PRICE_MOVE_PCT,
+                min_stale_seconds=STALE_PRICE_THRESHOLD, min_profit=min_profit,
+            )
+            all_opportunities.extend(stale_opps)
+            logger.info("Found %d stale price opportunities.", len(stale_opps))
+        except Exception as exc:
+            logger.warning("Stale price scan failed: %s", exc)
+
+    # Resolution sniping scan (Layer 2)
+    if args.mode in ("all", "resolution"):
+        logger.info("--- Resolution sniping scan ---")
+        try:
+            if poly_markets:
+                res_opps = scan_resolution_snipes(
+                    poly_markets, platform="polymarket", min_profit=min_profit,
+                )
+                all_opportunities.extend(res_opps)
+                logger.info("Found %d resolution snipe opportunities.", len(res_opps))
+        except Exception as exc:
+            logger.warning("Resolution sniping scan failed: %s", exc)
+
+    # Convergence scan (Layer 4)
+    if args.mode in ("all", "convergence"):
+        logger.info("--- Cross-platform convergence scan ---")
+        try:
+            from config import CONVERGENCE_MIN_DIVERGENCE, CONVERGENCE_MIN_PLATFORMS
+            conv_opps = scan_convergence(
+                [], min_divergence=CONVERGENCE_MIN_DIVERGENCE,
+                min_platforms=CONVERGENCE_MIN_PLATFORMS, min_profit=min_profit,
+            )
+            all_opportunities.extend(conv_opps)
+            logger.info("Found %d convergence opportunities.", len(conv_opps))
+        except Exception as exc:
+            logger.warning("Convergence scan failed: %s", exc)
+
+    # Market making (Layer 3) — generate pseudo-opportunities for display
+    if args.mode == "mm":
+        logger.info("--- Market making scan ---")
+        try:
+            from market_maker import MarketMaker
+            from config import MM_MIN_SPREAD, MM_QUOTE_SIZE, MM_MAX_INVENTORY, MM_MAX_TOTAL_EXPOSURE
+            mm = MarketMaker(
+                min_spread=MM_MIN_SPREAD,
+                quote_size=MM_QUOTE_SIZE,
+                max_inventory=MM_MAX_INVENTORY,
+                max_total_exposure=MM_MAX_TOTAL_EXPOSURE,
+                dry_run=True,
+            )
+            # Register liquid markets for MM
+            if poly_markets:
+                for mkt in poly_markets[:20]:
+                    title = mkt.get("question") or mkt.get("title", "")
+                    tokens = mkt.get("tokens", [])
+                    if tokens:
+                        price = tokens[0].get("price")
+                        if price and 0.1 < float(price) < 0.9:
+                            cid = mkt.get("condition_id", title[:30])
+                            mm.add_market(cid, "polymarket", float(price))
+            mm_opps = mm.generate_opportunities()
+            all_opportunities.extend(mm_opps)
+            logger.info("Found %d market making opportunities.", len(mm_opps))
+        except Exception as exc:
+            logger.warning("Market making scan failed: %s", exc)
+
     # Filter by minimum depth if specified
     if args.min_depth > 0:
         before = len(all_opportunities)
@@ -364,6 +451,223 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         logger.info("Executed: %d/%d", executed, len(all_opportunities))
 
 
+def _run_report(json_output: bool = False):
+    """Print a P&L report from the trade database and exit.
+
+    Displays cumulative P&L, daily P&L, open positions, per-strategy stats,
+    and recent trade history.
+
+    Args:
+        json_output: If True, print raw JSON instead of formatted tables.
+    """
+    import json as json_mod
+
+    db = TradeDB()
+    try:
+        cumulative = db.get_cumulative_pnl()
+        daily = db.get_daily_pnl()
+        daily_history = db.get_daily_pnl_history(days=30)
+        open_count = db.get_open_positions_count()
+        positions = db.get_open_positions()
+        strategy_stats = db.get_opportunity_stats_by_type()
+        recent_trades = db.get_recent_trades(limit=20)
+        avg_slippage = db.get_avg_slippage()
+        db_stats = db.get_db_stats()
+    finally:
+        db.close()
+
+    if json_output:
+        report = {
+            "cumulative_pnl": cumulative,
+            "daily_pnl": daily,
+            "open_positions_count": open_count,
+            "open_positions": positions,
+            "daily_history": daily_history,
+            "strategy_stats": strategy_stats,
+            "recent_trades": recent_trades,
+            "avg_slippage": avg_slippage,
+            "db_stats": db_stats,
+        }
+        print(json_mod.dumps(report, indent=2, default=str))
+        return
+
+    print("=" * 72)
+    print("  POLYMARKET ARBITRAGE SCANNER — P&L REPORT")
+    print("=" * 72)
+    print()
+
+    # Summary
+    print("  Cumulative P&L (settled):  ${:.4f}".format(cumulative))
+    print("  Today's P&L (est):        ${:.4f}".format(daily))
+    print("  Open positions:            {}".format(open_count))
+    print("  Avg slippage:              ${:.6f}".format(avg_slippage))
+    print()
+
+    # Database stats
+    if db_stats:
+        print("  Database:")
+        for table, count in db_stats.items():
+            print("    {:20s} {:>6d} rows".format(table, count))
+        print()
+
+    # Strategy breakdown
+    if strategy_stats:
+        print("-" * 72)
+        print("  STRATEGY BREAKDOWN")
+        print("-" * 72)
+        fmt = "  {:20s}  {:>6s}  {:>10s}  {:>10s}  {:>10s}"
+        print(fmt.format("Type", "Count", "Avg ROI", "Total $", "Avg $"))
+        print(fmt.format("-" * 20, "-" * 6, "-" * 10, "-" * 10, "-" * 10))
+        for s in strategy_stats:
+            print(fmt.format(
+                str(s.get("type", "?"))[:20],
+                str(s.get("count", 0)),
+                "{:.2f}%".format(s.get("avg_roi", 0) * 100),
+                "${:.4f}".format(s.get("total_profit", 0)),
+                "${:.4f}".format(s.get("avg_profit", 0)),
+            ))
+        print()
+
+    # Daily history (last 30 days)
+    if daily_history:
+        print("-" * 72)
+        print("  DAILY P&L (last 30 days)")
+        print("-" * 72)
+        for day in daily_history:
+            pnl = day.get("pnl", 0)
+            marker = "+" if pnl >= 0 else ""
+            print("  {}  {}${:.4f}".format(day.get("date", "?"), marker, pnl))
+        print()
+
+    # Open positions
+    if positions:
+        print("-" * 72)
+        print("  OPEN POSITIONS ({})".format(open_count))
+        print("-" * 72)
+        for p in positions[:20]:
+            print("  {} | {} | expected ${:.4f}".format(
+                str(p.get("market", "?"))[:40],
+                p.get("platform", "?"),
+                p.get("expected_pnl", 0),
+            ))
+        if open_count > 20:
+            print("  ... and {} more".format(open_count - 20))
+        print()
+
+    # Recent trades
+    if recent_trades:
+        print("-" * 72)
+        print("  RECENT TRADES (last 20)")
+        print("-" * 72)
+        for t in recent_trades:
+            slip = t.get("slippage")
+            slip_str = " slip=${:.6f}".format(slip) if slip else ""
+            print("  {} | {} {} @ ${:.4f} | {}{}".format(
+                str(t.get("timestamp", "?"))[:19],
+                t.get("platform", "?"),
+                t.get("side", "?"),
+                t.get("price", 0),
+                t.get("status", "?"),
+                slip_str,
+            ))
+        print()
+
+    print("=" * 72)
+
+
+def _run_analyze(json_output: bool = False):
+    """Print historical performance analysis from the trade database.
+
+    Computes win rate, Sharpe ratio, max drawdown, average hold time,
+    and per-strategy performance breakdown.
+
+    Args:
+        json_output: If True, print raw JSON instead of formatted report.
+    """
+    import json as json_mod
+
+    db = TradeDB()
+    try:
+        stats = db.get_performance_stats()
+        daily_history = db.get_daily_pnl_history(days=90)
+    finally:
+        db.close()
+
+    if json_output:
+        report = {"performance": stats, "daily_history_90d": daily_history}
+        print(json_mod.dumps(report, indent=2, default=str))
+        return
+
+    print("=" * 72)
+    print("  POLYMARKET ARBITRAGE SCANNER — PERFORMANCE ANALYSIS")
+    print("=" * 72)
+    print()
+
+    total = stats.get("total_settled", 0)
+    if total == 0:
+        print("  No settled positions found. Run the scanner first.")
+        print("=" * 72)
+        return
+
+    print("  Total settled positions:  {}".format(total))
+    print("  Win rate:                 {:.1f}%".format(stats.get("win_rate", 0) * 100))
+    print("  Total P&L:               ${:.4f}".format(stats.get("total_pnl", 0)))
+    print("  Average P&L per trade:   ${:.4f}".format(stats.get("avg_pnl", 0)))
+    print("  Max win:                 ${:.4f}".format(stats.get("max_win", 0)))
+    print("  Max loss:                ${:.4f}".format(stats.get("max_loss", 0)))
+    print("  Sharpe ratio:            {:.4f}".format(stats.get("sharpe_ratio", 0)))
+
+    avg_hold = stats.get("avg_hold_seconds", 0)
+    if avg_hold > 86400:
+        print("  Avg hold time:           {:.1f} days".format(avg_hold / 86400))
+    elif avg_hold > 3600:
+        print("  Avg hold time:           {:.1f} hours".format(avg_hold / 3600))
+    elif avg_hold > 0:
+        print("  Avg hold time:           {:.0f} seconds".format(avg_hold))
+    print()
+
+    # Strategy breakdown
+    breakdown = stats.get("strategy_breakdown", [])
+    if breakdown:
+        print("-" * 72)
+        print("  STRATEGY PERFORMANCE")
+        print("-" * 72)
+        fmt = "  {:22s}  {:>5s}  {:>8s}  {:>10s}  {:>10s}"
+        print(fmt.format("Strategy", "Count", "Win %", "Total $", "Avg $"))
+        print(fmt.format("-" * 22, "-" * 5, "-" * 8, "-" * 10, "-" * 10))
+        for s in sorted(breakdown, key=lambda x: x.get("total_pnl", 0), reverse=True):
+            print(fmt.format(
+                str(s.get("type", "?"))[:22],
+                str(s.get("count", 0)),
+                "{:.1f}%".format(s.get("win_rate", 0) * 100),
+                "${:.4f}".format(s.get("total_pnl", 0)),
+                "${:.4f}".format(s.get("avg_pnl", 0)),
+            ))
+        print()
+
+    # Daily P&L chart (last 90 days, text-based)
+    if daily_history:
+        print("-" * 72)
+        print("  DAILY P&L (last 90 days)")
+        print("-" * 72)
+        max_pnl = max(abs(d.get("pnl", 0)) for d in daily_history) or 1
+        bar_width = 40
+        for day in daily_history[-30:]:  # Show last 30 for readability
+            pnl = day.get("pnl", 0)
+            bar_len = int(abs(pnl) / max_pnl * bar_width) if max_pnl > 0 else 0
+            if pnl >= 0:
+                bar = " " * bar_width + "|" + "#" * bar_len
+            else:
+                bar = " " * (bar_width - bar_len) + "#" * bar_len + "|"
+            marker = "+" if pnl >= 0 else ""
+            print("  {} {:>+9.4f} {}".format(day.get("date", "?"), pnl, bar.rstrip()))
+        if len(daily_history) > 30:
+            print("  ... ({} more days)".format(len(daily_history) - 30))
+        print()
+
+    print("=" * 72)
+
+
 def main():
     """CLI entry point: parse arguments, initialise clients, and run scans.
 
@@ -381,9 +685,10 @@ def main():
         "--mode",
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
                  "spread", "betfair", "smarkets", "sxbet", "matchbook",
-                 "gemini", "ibkr", "event", "triangular"],
+                 "gemini", "ibkr", "event", "triangular", "multi-cross",
+                 "stale", "resolution", "convergence", "mm"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm",
     )
     parser.add_argument(
         "--min-profit",
@@ -467,10 +772,30 @@ def main():
         default=None,
         help="Log file path (default: from .env or none)",
     )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Print P&L report and exit (no scanning or trading)",
+    )
+    parser.add_argument(
+        "--analyze",
+        action="store_true",
+        help="Print historical performance analysis and exit",
+    )
     args = parser.parse_args()
 
     # Configure logging first (before any logger calls)
     setup_logging(level=args.log_level, log_file=args.log_file)
+
+    # Report mode: print P&L and exit (no platform auth needed)
+    if args.report:
+        _run_report(json_output=args.json)
+        return
+
+    # Analysis mode: print historical performance and exit
+    if args.analyze:
+        _run_analyze(json_output=args.json)
+        return
 
     min_profit = args.min_profit or float(os.getenv("MIN_PROFIT_THRESHOLD", DEFAULT_MIN_PROFIT))
 
