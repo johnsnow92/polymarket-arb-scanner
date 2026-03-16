@@ -32,6 +32,9 @@ class MatchbookClient:
 
     def __init__(self):
         self.session = requests.Session()
+        proxy_url = os.getenv("MATCHBOOK_PROXY_URL")
+        if proxy_url:
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
         self.token = None
         self.authenticated = False
 

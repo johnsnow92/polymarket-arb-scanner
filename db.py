@@ -482,6 +482,85 @@ class TradeDB:
             ).fetchone()
             return round(row["total"], 4)
 
+    def get_failed_trades(self, limit: int = 50) -> list[dict]:
+        """Get recent failed trades with opportunity context.
+
+        Args:
+            limit: Maximum number of failed trades to return.
+
+        Returns:
+            List of failed trade dicts enriched with opportunity type and market.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT t.*, o.type as opp_type, o.market as opp_market
+                   FROM trades t
+                   LEFT JOIN opportunities o ON t.opportunity_id = o.id
+                   WHERE t.status = 'failed'
+                   ORDER BY t.id DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_failure_stats(self) -> dict:
+        """Get failure statistics: counts by platform, by hour, and overall rate.
+
+        Returns:
+            Dict with keys 'by_platform', 'by_hour', 'total_failed',
+            'total_trades', and 'failure_rate'.
+        """
+        with self._lock:
+            # Total counts
+            total_row = self.conn.execute(
+                "SELECT COUNT(*) as total FROM trades"
+            ).fetchone()
+            failed_row = self.conn.execute(
+                "SELECT COUNT(*) as total FROM trades WHERE status = 'failed'"
+            ).fetchone()
+            total = total_row["total"]
+            failed = failed_row["total"]
+
+            # By platform
+            platform_rows = self.conn.execute(
+                """SELECT platform, COUNT(*) as count
+                   FROM trades WHERE status = 'failed'
+                   GROUP BY platform ORDER BY count DESC"""
+            ).fetchall()
+
+            # By hour (last 24 hours, hourly buckets)
+            hour_rows = self.conn.execute(
+                """SELECT strftime('%Y-%m-%dT%H:00:00', timestamp) as hour,
+                          COUNT(*) as failed_count,
+                          (SELECT COUNT(*) FROM trades t2
+                           WHERE strftime('%Y-%m-%dT%H:00:00', t2.timestamp)
+                                 = strftime('%Y-%m-%dT%H:00:00', t.timestamp)
+                          ) as total_count
+                   FROM trades t
+                   WHERE status = 'failed'
+                     AND timestamp >= datetime('now', '-24 hours')
+                   GROUP BY hour
+                   ORDER BY hour"""
+            ).fetchall()
+
+            return {
+                "total_failed": failed,
+                "total_trades": total,
+                "failure_rate": round(failed / total, 4) if total > 0 else 0.0,
+                "by_platform": [
+                    {"platform": r["platform"], "count": r["count"]}
+                    for r in platform_rows
+                ],
+                "by_hour": [
+                    {
+                        "hour": r["hour"],
+                        "failed": r["failed_count"],
+                        "total": r["total_count"],
+                    }
+                    for r in hour_rows
+                ],
+            }
+
     # ---------------------------------------------------------------------------
     # Admin / maintenance
     # ---------------------------------------------------------------------------
@@ -549,6 +628,93 @@ class TradeDB:
                 row = self.conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
                 stats[table] = row["cnt"]
             return stats
+
+    def get_performance_stats(self) -> dict:
+        """Compute historical performance statistics from settled positions.
+
+        Returns:
+            Dict with win_rate, avg_pnl, total_trades, max_win, max_loss,
+            sharpe_ratio (approximation), avg_hold_time, and per-strategy stats.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT p.realized_pnl, p.expected_pnl,
+                          p.entry_timestamp, p.settlement_timestamp,
+                          o.type as opp_type
+                   FROM positions p
+                   LEFT JOIN opportunities o ON p.opportunity_id = o.id
+                   WHERE p.status = 'settled'
+                   ORDER BY p.settlement_timestamp"""
+            ).fetchall()
+
+        if not rows:
+            return {
+                "total_settled": 0, "win_rate": 0, "avg_pnl": 0,
+                "max_win": 0, "max_loss": 0, "sharpe_ratio": 0,
+                "avg_hold_seconds": 0, "strategy_breakdown": [],
+            }
+
+        pnls = []
+        hold_times = []
+        strategy_pnls: dict[str, list[float]] = {}
+
+        for r in rows:
+            pnl = r["realized_pnl"] or 0
+            pnls.append(pnl)
+            opp_type = r["opp_type"] or "Unknown"
+            strategy_pnls.setdefault(opp_type, []).append(pnl)
+
+            # Hold time
+            entry = r["entry_timestamp"]
+            settle = r["settlement_timestamp"]
+            if entry and settle:
+                try:
+                    from datetime import datetime, timezone
+                    t0 = datetime.fromisoformat(entry.replace("Z", "+00:00"))
+                    t1 = datetime.fromisoformat(settle.replace("Z", "+00:00"))
+                    hold_times.append((t1 - t0).total_seconds())
+                except Exception:
+                    pass
+
+        wins = sum(1 for p in pnls if p > 0)
+        total = len(pnls)
+        avg_pnl = sum(pnls) / total if total else 0
+        max_win = max(pnls) if pnls else 0
+        max_loss = min(pnls) if pnls else 0
+
+        # Simplified Sharpe: mean / std of PnL (no risk-free rate)
+        import math
+        mean = avg_pnl
+        if total > 1:
+            variance = sum((p - mean) ** 2 for p in pnls) / (total - 1)
+            std = math.sqrt(variance) if variance > 0 else 0
+            sharpe = mean / std if std > 0 else 0
+        else:
+            sharpe = 0
+
+        # Strategy breakdown
+        breakdown = []
+        for stype, spnls in sorted(strategy_pnls.items()):
+            s_wins = sum(1 for p in spnls if p > 0)
+            breakdown.append({
+                "type": stype,
+                "count": len(spnls),
+                "win_rate": s_wins / len(spnls) if spnls else 0,
+                "total_pnl": sum(spnls),
+                "avg_pnl": sum(spnls) / len(spnls) if spnls else 0,
+            })
+
+        return {
+            "total_settled": total,
+            "win_rate": wins / total if total else 0,
+            "avg_pnl": avg_pnl,
+            "total_pnl": sum(pnls),
+            "max_win": max_win,
+            "max_loss": max_loss,
+            "sharpe_ratio": round(sharpe, 4),
+            "avg_hold_seconds": sum(hold_times) / len(hold_times) if hold_times else 0,
+            "strategy_breakdown": breakdown,
+        }
 
     def close(self):
         self.conn.close()

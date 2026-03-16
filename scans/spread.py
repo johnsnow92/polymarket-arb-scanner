@@ -4,8 +4,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from polymarket_api import fetch_order_book, get_best_bid_ask, get_binary_markets
-from kalshi_api import KalshiClient
-from fees import net_profit_spread_polymarket, net_profit_spread_kalshi
+from fees import net_profit_spread_polymarket
 from scans.helpers import _within_resolution_window, filter_dust, _days_to_resolution
 
 logger = logging.getLogger(__name__)
@@ -93,21 +92,3 @@ def scan_spread_polymarket(markets: list[dict], min_profit: float) -> list[dict]
     logger.info("Found %d Polymarket spread opportunities.", len(opportunities))
     opportunities = filter_dust(opportunities)
     return opportunities
-
-
-def scan_spread_kalshi(kalshi_client: KalshiClient, min_profit: float, kalshi_data=None) -> list[dict]:
-    """Scan for spread capture opportunities on Kalshi.
-
-    DISABLED: Kalshi auto-matches crossing orders, so true crossed books
-    cannot exist.  Each side of the orderbook (``yes`` / ``no``) contains
-    resting buy orders at various price levels — *not* a bid/ask pair.
-    Comparing min/max within a single side produced phantom 9400 % ROI arbs
-    that caused a catastrophic execution loop (buying one-sided legs with
-    no counterparty).  This scan is kept as a stub so existing imports and
-    test wiring continue to work.
-    """
-    if not kalshi_client:
-        return []
-
-    logger.debug("SpreadKalshi scan disabled (Kalshi auto-matches; no true crossed books).")
-    return []

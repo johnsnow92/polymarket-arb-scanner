@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from fees import net_profit_spread_polymarket, net_profit_spread_kalshi
+from fees import net_profit_spread_polymarket
 
 
 class TestSpreadFees:
@@ -28,22 +28,6 @@ class TestSpreadFees:
         """Bid == ask should have zero profit."""
         result = net_profit_spread_polymarket(ask=0.50, bid=0.50)
         assert result["net_profit"] <= 0
-
-    def test_kalshi_spread_profitable(self):
-        """Kalshi spread with bid > ask minus fees."""
-        result = net_profit_spread_kalshi(ask=0.30, bid=0.50)
-        assert result["gross_spread"] == pytest.approx(0.20)
-        assert result["net_profit"] > 0
-
-    def test_kalshi_spread_unprofitable(self):
-        result = net_profit_spread_kalshi(ask=0.50, bid=0.40)
-        assert result["net_profit"] <= 0
-
-    def test_kalshi_spread_small_margin(self):
-        """Tiny spread may be eaten by fees."""
-        result = net_profit_spread_kalshi(ask=0.49, bid=0.51)
-        # 2 cent spread minus ~4 cents fees = likely negative
-        assert result["gross_spread"] == pytest.approx(0.02)
 
 
 class TestSpreadScanPolymarket:

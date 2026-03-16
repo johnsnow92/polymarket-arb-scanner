@@ -291,7 +291,7 @@ class TestRefineCrossWithClob:
 
 class TestScanCrossPlatform:
     @patch("scans.cross.filter_dust", side_effect=lambda x: x)
-    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a: opps)
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
     @patch("scans.cross.get_binary_markets")
     def test_no_kalshi_client_returns_empty(self, mock_binary, mock_refine, mock_dust):
         from scans.cross import scan_cross_platform
@@ -300,7 +300,7 @@ class TestScanCrossPlatform:
 
     @patch("scans.cross.SEMANTIC_MATCHING_ENABLED", False)
     @patch("scans.cross.filter_dust", side_effect=lambda x: x)
-    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a: opps)
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
     @patch("scans.cross.get_binary_markets", return_value=[])
     @patch("scans.cross.match_markets_to_events", return_value=[])
     def test_no_events_returns_empty(self, mock_match, mock_binary, mock_refine, mock_dust):
@@ -312,7 +312,7 @@ class TestScanCrossPlatform:
 
     @patch("scans.cross.SEMANTIC_MATCHING_ENABLED", False)
     @patch("scans.cross.filter_dust", side_effect=lambda x: x)
-    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a: opps)
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
     @patch("scans.cross._days_to_resolution", return_value=3.0)
     @patch("scans.cross._within_resolution_window", return_value=True)
     @patch("scans.cross._extract_token_ids", return_value=["tok_y", "tok_n"])
@@ -353,7 +353,7 @@ class TestScanCrossPlatform:
 
     @patch("scans.cross.SEMANTIC_MATCHING_ENABLED", False)
     @patch("scans.cross.filter_dust", side_effect=lambda x: x)
-    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a: opps)
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
     @patch("scans.cross._days_to_resolution", return_value=3.0)
     @patch("scans.cross._within_resolution_window", return_value=False)
     @patch("scans.cross._parallel_fetch_kalshi", return_value={})
@@ -385,7 +385,7 @@ class TestScanCrossPlatform:
 
     @patch("scans.cross.SEMANTIC_MATCHING_ENABLED", False)
     @patch("scans.cross.filter_dust", side_effect=lambda x: x)
-    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a: opps)
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
     @patch("scans.cross._days_to_resolution", return_value=3.0)
     @patch("scans.cross._within_resolution_window", return_value=True)
     @patch("scans.cross._extract_token_ids", return_value=["tok_y", "tok_n"])
@@ -429,7 +429,7 @@ class TestScanCrossPlatform:
 
     @patch("scans.cross.SEMANTIC_MATCHING_ENABLED", True)
     @patch("scans.cross.filter_dust", side_effect=lambda x: x)
-    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a: opps)
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
     @patch("scans.cross.get_binary_markets", return_value=[])
     @patch("scans.cross.match_markets_to_events_semantic", return_value=[])
     def test_semantic_branch_used_when_enabled(self, mock_sem, mock_binary, mock_refine, mock_dust):
@@ -442,7 +442,7 @@ class TestScanCrossPlatform:
 
     @patch("scans.cross.SEMANTIC_MATCHING_ENABLED", False)
     @patch("scans.cross.filter_dust", side_effect=lambda x: x)
-    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a: opps)
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
     @patch("scans.cross.get_binary_markets", return_value=[])
     @patch("scans.cross.match_markets_to_events", return_value=[])
     def test_fuzzy_branch_used_when_disabled(self, mock_fuzzy, mock_binary, mock_refine, mock_dust):
@@ -643,15 +643,15 @@ class TestRefineCrossAllWithClob:
         _refine_cross_all_with_clob(opps, 0.005)
         mock_clob.assert_not_called()
 
-    @patch("scans.cross.get_clob_prices")
-    def test_clob_updates_profit_when_still_profitable(self, mock_clob):
+    @patch("scans.cross._fetch_clob_for_market")
+    def test_clob_updates_profit_when_still_profitable(self, mock_fetch):
         from scans.cross import _refine_cross_all_with_clob
-        mock_clob.return_value = {
+        mock_fetch.return_value = (None, {
             "yes_ask": 0.32,
             "no_ask": 0.32,
             "yes_ask_size": 50,
             "no_ask_size": 50,
-        }
+        })
         opp = {
             "_platform_a": "polymarket",
             "_platform_b": "kalshi",

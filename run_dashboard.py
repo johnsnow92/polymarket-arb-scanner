@@ -14,8 +14,8 @@ import time
 
 # Set defaults if not already in environment
 os.environ.setdefault("DASHBOARD_PORT", "8080")
-os.environ.setdefault("DASHBOARD_USER", "jtamm")
-os.environ.setdefault("DASHBOARD_PASS", "Oaklandu15")
+os.environ.setdefault("DASHBOARD_USER", "admin")
+# DASHBOARD_PASS must be set via env var — no hardcoded default
 os.environ.setdefault("DASHBOARD_REFRESH_SECONDS", "15")
 
 # Must set env vars BEFORE importing config (module-level reads them)

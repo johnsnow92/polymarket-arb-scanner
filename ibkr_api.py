@@ -70,7 +70,7 @@ class IBKRClient:
         try:
             from ib_insync import IB
             self.ib = IB()
-            self.ib.connect(host, port, clientId=client_id, readonly=False)
+            self.ib.connect(host, port, clientId=client_id, readonly=False, timeout=10)
             self.authenticated = self.ib.isConnected()
             if self.authenticated:
                 logger.info("IBKR connected to %s:%d (clientId=%d)", host, port, client_id)

@@ -16,6 +16,12 @@ from config import GEMINI_RATE_LIMIT
 
 logger = logging.getLogger(__name__)
 
+
+class _RateLimitError(Exception):
+    """Raised when Gemini returns HTTP 429 — triggers tenacity retry."""
+    pass
+
+
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://api.gemini.com")
 
 # Rate limiting (thread-safe)
@@ -44,6 +50,9 @@ class GeminiClient:
 
     def __init__(self):
         self.session = requests.Session()
+        proxy_url = os.getenv("GEMINI_PROXY_URL")
+        if proxy_url:
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
         self.api_key = None
         self.api_secret = None
         self.authenticated = False
@@ -120,7 +129,7 @@ class GeminiClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        retry=retry_if_exception_type((_RateLimitError, requests.ConnectionError, requests.Timeout)),
         reraise=True,
     )
     def _private_request(self, endpoint: str, payload_data: dict = None) -> dict | None:
@@ -142,7 +151,7 @@ class GeminiClient:
                 return resp.json()
             if resp.status_code == 429:
                 logger.warning("Gemini rate limited on %s, retrying...", endpoint)
-                raise requests.exceptions.ConnectionError("Rate limited")
+                raise _RateLimitError(f"Gemini 429 on {endpoint}")
             logger.warning("Gemini %s returned %s: %s",
                            endpoint, resp.status_code, resp.text[:200])
             return None
@@ -155,7 +164,7 @@ class GeminiClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type(requests.exceptions.ConnectionError),
+        retry=retry_if_exception_type((_RateLimitError, requests.ConnectionError, requests.Timeout)),
         reraise=True,
     )
     def _public_request(self, endpoint: str, params: dict = None) -> dict | list | None:
@@ -176,7 +185,7 @@ class GeminiClient:
                 return resp.json()
             if resp.status_code == 429:
                 logger.warning("Gemini rate limited on %s, retrying...", endpoint)
-                raise requests.exceptions.ConnectionError("Rate limited")
+                raise _RateLimitError(f"Gemini 429 on {endpoint}")
             logger.warning("Gemini GET %s returned %s: %s",
                            endpoint, resp.status_code, resp.text[:200])
             return None

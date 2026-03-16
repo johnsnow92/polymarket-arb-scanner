@@ -38,6 +38,9 @@ class SXBetClient:
 
     def __init__(self):
         self.session = requests.Session()
+        proxy_url = os.getenv("SXBET_PROXY_URL")
+        if proxy_url:
+            self.session.proxies = {"http": proxy_url, "https": proxy_url}
         self.session.headers.update({
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -227,6 +230,11 @@ class SXBetClient:
     def place_order(self, market_hash: str, outcome_id: str, side: str,
                     price: float, size: float) -> dict | None:
         """Place an order on SX Bet.
+
+        NOTE: This sends unsigned JSON — real SX Bet trading requires
+        Ethereum wallet signatures (EIP-191/EIP-712) which are not yet
+        implemented.  Orders will be rejected by the API.  SX Bet is
+        effectively read-only until order signing is added.
 
         Args:
             market_hash: SX Bet market hash.

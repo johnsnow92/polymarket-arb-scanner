@@ -33,7 +33,14 @@ for _mod in _EXTERNAL_MODS:
 # Now import cli once — all @patch("cli.<name>") targets will reference this module.
 import cli as _cli_mod  # noqa: E402
 
-# Restore stashed modules (but leave new stubs so cli keeps working)
+# Restore stashed modules AND remove newly-injected mocks to prevent
+# cross-test pollution (other test files need real module imports).
+for _mod in _EXTERNAL_MODS:
+    if _mod in _stashed:
+        sys.modules[_mod] = _stashed[_mod]
+    elif _mod in sys.modules and isinstance(sys.modules[_mod], MagicMock):
+        del sys.modules[_mod]
+_stashed.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -282,15 +289,11 @@ class TestRunOneshotModeRouting:
     @patch.object(_cli_mod, "display_results")
     @patch.object(_cli_mod, "dashboard_state")
     @patch.object(_cli_mod, "scan_spread_polymarket", return_value=[])
-    @patch.object(_cli_mod, "scan_spread_kalshi", return_value=[])
     @patch.object(_cli_mod, "fetch_all_markets", return_value=[{"question": "test"}])
-    @patch.object(_cli_mod, "_fetch_kalshi_data", return_value=([{"event_ticker": "E1"}], []))
-    def test_spread_mode_runs_both_spread_scans(self, mock_kdata, mock_fetch, mock_pm, mock_k, mock_dash, mock_display):
+    def test_spread_mode_runs_spread_scan(self, mock_fetch, mock_pm, mock_dash, mock_display):
         args = _make_args(mode="spread")
-        kalshi_client = MagicMock()
-        _cli_mod._run_oneshot(args, 0.01, kalshi_client, _make_executor(), _make_db())
+        _cli_mod._run_oneshot(args, 0.01, None, _make_executor(), _make_db())
         mock_pm.assert_called_once()
-        mock_k.assert_called_once()
 
     @patch.object(_cli_mod, "display_results")
     @patch.object(_cli_mod, "dashboard_state")
@@ -508,14 +511,14 @@ class TestParallelDataFetching:
     @patch.object(_cli_mod, "scan_kalshi_multi", return_value=[])
     @patch.object(_cli_mod, "scan_cross_platform", return_value=[])
     @patch.object(_cli_mod, "scan_spread_polymarket", return_value=[])
-    @patch.object(_cli_mod, "scan_spread_kalshi", return_value=[])
     @patch.object(_cli_mod, "scan_triangular", return_value=[])
+    @patch.object(_cli_mod, "scan_multi_cross", return_value=[])
     @patch.object(_cli_mod, "fetch_events", return_value=[{"id": "ev1"}])
     @patch.object(_cli_mod, "fetch_all_markets", return_value=[{"question": "test"}])
-    @patch.object(_cli_mod, "_fetch_kalshi_data", return_value=([{"event_ticker": "E1"}], []))
+    @patch.object(_cli_mod, "_fetch_kalshi_data", return_value=([{"event_ticker": "E1"}], {}, {}))
     def test_all_mode_fetches_everything(
         self, mock_kdata, mock_fetch_markets, mock_fetch_events,
-        mock_tri, mock_spread_k, mock_spread_pm, mock_cross,
+        mock_multi_cross, mock_tri, mock_spread_pm, mock_cross,
         mock_kalshi_multi, mock_kalshi_binary, mock_negrisk, mock_binary,
         mock_dash, mock_display,
     ):
@@ -530,7 +533,7 @@ class TestParallelDataFetching:
     @patch.object(_cli_mod, "dashboard_state")
     @patch.object(_cli_mod, "scan_kalshi_binary", return_value=[])
     @patch.object(_cli_mod, "scan_kalshi_multi", return_value=[])
-    @patch.object(_cli_mod, "_fetch_kalshi_data", return_value=([{"event_ticker": "E1"}], []))
+    @patch.object(_cli_mod, "_fetch_kalshi_data", return_value=([{"event_ticker": "E1"}], {}, {}))
     @patch.object(_cli_mod, "fetch_all_markets")
     @patch.object(_cli_mod, "fetch_events")
     def test_kalshi_mode_does_not_fetch_poly(

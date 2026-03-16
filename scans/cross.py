@@ -5,8 +5,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from polymarket_api import get_binary_markets, get_clob_prices, parse_outcome_prices
 from kalshi_api import KalshiClient
-from matcher import match_markets_to_events, match_cross_platform, detect_inverted
-from config import FUZZY_MATCH_THRESHOLD
+from matcher import (match_markets_to_events, match_markets_to_events_semantic,
+                     match_cross_platform, match_cross_platform_semantic, detect_inverted)
+from config import FUZZY_MATCH_THRESHOLD, SEMANTIC_MATCHING_ENABLED, SEMANTIC_MATCH_THRESHOLD
 from fees import (
     net_profit_cross_platform,
     net_profit_cross_betfair,
@@ -15,10 +16,25 @@ from fees import (
     net_profit_cross_matchbook,
     net_profit_cross_gemini,
     net_profit_cross_ibkr,
+    net_profit_cross_generic,
 )
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
 logger = logging.getLogger(__name__)
+
+# All supported platforms for cross-platform pairing
+_ALL_PLATFORMS = [
+    "polymarket", "kalshi", "betfair", "smarkets",
+    "sxbet", "matchbook", "gemini", "ibkr",
+]
+
+
+def _make_cross_fee(platform_a: str, platform_b: str):
+    """Return a 4-arg fee callable that delegates to net_profit_cross_generic."""
+    def _fee_func(price_a: float, price_b: float, side_a: str, side_b: str) -> dict:
+        return net_profit_cross_generic(price_a, price_b, side_a, side_b,
+                                        platform_a=platform_a, platform_b=platform_b)
+    return _fee_func
 
 
 # Fee function lookup for cross-platform pairs
@@ -31,6 +47,12 @@ _CROSS_FEE_FUNCS = {
     ("polymarket", "gemini"): net_profit_cross_gemini,
     ("polymarket", "ibkr"): net_profit_cross_ibkr,
 }
+
+# Auto-populate remaining C(8,2) - 7 = 21 non-polymarket pairs
+for _i, _pa in enumerate(_ALL_PLATFORMS):
+    for _pb in _ALL_PLATFORMS[_i + 1:]:
+        if (_pa, _pb) not in _CROSS_FEE_FUNCS:
+            _CROSS_FEE_FUNCS[(_pa, _pb)] = _make_cross_fee(_pa, _pb)
 
 
 def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min_profit: float,
@@ -59,8 +81,8 @@ def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min
                 try:
                     _, clob = future.result()
                     clob_results[mk] = clob
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("CLOB fetch failed for %s: %s", mk, e)
 
     refined = []
     for opp in opportunities:
@@ -166,7 +188,16 @@ def scan_cross_platform(
     binary_poly = get_binary_markets(poly_markets)
     logger.info("Matching %d Polymarket binary markets vs %d Kalshi events...", len(binary_poly), len(kalshi_events))
 
-    matched = match_markets_to_events(binary_poly, kalshi_events, threshold=FUZZY_MATCH_THRESHOLD, min_confidence=min_confidence)
+    if SEMANTIC_MATCHING_ENABLED:
+        matched = match_markets_to_events_semantic(
+            binary_poly, kalshi_events,
+            threshold=SEMANTIC_MATCH_THRESHOLD, min_confidence=min_confidence,
+        )
+    else:
+        matched = match_markets_to_events(
+            binary_poly, kalshi_events,
+            threshold=FUZZY_MATCH_THRESHOLD, min_confidence=min_confidence,
+        )
     logger.info("Found %d event matches. Fetching Kalshi market prices...", len(matched))
 
     # Pre-fetch Kalshi markets in parallel if not already done
@@ -347,10 +378,16 @@ def scan_cross_all(
                 continue
 
             logger.info("Matching %s (%d) vs %s (%d)...", pa, len(markets_a), pb, len(markets_b))
-            matched = match_cross_platform(
-                markets_a, markets_b, pa, pb,
-                threshold=FUZZY_MATCH_THRESHOLD, min_confidence=min_confidence,
-            )
+            if SEMANTIC_MATCHING_ENABLED:
+                matched = match_cross_platform_semantic(
+                    markets_a, markets_b, pa, pb,
+                    threshold=SEMANTIC_MATCH_THRESHOLD, min_confidence=min_confidence,
+                )
+            else:
+                matched = match_cross_platform(
+                    markets_a, markets_b, pa, pb,
+                    threshold=FUZZY_MATCH_THRESHOLD, min_confidence=min_confidence,
+                )
             logger.info("Found %d matches between %s and %s", len(matched), pa, pb)
 
             # Determine fee function
@@ -461,8 +498,8 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float,
             try:
                 _, clob = future.result()
                 clob_cache[key] = clob
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("CLOB fetch failed for cross-all key %s: %s", key, e)
 
     refined_out = []
     for o in pm_opps:

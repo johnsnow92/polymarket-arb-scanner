@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import ssl
 import threading
 import time
@@ -89,6 +90,7 @@ class FeedManager:
         self._pending_betfair_subs: list[str] = []
         self._kalshi_ws = None
         self._poly_ws = None
+        self._last_message_time: dict[str, float] = {}  # platform -> timestamp
 
         # Betfair Stream API credentials
         self._betfair_app_key = betfair_app_key
@@ -135,6 +137,48 @@ class FeedManager:
                 self._pending_betfair_subs.extend(new_bf)
                 logger.info("Queued %d new Betfair subscriptions.", len(new_bf))
 
+    def prune_subscriptions(self, active_poly_token_ids: list[str] | None = None,
+                            active_kalshi_tickers: list[str] | None = None,
+                            active_betfair_market_ids: list[str] | None = None):
+        """Remove subscriptions for markets no longer in the active scan set.
+
+        Call periodically (e.g. once per scan cycle) with the current set of
+        active market identifiers.  Any subscription not in the active set is
+        dropped — the remote WS server will stop sending data for tickers the
+        client is no longer interested in on the next reconnect.
+
+        Args:
+            active_poly_token_ids: Currently active Polymarket token IDs.
+            active_kalshi_tickers: Currently active Kalshi tickers.
+            active_betfair_market_ids: Currently active Betfair market IDs.
+        """
+        pruned = 0
+        if active_poly_token_ids is not None:
+            active_set = set(active_poly_token_ids)
+            before = len(self._poly_token_ids)
+            self._poly_token_ids = [t for t in self._poly_token_ids if t in active_set]
+            self._pending_poly_subs = [t for t in self._pending_poly_subs if t in active_set]
+            pruned += before - len(self._poly_token_ids)
+
+        if active_kalshi_tickers is not None:
+            active_set = set(active_kalshi_tickers)
+            before = len(self._kalshi_tickers)
+            self._kalshi_tickers = [t for t in self._kalshi_tickers if t in active_set]
+            self._pending_kalshi_subs = [t for t in self._pending_kalshi_subs if t in active_set]
+            pruned += before - len(self._kalshi_tickers)
+
+        if active_betfair_market_ids is not None:
+            active_set = set(active_betfair_market_ids)
+            before = len(self._betfair_market_ids)
+            self._betfair_market_ids = [m for m in self._betfair_market_ids if m in active_set]
+            self._pending_betfair_subs = [m for m in self._pending_betfair_subs if m in active_set]
+            pruned += before - len(self._betfair_market_ids)
+
+        if pruned:
+            logger.info("Pruned %d stale WS subscriptions (%d Kalshi, %d Poly, %d Betfair remain).",
+                        pruned, len(self._kalshi_tickers), len(self._poly_token_ids),
+                        len(self._betfair_market_ids))
+
     async def run(self):
         """Run all feed connections concurrently with auto-reconnect."""
         self._running = True
@@ -157,6 +201,22 @@ class FeedManager:
             len(self._betfair_market_ids),
         )
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    def get_stale_feeds(self, max_silent_seconds: float = 120.0) -> list[str]:
+        """Return list of platform names that have gone silent beyond threshold.
+
+        Args:
+            max_silent_seconds: Alert if no message received for this long.
+
+        Returns:
+            List of platform names (e.g. ["kalshi", "polymarket"]) that are stale.
+        """
+        now = time.time()
+        stale = []
+        for platform, last_ts in self._last_message_time.items():
+            if now - last_ts > max_silent_seconds:
+                stale.append(platform)
+        return stale
 
     def stop(self):
         """Signal feeds to stop."""
@@ -187,8 +247,9 @@ class FeedManager:
                 delay = RECONNECT_DELAY
             except Exception as e:
                 if self._running:
-                    logger.warning("Betfair stream error: %s. Reconnecting in %ds...", e, delay)
-                    await asyncio.sleep(delay)
+                    jittered = delay * (0.5 + random.random() * 0.5)
+                    logger.warning("Betfair stream error: %s. Reconnecting in %.1fs...", e, jittered)
+                    await asyncio.sleep(jittered)
                     delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
             # Pick up any dynamically queued betfair subs
@@ -212,8 +273,9 @@ class FeedManager:
                     if _ws_metrics:
                         _ws_metrics.inc("ws_reconnections", {"platform": "kalshi"})
                         _ws_metrics.set("ws_connected", {"platform": "kalshi"}, value=0)
-                    logger.warning("Kalshi connection error: %s. Reconnecting in %ds...", e, delay)
-                    await asyncio.sleep(delay)
+                    jittered = delay * (0.5 + random.random() * 0.5)
+                    logger.warning("Kalshi connection error: %s. Reconnecting in %.1fs...", e, jittered)
+                    await asyncio.sleep(jittered)
                     delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
     async def _connect_kalshi(self):
@@ -315,6 +377,7 @@ class FeedManager:
                     normalised[f"{side}_ask"] = None
                     normalised[f"{side}_ask_size"] = 0
 
+            self._last_message_time["kalshi"] = time.time()
             self.on_price_update("kalshi", ticker, normalised)
 
     async def _run_polymarket(self):
@@ -331,8 +394,9 @@ class FeedManager:
                     if _ws_metrics:
                         _ws_metrics.inc("ws_reconnections", {"platform": "polymarket"})
                         _ws_metrics.set("ws_connected", {"platform": "polymarket"}, value=0)
-                    logger.warning("Polymarket connection error: %s. Reconnecting in %ds...", e, delay)
-                    await asyncio.sleep(delay)
+                    jittered = delay * (0.5 + random.random() * 0.5)
+                    logger.warning("Polymarket connection error: %s. Reconnecting in %.1fs...", e, jittered)
+                    await asyncio.sleep(jittered)
                     delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
     async def _connect_polymarket(self):
@@ -421,6 +485,7 @@ class FeedManager:
         ``best_bid_size``, and ``best_ask_size`` fields so CLOB refinement
         can skip REST fetches when fresh WS data is available.
         """
+        self._last_message_time["polymarket"] = time.time()
         if _ws_metrics:
             _ws_metrics.inc("ws_messages_received", {"platform": "polymarket"})
         # Polymarket sends arrays of events
