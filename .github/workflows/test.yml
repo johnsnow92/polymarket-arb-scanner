@@ -1,6 +1,8 @@
 name: Tests
 
 on:
+  push:
+    branches: [master]
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -37,8 +39,8 @@ jobs:
 
           echo "Test results: $FAILED failed, $ERRORS errors ($TOTAL_BAD total non-passing)"
 
-          if [ "$TOTAL_BAD" -gt 315 ]; then
-            echo "::error::New test failures detected ($TOTAL_BAD > 315 baseline)"
+          if [ "$TOTAL_BAD" -gt 0 ]; then
+            echo "::error::Test failures detected ($TOTAL_BAD failures/errors)"
             exit 1
           fi
-          echo "Within pre-existing failure baseline."
+          echo "All tests passed."

@@ -5,3 +5,7 @@ __pycache__/
 *.pem
 nul
 trades.db
+snapshots.db
+*.log
+*.code-workspace
+.opencode/

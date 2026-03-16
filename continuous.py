@@ -962,13 +962,43 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     )
                     all_opportunities.extend(mc_opps)
 
-                # Layer 2: Stale price detection (continuous mode — tracker has accumulated data)
+                # Seed PriceTracker from REST data (WS only covers subscribed markets)
+                if _price_tracker:
+                    if poly_markets:
+                        for mkt in poly_markets:
+                            cid = mkt.get("condition_id", "")
+                            tokens = mkt.get("tokens", [])
+                            for t in tokens:
+                                if t.get("outcome", "").lower() == "yes":
+                                    p = t.get("price")
+                                    if p and cid:
+                                        _price_tracker.update("polymarket", cid, float(p))
+                    if kalshi_data and kalshi_data[0]:
+                        for evt in kalshi_data[0]:
+                            for mkt in evt.get("markets", [evt]):
+                                ticker = mkt.get("ticker", "")
+                                yp = mkt.get("yes_ask") or mkt.get("yes_price")
+                                if ticker and yp:
+                                    pv = float(yp)
+                                    if pv > 1:
+                                        pv /= 100.0
+                                    _price_tracker.update("kalshi", ticker, pv)
+
+                # Layer 2: Stale price detection (continuous mode — tracker has WS + REST data)
                 if args.mode in ("all", "stale") and _price_tracker:
                     try:
                         from scans.stale import scan_stale_prices
                         from config import STALE_PRICE_MOVE_PCT, STALE_PRICE_THRESHOLD
+                        # Build matched_markets from all keys the tracker has across 2+ platforms
+                        _all_tracker_keys = set()
+                        with _price_tracker._lock:
+                            for mkey, plats in _price_tracker._prices.items():
+                                if len(plats) >= 2:
+                                    _all_tracker_keys.add(mkey)
+                        _matched_for_stale = [{"market_key": k} for k in _all_tracker_keys]
                         stale_opps = scan_stale_prices(
-                            _price_tracker, [], min_move_pct=STALE_PRICE_MOVE_PCT,
+                            _price_tracker, _matched_for_stale,
+                            min_move_pct=STALE_PRICE_MOVE_PCT,
                             min_stale_seconds=STALE_PRICE_THRESHOLD, min_profit=min_profit,
                         )
                         all_opportunities.extend(stale_opps)
@@ -985,6 +1015,65 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         all_opportunities.extend(res_opps)
                     except Exception as exc:
                         logger.debug("Resolution snipe scan failed: %s", exc)
+
+                # Layer 4: Cross-platform convergence
+                if args.mode in ("all", "convergence"):
+                    try:
+                        from scans.convergence import scan_convergence
+                        from config import CONVERGENCE_MIN_DIVERGENCE, CONVERGENCE_MIN_PLATFORMS
+                        from matcher import match_cross_platform
+                        # Build platform_prices_map from current data
+                        _conv_prices: dict[str, dict] = {}
+                        if poly_markets:
+                            for mkt in poly_markets:
+                                cid = mkt.get("condition_id", "")
+                                title = mkt.get("question") or mkt.get("title", "")
+                                tokens = mkt.get("tokens", [])
+                                yp = None
+                                for t in tokens:
+                                    if t.get("outcome", "").lower() == "yes":
+                                        yp = t.get("price")
+                                if cid and yp:
+                                    _conv_prices.setdefault(cid, {})["polymarket"] = {
+                                        "yes": float(yp), "no": 1.0 - float(yp),
+                                    }
+                                    _conv_prices[cid]["_title"] = title
+                        if kalshi_data and kalshi_data[0] and poly_markets:
+                            kflat = []
+                            for evt in kalshi_data[0]:
+                                for mkt in evt.get("markets", [evt]):
+                                    kflat.append(mkt)
+                            matches = match_cross_platform(
+                                poly_markets, kflat, "polymarket", "kalshi",
+                                threshold=72, min_confidence=args.min_confidence,
+                            )
+                            for m in matches:
+                                pm_mkt = m.get("market_a", {})
+                                k_mkt = m.get("market_b", {})
+                                cid = pm_mkt.get("condition_id", "")
+                                ya = k_mkt.get("yes_ask") or k_mkt.get("yes_price")
+                                if cid and ya:
+                                    pv = float(ya)
+                                    if pv > 1:
+                                        pv /= 100.0
+                                    _conv_prices.setdefault(cid, {})["kalshi"] = {
+                                        "yes": pv, "no": 1.0 - pv,
+                                    }
+                        _conv_matched = []
+                        for mk, data in _conv_prices.items():
+                            title = data.pop("_title", mk)
+                            pp = {k: v for k, v in data.items() if isinstance(v, dict)}
+                            if len(pp) >= 2:
+                                _conv_matched.append({
+                                    "market_key": mk, "title": title, "platform_prices": pp,
+                                })
+                        conv_opps = scan_convergence(
+                            _conv_matched, min_divergence=CONVERGENCE_MIN_DIVERGENCE,
+                            min_platforms=CONVERGENCE_MIN_PLATFORMS, min_profit=min_profit,
+                        )
+                        all_opportunities.extend(conv_opps)
+                    except Exception as exc:
+                        logger.debug("Convergence scan failed: %s", exc)
 
                 # Layer 3: Market making — refresh quotes and generate pseudo-opps
                 if args.mode in ("all", "mm") and _market_maker:

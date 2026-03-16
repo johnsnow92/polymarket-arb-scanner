@@ -331,6 +331,30 @@ a:hover { text-decoration: underline; }
     </div>
   </div>
 
+  <!-- Layer 2-5 Strategy Cards -->
+  <div class="cards" id="layer-cards">
+    <div class="card">
+      <div class="card-label">Market Making</div>
+      <div class="card-value" id="kpi-mm-markets">0</div>
+      <div class="card-sub" id="kpi-mm-sub">Orders: 0 | Exposure: $0</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Stale Prices</div>
+      <div class="card-value" id="kpi-stale">0</div>
+      <div class="card-sub">Detected this scan</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Resolution Snipes</div>
+      <div class="card-value" id="kpi-resolution">0</div>
+      <div class="card-sub">Near-certain outcomes</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Convergence</div>
+      <div class="card-value" id="kpi-convergence">0</div>
+      <div class="card-sub">Outlier platforms</div>
+    </div>
+  </div>
+
   <!-- P&L Chart + Strategy Breakdown -->
   <div class="grid-2">
     <div class="section">
@@ -381,6 +405,31 @@ a:hover { text-decoration: underline; }
         <table class="tbl" id="trades-table">
           <thead><tr><th>Time</th><th>Platform</th><th>Side</th><th class="right">Price</th><th class="right">Fill</th><th class="right">Slippage</th><th>Status</th></tr></thead>
           <tbody id="trades-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Trade Failures -->
+  <div class="grid-2">
+    <div class="section">
+      <div class="section-header">
+        <span>Failure Rate (24h)</span>
+        <span id="failure-rate-badge" style="color:var(--text-muted);font-size:0.82rem"></span>
+      </div>
+      <div class="section-body">
+        <div class="chart-container"><canvas id="failure-chart"></canvas></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-header">
+        <span>Failed Trades</span>
+        <span id="failures-count" style="color:var(--text-muted);font-size:0.82rem"></span>
+      </div>
+      <div class="section-body no-pad" style="max-height:320px;overflow-y:auto">
+        <table class="tbl" id="failures-table">
+          <thead><tr><th>Time</th><th>Platform</th><th>Type</th><th>Market</th><th class="right">Price</th><th class="right">Size</th></tr></thead>
+          <tbody id="failures-tbody"></tbody>
         </table>
       </div>
     </div>
@@ -561,10 +610,18 @@ function renderStatus(data) {
   $('kpi-opps').textContent = data.opportunities_found;
   $('kpi-scans').textContent = 'Scans: ' + data.scan_count;
   $('last-scan').textContent = data.last_scan_time ? 'Last scan: ' + fmtTime(data.last_scan_time) : '';
-  const ws = data.ws_connections;
-  $('kpi-ws').innerHTML = ws > 0
-    ? '<span class="positive">Connected</span>'
-    : '<span class="negative">Disconnected</span>';
+  const wsEl = $('kpi-ws');
+  while (wsEl.firstChild) wsEl.removeChild(wsEl.firstChild);
+  const wsSpan = document.createElement('span');
+  wsSpan.className = data.ws_connections > 0 ? 'positive' : 'negative';
+  wsSpan.textContent = data.ws_connections > 0 ? 'Connected' : 'Disconnected';
+  wsEl.appendChild(wsSpan);
+  // Layer 2-5 cards
+  $('kpi-mm-markets').textContent = data.mm_active_markets || 0;
+  $('kpi-mm-sub').textContent = 'Orders: ' + (data.mm_active_orders || 0) + ' | Exposure: $' + (data.mm_total_exposure || 0).toFixed(0);
+  $('kpi-stale').textContent = data.stale_detections || 0;
+  $('kpi-resolution').textContent = data.resolution_snipes || 0;
+  $('kpi-convergence').textContent = data.convergence_signals || 0;
 }
 
 function renderHealth(data) {
@@ -699,6 +756,101 @@ function renderAlerts(data) {
 }
 
 // ---------------------------------------------------------------------------
+// Failure chart + render
+// ---------------------------------------------------------------------------
+let failureChart = null;
+
+function initFailureChart() {
+  const ctx = $('failure-chart').getContext('2d');
+  failureChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Failed',
+        data: [],
+        borderColor: '#ef4444',
+        backgroundColor: 'rgba(239,68,68,0.15)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        pointBackgroundColor: '#ef4444',
+      }, {
+        label: 'Total',
+        data: [],
+        borderColor: '#6366f1',
+        backgroundColor: 'transparent',
+        borderDash: [4, 4],
+        tension: 0.3,
+        pointRadius: 2,
+        pointBackgroundColor: '#6366f1',
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#8b8fa3', font: { size: 11 } } },
+      },
+      scales: {
+        x: { ticks: { color: '#8b8fa3', font: { size: 11 } }, grid: { display: false } },
+        y: {
+          beginAtZero: true,
+          ticks: { color: '#8b8fa3', font: { size: 11 }, stepSize: 1 },
+          grid: { color: '#2d3148' },
+        },
+      },
+    },
+  });
+}
+
+function updateFailureChart(byHour) {
+  if (!failureChart || !byHour) return;
+  failureChart.data.labels = byHour.map(h => {
+    const d = new Date(h.hour);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  });
+  failureChart.data.datasets[0].data = byHour.map(h => h.failed);
+  failureChart.data.datasets[1].data = byHour.map(h => h.total);
+  failureChart.update('none');
+}
+
+function renderFailures(data) {
+  if (!data) return;
+  const stats = data.stats || {};
+  const trades = data.trades || [];
+
+  // Update rate badge
+  const rate = stats.failure_rate != null ? (stats.failure_rate * 100).toFixed(1) + '%' : '--';
+  const badge = $('failure-rate-badge');
+  badge.textContent = 'Overall: ' + (stats.total_failed || 0) + '/' + (stats.total_trades || 0) + ' (' + rate + ')';
+  if (stats.failure_rate > 0.1) badge.style.color = 'var(--red)';
+  else if (stats.failure_rate > 0.05) badge.style.color = 'var(--yellow)';
+  else badge.style.color = 'var(--text-muted)';
+
+  // Update chart
+  updateFailureChart(stats.by_hour || []);
+
+  // Update table
+  const tbody = $('failures-tbody');
+  if (trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No failed trades</td></tr>';
+    $('failures-count').textContent = '';
+    return;
+  }
+  $('failures-count').textContent = trades.length + ' recent';
+  tbody.innerHTML = trades.slice(0, 50).map(t => `
+    <tr>
+      <td>${fmtTime(t.timestamp)}</td>
+      <td>${t.platform || '--'}</td>
+      <td>${t.opp_type || '--'}</td>
+      <td title="${t.opp_market || ''}">${truncate(t.opp_market || '--', 35)}</td>
+      <td class="mono right">${t.price != null ? t.price.toFixed(4) : '--'}</td>
+      <td class="mono right">${t.size != null ? t.size.toFixed(2) : '--'}</td>
+    </tr>`).join('');
+}
+
+// ---------------------------------------------------------------------------
 // Kill switch
 // ---------------------------------------------------------------------------
 let _killSwitchState = { paused: false };
@@ -743,7 +895,7 @@ async function refresh() {
   spinner.style.display = 'inline-block';
 
   const [status, health, slippage, history, strategies, positions,
-         platforms, trades, opportunities, alerts, pauseState] = await Promise.all([
+         platforms, trades, opportunities, alerts, pauseState, failures] = await Promise.all([
     api('/status'),
     api('/api/health'),
     api('/api/slippage'),
@@ -755,6 +907,7 @@ async function refresh() {
     api('/api/opportunities'),
     api('/alerts'),
     api('/api/pause'),
+    api('/api/failures'),
   ]);
 
   renderStatus(status);
@@ -769,6 +922,7 @@ async function refresh() {
   renderAlerts(alerts);
   updatePnlChart(history);
   renderKillSwitch(pauseState);
+  renderFailures(failures);
 
   // Positions subtitle
   if (platforms && platforms.length > 0) {
@@ -785,6 +939,7 @@ async function refresh() {
 document.addEventListener('DOMContentLoaded', () => {
   initPnlChart();
   initPlatformChart();
+  initFailureChart();
   refresh();
   setInterval(refresh, REFRESH);
 });
