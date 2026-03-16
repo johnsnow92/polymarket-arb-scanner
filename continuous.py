@@ -31,6 +31,9 @@ from config import (
     HEDGE_ENABLED as CONFIG_HEDGE_ENABLED,
     SNAPSHOT_ENABLED as CONFIG_SNAPSHOT_ENABLED,
     SNAPSHOT_INTERVAL as CONFIG_SNAPSHOT_INTERVAL,
+    MAX_CONCURRENT_WS_EXECUTIONS as CONFIG_MAX_CONCURRENT_WS_EXECUTIONS,
+    PRICE_CACHE_EVICTION_AGE as CONFIG_PRICE_CACHE_EVICTION_AGE,
+    WS_STALE_FEED_SECONDS as CONFIG_WS_STALE_FEED_SECONDS,
 )
 
 # Conditional metrics import — never breaks if metrics.py is missing
@@ -50,7 +53,6 @@ from scans import (
     scan_kalshi_binary,
     scan_kalshi_multi,
     scan_spread_polymarket,
-    scan_spread_kalshi,
     scan_betfair_backall,
     scan_betfair_backlay,
     scan_smarkets_backall,
@@ -63,6 +65,7 @@ from scans import (
     scan_gemini_multi,
     scan_ibkr_binary,
     scan_triangular,
+    scan_multi_cross,
     _fetch_kalshi_data,
     capital_efficiency_score,
 )
@@ -484,10 +487,55 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     ws_trigger_enabled = CONFIG_WS_TRIGGER_ENABLED
     ws_trigger_threshold = CONFIG_WS_TRIGGER_THRESHOLD
     ws_sub_limit = CONFIG_WS_SUBSCRIPTION_LIMIT
+    _price_cache_lock = threading.Lock()
+    _execution_semaphore = threading.Semaphore(CONFIG_MAX_CONCURRENT_WS_EXECUTIONS)
+
+    # Initialize PriceTracker for stale price detection (Layer 2)
+    _price_tracker = None
+    try:
+        from price_tracker import PriceTracker
+        from config import STALE_PRICE_THRESHOLD, STALE_PRICE_MOVE_PCT
+        _price_tracker = PriceTracker(
+            stale_threshold_seconds=STALE_PRICE_THRESHOLD,
+            move_threshold_pct=STALE_PRICE_MOVE_PCT,
+        )
+        logger.info("PriceTracker enabled for stale price detection in continuous mode.")
+    except Exception as exc:
+        logger.debug("PriceTracker not available: %s", exc)
+
+    # Initialize MarketMaker for passive MM (Layer 3)
+    _market_maker = None
+    try:
+        from config import MM_ENABLED, MM_MIN_SPREAD, MM_QUOTE_SIZE, MM_MAX_INVENTORY, MM_MAX_TOTAL_EXPOSURE
+        if MM_ENABLED:
+            from market_maker import MarketMaker
+            _market_maker = MarketMaker(
+                min_spread=MM_MIN_SPREAD,
+                quote_size=MM_QUOTE_SIZE,
+                max_inventory=MM_MAX_INVENTORY,
+                max_total_exposure=MM_MAX_TOTAL_EXPOSURE,
+                dry_run=executor.dry_run,
+            )
+            logger.info("MarketMaker enabled in continuous mode (dry_run=%s).", executor.dry_run)
+    except Exception as exc:
+        logger.debug("MarketMaker not available: %s", exc)
 
     def on_price_update(platform, ticker, data):
         data["_ts"] = time.time()
-        price_cache[(platform, ticker)] = data
+        with _price_cache_lock:
+            price_cache[(platform, ticker)] = data
+
+        # Feed PriceTracker for stale price detection
+        if _price_tracker:
+            price_val = data.get("price") or data.get("yes") or data.get("yes_price")
+            if price_val is not None:
+                _price_tracker.update(platform, ticker, float(price_val))
+
+        # Update MarketMaker mid-price for registered markets
+        if _market_maker:
+            price_val = data.get("price") or data.get("yes") or data.get("yes_price")
+            if price_val is not None:
+                _market_maker.update_price(ticker, float(price_val))
 
         # Event-driven execution: check if this update affects a tracked opportunity
         if not ws_trigger_enabled:
@@ -497,7 +545,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             return
         for opp in affected:
             # Recalculate profit using fresh WS price instead of stale value
-            cached = price_cache.get((platform, ticker), {})
+            with _price_cache_lock:
+                cached = price_cache.get((platform, ticker), {})
             new_price = cached.get("price")
             if new_price is None:
                 continue
@@ -505,6 +554,10 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             profit = recalculated_profit if recalculated_profit is not None else opp.get("net_profit", 0)
             if profit >= ws_trigger_threshold:
                 market_name = opp.get("market", "?")
+                if not _execution_semaphore.acquire(blocking=False):
+                    logger.debug("WS trigger: skipping %s — max concurrent executions reached",
+                                 market_name[:30])
+                    continue
                 lock = _get_market_lock(market_name)
                 if lock.acquire(blocking=False):
                     try:
@@ -514,13 +567,18 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         executor.execute(opp)
                     finally:
                         lock.release()
+                        _execution_semaphore.release()
+                else:
+                    _execution_semaphore.release()
 
     def _cleanup_price_cache():
-        """Evict price cache entries older than 60 seconds."""
+        """Evict price cache entries older than the configured max age."""
         now = time.time()
-        stale_keys = [k for k, v in price_cache.items() if now - v.get("_ts", 0) > 60]
-        for k in stale_keys:
-            del price_cache[k]
+        with _price_cache_lock:
+            stale_keys = [k for k, v in price_cache.items()
+                          if now - v.get("_ts", 0) > CONFIG_PRICE_CACHE_EVICTION_AGE]
+            for k in stale_keys:
+                del price_cache[k]
         if stale_keys:
             logger.debug("Evicted %d stale price cache entries.", len(stale_keys))
 
@@ -563,6 +621,13 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             logger.warning("Failed to initialize snapshot recorder: %s", e)
 
     _last_snapshot_time = 0.0
+    _last_daily_reset_date = time.strftime("%Y-%m-%d", time.gmtime())
+
+    # Import alert_manager for daily resets
+    try:
+        from alerting import alert_manager as _alert_manager
+    except Exception:
+        _alert_manager = None
 
     # Initialize WebSocket feed manager
     feed_manager = FeedManager(
@@ -584,6 +649,17 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
             _scan_start = time.time()
 
+            # Daily reset for metrics and alert state
+            nonlocal _last_daily_reset_date
+            _today = time.strftime("%Y-%m-%d", time.gmtime())
+            if _today != _last_daily_reset_date:
+                logger.info("Daily reset triggered (new day: %s)", _today)
+                if _metrics:
+                    _metrics.reset_daily()
+                if _alert_manager:
+                    _alert_manager.reset_daily()
+                _last_daily_reset_date = _today
+
             try:
                 from concurrent.futures import ThreadPoolExecutor
 
@@ -596,9 +672,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 with ThreadPoolExecutor(max_workers=3) as pool:
                     if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "gemini", "ibkr", "triangular"):
                         fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
-                    if args.mode in ("all", "negrisk"):
+                    if args.mode in ("all", "negrisk", "multi-cross"):
                         fetch_futures["poly_events"] = pool.submit(fetch_events)
-                    if args.mode in ("all", "kalshi", "cross", "spread") and kalshi_client:
+                    if args.mode in ("all", "kalshi", "cross", "spread", "multi-cross") and kalshi_client:
                         fetch_futures["kalshi_data"] = pool.submit(_fetch_kalshi_data, kalshi_client)
 
                     for key, future in fetch_futures.items():
@@ -686,10 +762,6 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     if poly_markets:
                         spread_pm = scan_spread_polymarket(poly_markets, min_profit)
                         all_opportunities.extend(spread_pm)
-                    if kalshi_client:
-                        spread_k = scan_spread_kalshi(
-                            kalshi_client, min_profit, kalshi_data=kalshi_data)
-                        all_opportunities.extend(spread_k)
 
                 if args.mode in ("all", "betfair"):
                     betfair = extra_clients.get("betfair")
@@ -783,6 +855,62 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     )
                     all_opportunities.extend(tri_opps)
 
+                if args.mode in ("all", "multi-cross") and poly_events and kalshi_client:
+                    mc_opps = scan_multi_cross(
+                        poly_events, kalshi_client, min_profit,
+                        kalshi_data=kalshi_data,
+                        price_cache=price_cache,
+                    )
+                    all_opportunities.extend(mc_opps)
+
+                # Layer 2: Stale price detection (continuous mode — tracker has accumulated data)
+                if args.mode in ("all", "stale") and _price_tracker:
+                    try:
+                        from scans.stale import scan_stale_prices
+                        from config import STALE_PRICE_MOVE_PCT, STALE_PRICE_THRESHOLD
+                        stale_opps = scan_stale_prices(
+                            _price_tracker, [], min_move_pct=STALE_PRICE_MOVE_PCT,
+                            min_stale_seconds=STALE_PRICE_THRESHOLD, min_profit=min_profit,
+                        )
+                        all_opportunities.extend(stale_opps)
+                    except Exception as exc:
+                        logger.debug("Stale price scan failed: %s", exc)
+
+                # Layer 2: Resolution sniping
+                if args.mode in ("all", "resolution") and poly_markets:
+                    try:
+                        from scans.resolution import scan_resolution_snipes
+                        res_opps = scan_resolution_snipes(
+                            poly_markets, platform="polymarket", min_profit=min_profit,
+                        )
+                        all_opportunities.extend(res_opps)
+                    except Exception as exc:
+                        logger.debug("Resolution snipe scan failed: %s", exc)
+
+                # Layer 3: Market making — refresh quotes and generate pseudo-opps
+                if args.mode in ("all", "mm") and _market_maker:
+                    try:
+                        # Register any new liquid markets
+                        if poly_markets:
+                            for mkt in poly_markets[:20]:
+                                tokens = mkt.get("tokens", [])
+                                if tokens:
+                                    price = tokens[0].get("price")
+                                    if price and 0.1 < float(price) < 0.9:
+                                        cid = mkt.get("condition_id", "")
+                                        if cid:
+                                            _market_maker.add_market(cid, "polymarket", float(price))
+                        # Refresh quotes
+                        _market_maker.refresh_quotes(trader=pm_trader if not executor.dry_run else None)
+                        mm_opps = _market_maker.generate_opportunities()
+                        all_opportunities.extend(mm_opps)
+                    except Exception as exc:
+                        logger.debug("Market maker scan failed: %s", exc)
+
+                # Periodic price tracker cleanup
+                if _price_tracker and scan_count % 10 == 0:
+                    _price_tracker.cleanup(max_age_seconds=300)
+
                 # Apply filters
                 if args.min_depth > 0:
                     all_opportunities = [
@@ -830,6 +958,15 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                             _metrics.observe("opportunity_profit", value=opp.get("net_profit", 0))
                     _metrics.set("ws_connected", {"platform": "combined"},
                                  value=1 if ws_task and not ws_task.done() else 0)
+
+                # Check for stale WS feeds (no data received for > 120s)
+                stale_feeds = feed_manager.get_stale_feeds(max_silent_seconds=120.0)
+                if stale_feeds:
+                    logger.warning("Stale WS feeds detected (no data for >120s): %s",
+                                   ", ".join(stale_feeds))
+                    if _metrics:
+                        for sf in stale_feeds:
+                            _metrics.set("ws_connected", {"platform": sf}, value=0)
 
                 # Evict stale price cache entries
                 _cleanup_price_cache()

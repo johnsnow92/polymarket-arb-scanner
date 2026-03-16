@@ -254,10 +254,6 @@ CONVERGENCE_MIN_PLATFORMS = _env_int("CONVERGENCE_MIN_PLATFORMS", "3")
 # Signal aggregation
 SIGNAL_CACHE_TTL = _env_float("SIGNAL_CACHE_TTL", "300.0")
 
-# Kelly criterion position sizing
-KELLY_FRACTION = _env_float("KELLY_FRACTION", "0.5")
-KELLY_MAX_FRACTION = _env_float("KELLY_MAX_FRACTION", "0.25")
-
 # Notifications
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Slack/Discord/generic URL
 WEBHOOK_MIN_PROFIT = _env_float("WEBHOOK_MIN_PROFIT", "0.01")

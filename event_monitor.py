@@ -12,13 +12,14 @@ logger = logging.getLogger(__name__)
 
 
 class EventMonitor:
-    """Monitors Metaculus signals for divergence from platform prices.
+    """Monitors multi-source signals for divergence from platform prices.
 
-    When a platform's price diverges significantly from Metaculus consensus
-    probability, flags the opportunity for execution.
+    When a platform's price diverges significantly from consensus
+    probability (Metaculus + Manifold + other sources), flags the
+    opportunity for execution.
 
-    This is informed speculation, not pure arbitrage. Metaculus has strong
-    historical calibration, making it a high-edge signal.
+    This is informed speculation, not pure arbitrage. Multi-source
+    consensus with historical calibration provides high-edge signals.
     """
 
     def __init__(
@@ -27,6 +28,7 @@ class EventMonitor:
         divergence_threshold: float = 0.10,
         min_metaculus_forecasters: int = 20,
         match_threshold: int = 72,
+        signal_aggregator=None,
     ):
         """
         Args:
@@ -34,16 +36,19 @@ class EventMonitor:
             divergence_threshold: Minimum absolute divergence to flag (default 0.10 = 10%).
             min_metaculus_forecasters: Skip questions with fewer forecasters.
             match_threshold: Fuzzy match threshold for matching questions to markets.
+            signal_aggregator: Optional SignalAggregator for multi-source consensus.
         """
         self.client = metaculus_client
         self.divergence_threshold = divergence_threshold
         self.min_forecasters = min_metaculus_forecasters
         self.match_threshold = match_threshold
+        self.signal_aggregator = signal_aggregator
 
         # Questions cache
         self._questions_cache: list[dict] = []
         self._questions_cache_ts: float = 0
-        self._cache_ttl: float = 300  # 5 minutes
+        from config import METACULUS_CACHE_TTL
+        self._cache_ttl: float = METACULUS_CACHE_TTL
 
     def _get_cached_questions(self) -> list[dict]:
         """Fetch active Metaculus questions, using cache if fresh."""
@@ -256,14 +261,33 @@ class EventMonitor:
             except (KeyError, TypeError, ValueError):
                 continue
 
+            # If signal aggregator is available, use multi-source consensus
+            # instead of Metaculus-only probability
+            consensus_prob = metaculus_prob
+            num_sources = 1
+            if self.signal_aggregator:
+                market_key = market.get("condition_id") or market.get("ticker") or market_title[:40]
+                self.signal_aggregator.add_signal(market_key, "metaculus", metaculus_prob)
+                self.signal_aggregator.add_signal(market_key, platform_name, platform_price)
+                # Fetch additional signals (Manifold, etc.)
+                self.signal_aggregator.fetch_external_signals(market_key, market_title)
+                consensus = self.signal_aggregator.get_consensus(market_key)
+                if consensus and consensus["num_sources"] > 1:
+                    # Use consensus excluding the platform's own price
+                    # (we want external consensus vs platform price)
+                    consensus_prob = consensus["probability"]
+                    num_sources = consensus["num_sources"]
+
             # Calculate divergence
-            divergence = abs(platform_price - metaculus_prob)
+            divergence = abs(platform_price - consensus_prob)
             if divergence >= self.divergence_threshold:
-                direction = "BUY_YES" if metaculus_prob > platform_price else "BUY_NO"
+                direction = "BUY_YES" if consensus_prob > platform_price else "BUY_NO"
                 divergences.append({
                     "market_title": market_title,
                     "platform_price": platform_price,
                     "metaculus_prob": metaculus_prob,
+                    "consensus_prob": consensus_prob,
+                    "num_sources": num_sources,
                     "divergence": divergence,
                     "question_id": question.get("id"),
                     "platform_name": platform_name,
@@ -321,10 +345,16 @@ class EventMonitor:
 
             direction = div["direction"]
 
+            consensus_prob = div.get("consensus_prob", metaculus_prob)
+            num_sources = div.get("num_sources", 1)
+            prices_str = f"platform={platform_price:.3f} metaculus={metaculus_prob:.3f}"
+            if num_sources > 1:
+                prices_str = f"platform={platform_price:.3f} consensus={consensus_prob:.3f} (n={num_sources})"
+
             opp = {
                 "type": "EventDivergence",
                 "market": market_title[:50],
-                "prices": f"platform={platform_price:.3f} metaculus={metaculus_prob:.3f}",
+                "prices": prices_str,
                 "total_cost": f"${platform_price:.4f}",
                 "gross_spread": f"{divergence:.4f}",
                 "fees": "$0.0000",
@@ -334,6 +364,8 @@ class EventMonitor:
                 "_platform": platform_name,
                 "_metaculus_id": question_id,
                 "_metaculus_prob": metaculus_prob,
+                "_consensus_prob": consensus_prob,
+                "_num_sources": num_sources,
                 "_divergence": divergence,
                 "_direction": direction,
                 "_clob_depth": 0,

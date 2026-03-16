@@ -74,6 +74,7 @@ class ArbitrageExecutor:
         sizing_aggressiveness: float = 0.5,
         concurrent_execution: bool = False,
         notifier=None,
+        position_sizer=None,
     ):
         self.pm_trader = pm_trader
         self.kalshi_client = kalshi_client
@@ -96,6 +97,7 @@ class ArbitrageExecutor:
         self.dynamic_sizing = dynamic_sizing
         self.sizing_aggressiveness = sizing_aggressiveness
         self.concurrent_execution = concurrent_execution
+        self.position_sizer = position_sizer
         # Balance cache: avoids redundant API calls within a scan cycle
         self._balance_cache: dict = {}
         self._balance_cache_ts: float = 0.0
@@ -201,7 +203,9 @@ class ArbitrageExecutor:
         # 3. Size calculation
         depth = opportunity.get("_clob_depth", 0)
         per_leg_budget = self._per_leg_budget(opp_type, opportunity, balances)
-        if self.dynamic_sizing:
+        if self.position_sizer:
+            desired_size = self.position_sizer.size_for_opportunity(opportunity)
+        elif self.dynamic_sizing:
             desired_size = self.risk.calculate_dynamic_size(opportunity, self.sizing_aggressiveness)
         else:
             desired_size = self.max_trade_size
@@ -1312,6 +1316,26 @@ class ArbitrageExecutor:
             leg["side"] = "buy"
             leg["conid"] = opportunity.get(
                 "_ibkr_yes_conid" if side == "yes" else "_ibkr_no_conid", "")
+        elif platform == "betfair":
+            leg["platform"] = "betfair"
+            leg["side"] = "BACK" if direction == "BUY_YES" else "LAY"
+            leg["_market_id"] = opportunity.get("_market_id", "")
+            leg["_selection_id"] = opportunity.get("_selection_id")
+        elif platform == "smarkets":
+            leg["platform"] = "smarkets"
+            leg["side"] = "BACK" if direction == "BUY_YES" else "LAY"
+            leg["_market_id"] = opportunity.get("_sm_market_id", "")
+            leg["_contract_id"] = opportunity.get("_sm_contract_id", "")
+        elif platform == "sxbet":
+            leg["platform"] = "sxbet"
+            leg["side"] = "BACK" if direction == "BUY_YES" else "LAY"
+            leg["_market_hash"] = opportunity.get("_sx_market_hash", "")
+            leg["_outcome_id"] = opportunity.get("_sx_outcome_id", "")
+        elif platform == "matchbook":
+            leg["platform"] = "matchbook"
+            leg["side"] = "back" if direction == "BUY_YES" else "lay"
+            leg["_market_id"] = opportunity.get("_mb_market_id", "")
+            leg["_runner_id"] = opportunity.get("_mb_runner_id", "")
         else:
             return []
 

@@ -334,24 +334,46 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         logger.info("Found %d multi-cross opportunities.", len(mc_opps))
 
     # Stale price scan (Layer 2)
-    if args.mode in ("all", "stale"):
+    # Note: In one-shot mode, stale detection is limited since we only have
+    # a single snapshot. This scan is most effective in continuous mode where
+    # the PriceTracker accumulates data over time via WebSocket feeds.
+    if args.mode == "stale":
         logger.info("--- Stale price scan ---")
         try:
             from price_tracker import PriceTracker
             from config import STALE_PRICE_THRESHOLD, STALE_PRICE_MOVE_PCT
-            # Build price tracker from current data
             tracker = PriceTracker(
                 stale_threshold_seconds=STALE_PRICE_THRESHOLD,
                 move_threshold_pct=STALE_PRICE_MOVE_PCT,
             )
-            # Seed tracker with known prices from cross-platform matches
-            # (stale scan is most useful when we have multi-platform data)
+            # Seed tracker with current prices from all available platforms
+            if poly_markets:
+                for mkt in poly_markets:
+                    cid = mkt.get("condition_id", "")
+                    tokens = mkt.get("tokens", [])
+                    for token in tokens:
+                        if token.get("outcome", "").lower() == "yes":
+                            price = token.get("price")
+                            if price and cid:
+                                tracker.update("polymarket", cid, float(price))
+            if kalshi_data and kalshi_data[0]:
+                for evt in kalshi_data[0]:
+                    for mkt in evt.get("markets", [evt]):
+                        ticker = mkt.get("ticker", "")
+                        yes_price = mkt.get("yes_ask") or mkt.get("yes_price")
+                        if ticker and yes_price:
+                            price_val = float(yes_price)
+                            if price_val > 1:
+                                price_val /= 100.0
+                            tracker.update("kalshi", ticker, price_val)
+            # In one-shot mode, all prices are fresh so stale detection yields nothing.
+            # Log this for the user's awareness.
             stale_opps = scan_stale_prices(
                 tracker, [], min_move_pct=STALE_PRICE_MOVE_PCT,
                 min_stale_seconds=STALE_PRICE_THRESHOLD, min_profit=min_profit,
             )
             all_opportunities.extend(stale_opps)
-            logger.info("Found %d stale price opportunities.", len(stale_opps))
+            logger.info("Found %d stale price opportunities (one-shot: use --continuous for real-time detection).", len(stale_opps))
         except Exception as exc:
             logger.warning("Stale price scan failed: %s", exc)
 
@@ -359,12 +381,25 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
     if args.mode in ("all", "resolution"):
         logger.info("--- Resolution sniping scan ---")
         try:
+            # Scan Polymarket markets
             if poly_markets:
-                res_opps = scan_resolution_snipes(
+                res_opps_pm = scan_resolution_snipes(
                     poly_markets, platform="polymarket", min_profit=min_profit,
                 )
-                all_opportunities.extend(res_opps)
-                logger.info("Found %d resolution snipe opportunities.", len(res_opps))
+                all_opportunities.extend(res_opps_pm)
+                logger.info("Found %d Polymarket resolution snipe opportunities.", len(res_opps_pm))
+            # Scan Kalshi markets
+            if kalshi_data and kalshi_data[0]:
+                kalshi_markets_flat = []
+                for evt in kalshi_data[0]:
+                    for mkt in evt.get("markets", [evt]):
+                        kalshi_markets_flat.append(mkt)
+                if kalshi_markets_flat:
+                    res_opps_k = scan_resolution_snipes(
+                        kalshi_markets_flat, platform="kalshi", min_profit=min_profit,
+                    )
+                    all_opportunities.extend(res_opps_k)
+                    logger.info("Found %d Kalshi resolution snipe opportunities.", len(res_opps_k))
         except Exception as exc:
             logger.warning("Resolution sniping scan failed: %s", exc)
 
@@ -373,8 +408,65 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         logger.info("--- Cross-platform convergence scan ---")
         try:
             from config import CONVERGENCE_MIN_DIVERGENCE, CONVERGENCE_MIN_PLATFORMS
+            from matcher import match_cross_platform
+            # Build cross-platform matched market data with prices from all platforms
+            matched_for_convergence = []
+            platform_prices_map: dict[str, dict[str, dict]] = {}  # {market_key: {platform: {yes, no}}}
+
+            # Collect Polymarket prices
+            if poly_markets:
+                for mkt in poly_markets:
+                    cid = mkt.get("condition_id", "")
+                    title = mkt.get("question") or mkt.get("title", "")
+                    tokens = mkt.get("tokens", [])
+                    yes_p = no_p = None
+                    for t in tokens:
+                        if t.get("outcome", "").lower() == "yes":
+                            yes_p = t.get("price")
+                        elif t.get("outcome", "").lower() == "no":
+                            no_p = t.get("price")
+                    if cid and yes_p:
+                        platform_prices_map.setdefault(cid, {})["polymarket"] = {
+                            "yes": float(yes_p), "no": float(no_p) if no_p else 1.0 - float(yes_p),
+                        }
+                        platform_prices_map[cid]["_title"] = title
+
+            # Collect Kalshi prices (match by title to Polymarket condition IDs)
+            if kalshi_data and kalshi_data[0] and poly_markets:
+                kalshi_flat = []
+                for evt in kalshi_data[0]:
+                    for mkt in evt.get("markets", [evt]):
+                        kalshi_flat.append(mkt)
+                matches = match_cross_platform(
+                    poly_markets, kalshi_flat, "polymarket", "kalshi",
+                    threshold=72, min_confidence=args.min_confidence,
+                )
+                for m in matches:
+                    pm_mkt = m.get("market_a", {})
+                    k_mkt = m.get("market_b", {})
+                    cid = pm_mkt.get("condition_id", "")
+                    yes_ask = k_mkt.get("yes_ask") or k_mkt.get("yes_price")
+                    if cid and yes_ask:
+                        price_val = float(yes_ask)
+                        if price_val > 1:
+                            price_val /= 100.0
+                        platform_prices_map.setdefault(cid, {})["kalshi"] = {
+                            "yes": price_val, "no": 1.0 - price_val,
+                        }
+
+            # Build matched_markets list for convergence scan
+            for market_key, data in platform_prices_map.items():
+                title = data.pop("_title", market_key)
+                platform_prices = {k: v for k, v in data.items() if isinstance(v, dict)}
+                if len(platform_prices) >= 2:
+                    matched_for_convergence.append({
+                        "market_key": market_key,
+                        "title": title,
+                        "platform_prices": platform_prices,
+                    })
+
             conv_opps = scan_convergence(
-                [], min_divergence=CONVERGENCE_MIN_DIVERGENCE,
+                matched_for_convergence, min_divergence=CONVERGENCE_MIN_DIVERGENCE,
                 min_platforms=CONVERGENCE_MIN_PLATFORMS, min_profit=min_profit,
             )
             all_opportunities.extend(conv_opps)
@@ -955,17 +1047,49 @@ def main():
         )
         logger.info("Dynamic fee arbitrage enabled (GasMonitor active).")
 
-    # Initialize EventMonitor for Metaculus divergence signals
+    # Initialize SignalAggregator for multi-source probability consensus
+    sig_aggregator = None
+    try:
+        from signal_aggregator import SignalAggregator
+        from manifold_api import ManifoldClient
+        from config import SIGNAL_CACHE_TTL
+        manifold_client = ManifoldClient()
+        sig_aggregator = SignalAggregator(
+            cache_ttl=SIGNAL_CACHE_TTL,
+            metaculus_client=metaculus_client,
+            manifold_client=manifold_client,
+        )
+        logger.info("Multi-source signal aggregator enabled (Metaculus + Manifold).")
+    except Exception as exc:
+        logger.debug("Signal aggregator not available: %s", exc)
+
+    # Initialize EventMonitor for divergence signals (with multi-source when available)
     event_monitor = None
     if CONFIG_EVENT_MONITOR and metaculus_client:
         event_monitor = EventMonitor(
             metaculus_client=metaculus_client,
             divergence_threshold=CONFIG_EVENT_DIVERGENCE,
+            signal_aggregator=sig_aggregator,
         )
         logger.info("Event-driven speed trading enabled (EventMonitor active).")
 
     # Price cache updated by WebSocket feeds (shared with executor for revalidation)
     price_cache = {}
+
+    # Kelly criterion position sizer (optional — falls back to static/dynamic sizing)
+    pos_sizer = None
+    try:
+        from position_sizer import PositionSizer
+        from config import KELLY_FRACTION, KELLY_MAX_FRACTION
+        pos_sizer = PositionSizer(
+            bankroll=max_trade * 100,  # Approximate bankroll from max trade * 100
+            kelly_fraction=KELLY_FRACTION,
+            max_fraction=KELLY_MAX_FRACTION,
+        )
+        logger.info("Kelly position sizer enabled (fraction=%.2f, max=%.2f).",
+                     KELLY_FRACTION, KELLY_MAX_FRACTION)
+    except Exception as exc:
+        logger.debug("Position sizer not available: %s", exc)
 
     executor = ArbitrageExecutor(
         pm_trader=pm_trader,
@@ -988,6 +1112,7 @@ def main():
         dynamic_sizing=CONFIG_DYNAMIC_SIZING,
         sizing_aggressiveness=CONFIG_SIZING_AGGRESSIVENESS,
         concurrent_execution=CONFIG_CONCURRENT_EXECUTION,
+        position_sizer=pos_sizer,
     )
 
     extra_clients = {
