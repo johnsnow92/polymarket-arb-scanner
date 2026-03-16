@@ -149,6 +149,7 @@ class BacktestEngine:
         min_profit: float = 0.0,
         max_trade_size: float = 5.0,
         opp_type_filter: str | None = None,
+        layer_filter: int | None = None,
     ) -> BacktestResult:
         """Run a backtest over historical snapshots.
 
@@ -159,6 +160,7 @@ class BacktestEngine:
             min_profit: Minimum absolute net profit to enter a trade.
             max_trade_size: Maximum trade size per leg in dollars.
             opp_type_filter: Optional filter for specific opportunity types.
+            layer_filter: Optional filter by strategy layer (1-5).
 
         Returns:
             BacktestResult with performance metrics.
@@ -195,6 +197,10 @@ class BacktestEngine:
 
             # Skip if net_profit is non-positive
             if net_profit <= 0:
+                continue
+
+            # Layer filter: skip snapshots from the wrong layer
+            if layer_filter is not None and _get_layer(opp_t) != layer_filter:
                 continue
 
             # Calculate total cost from prices
@@ -451,6 +457,32 @@ def main():
     # Convert min_roi from percentage to fraction
     min_roi = args.min_roi / 100.0 if args.min_roi > 1.0 else args.min_roi
 
+    # Resolve --strategy keyword to opp_type_filter if --type not set
+    opp_type_filter = args.opp_type
+    if not opp_type_filter and args.strategy:
+        _STRATEGY_KEYWORDS = {
+            "arb": "Binary",
+            "binary": "Binary",
+            "negrisk": "NegRisk",
+            "cross": "Cross",
+            "kalshi": "Kalshi",
+            "betfair": "Betfair",
+            "smarkets": "Smarkets",
+            "sxbet": "SXBet",
+            "matchbook": "Matchbook",
+            "gemini": "Gemini",
+            "ibkr": "IBKR",
+            "triangular": "TriangularCross",
+            "multi-cross": "MultiCross",
+            "stale": "StalePriceOpp",
+            "resolution": "ResolutionSnipeOpp",
+            "convergence": "ConvergenceOpp",
+            "mm": "MarketMake",
+            "event": "EventDivergence",
+        }
+        if args.strategy != "all":
+            opp_type_filter = _STRATEGY_KEYWORDS.get(args.strategy.lower(), args.strategy)
+
     recorder = SnapshotRecorder(db_path=args.db)
     engine = BacktestEngine(recorder=recorder, initial_balance=args.balance)
 
@@ -460,7 +492,8 @@ def main():
         min_roi=min_roi,
         min_profit=args.min_profit,
         max_trade_size=args.max_trade_size,
-        opp_type_filter=args.opp_type,
+        opp_type_filter=opp_type_filter,
+        layer_filter=args.layer,
     )
 
     print(result.summary())

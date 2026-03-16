@@ -33,6 +33,14 @@ class _DashboardState:
         self.ws_connections = 0
         self.opportunities_found = 0
         self.last_opportunities: list[dict] = []
+        # Layer 2-5 state
+        self.mm_active_markets = 0
+        self.mm_active_orders = 0
+        self.mm_total_exposure = 0.0
+        self.stale_detections = 0
+        self.resolution_snipes = 0
+        self.convergence_signals = 0
+        self.signal_sources_active = 0
 
     def to_dict(self) -> dict:
         return {
@@ -43,6 +51,13 @@ class _DashboardState:
             "ws_connections": self.ws_connections,
             "opportunities_found": self.opportunities_found,
             "last_opportunities": self.last_opportunities[:20],
+            "mm_active_markets": self.mm_active_markets,
+            "mm_active_orders": self.mm_active_orders,
+            "mm_total_exposure": round(self.mm_total_exposure, 2),
+            "stale_detections": self.stale_detections,
+            "resolution_snipes": self.resolution_snipes,
+            "convergence_signals": self.convergence_signals,
+            "signal_sources_active": self.signal_sources_active,
         }
 
 
@@ -122,6 +137,10 @@ def _check_auth(handler) -> bool:
     from config import DASHBOARD_USER, DASHBOARD_PASS
 
     if not DASHBOARD_PASS:
+        # Warn but allow — recommend setting DASHBOARD_PASS in production
+        from config import EXECUTION_MODE
+        if EXECUTION_MODE == "full-auto":
+            logger.warning("Dashboard auth disabled in full-auto mode — set DASHBOARD_PASS")
         return True  # Auth disabled
 
     auth_header = handler.headers.get("Authorization", "")
@@ -132,7 +151,8 @@ def _check_auth(handler) -> bool:
     try:
         decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
         user, pwd = decoded.split(":", 1)
-    except Exception:
+    except Exception as e:
+        logger.debug("Dashboard auth decode failed: %s", e)
         _send_401(handler)
         return False
 
@@ -227,6 +247,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/strategies": self._handle_strategies,
             "/api/history": self._handle_history,
             "/api/slippage": self._handle_slippage,
+            "/api/failures": self._handle_failures,
             "/api/pause": self._handle_pause_get,
             "/api/db-stats": self._handle_db_stats,
         }
@@ -251,8 +272,8 @@ class _Handler(BaseHTTPRequestHandler):
             content_len = int(self.headers.get("Content-Length", 0))
             if content_len > 0:
                 post_body = self.rfile.read(content_len)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Dashboard POST body read error: %s", e)
 
         if not _check_auth(self):
             return
@@ -290,7 +311,29 @@ class _Handler(BaseHTTPRequestHandler):
         _send_json(self, state.to_dict())
 
     def _handle_metrics(self):
-        """Prometheus text format metrics."""
+        """Prometheus-compatible metrics endpoint (text exposition format).
+
+        Endpoint: GET /metrics
+        Content-Type: text/plain; version=0.0.4
+
+        Prometheus scrape config example::
+
+            scrape_configs:
+              - job_name: 'arb-scanner'
+                scrape_interval: 15s
+                static_configs:
+                  - targets: ['<host>:<dashboard-port>']
+                metrics_path: /metrics
+
+        Available metric families:
+            scans_total          — counter: total scan cycles completed
+            opportunities_found  — counter: total opportunities detected
+            trades_executed      — counter: total trades executed
+            trades_failed        — counter: total trades that failed
+            scan_duration_seconds — histogram: time per scan cycle
+            net_profit_total     — gauge: cumulative realised P&L
+            open_positions       — gauge: current open position count
+        """
         try:
             from metrics import metrics
             body = metrics.get_prometheus_text().encode("utf-8")
@@ -327,16 +370,16 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             from metrics import metrics
             metrics_data = metrics.get_all()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Dashboard metrics fetch failed: %s", e)
 
         cumulative = 0.0
         db = _get_db()
         if db:
             try:
                 cumulative = db.get_cumulative_pnl()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Dashboard cumulative PnL fetch failed: %s", e)
 
         _send_json(self, {
             "dry_run": DRY_RUN,
@@ -357,7 +400,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             positions = db.get_open_positions()
-        except Exception:
+        except Exception as e:
+            logger.debug("Dashboard positions fetch failed: %s", e)
             positions = []
         _send_json(self, positions)
 
@@ -369,7 +413,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             platforms = db.get_positions_by_platform()
-        except Exception:
+        except Exception as e:
+            logger.debug("Dashboard platforms fetch failed: %s", e)
             platforms = []
         _send_json(self, platforms)
 
@@ -381,7 +426,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             trades = db.get_recent_trades(limit=100)
-        except Exception:
+        except Exception as e:
+            logger.debug("Dashboard trades fetch failed: %s", e)
             trades = []
         _send_json(self, trades)
 
@@ -393,7 +439,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             opps = db.get_recent_opportunities(limit=100)
-        except Exception:
+        except Exception as e:
+            logger.debug("Dashboard opportunities fetch failed: %s", e)
             opps = []
         _send_json(self, opps)
 
@@ -405,7 +452,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             stats = db.get_opportunity_stats_by_type()
-        except Exception:
+        except Exception as e:
+            logger.debug("Dashboard strategies fetch failed: %s", e)
             stats = []
         _send_json(self, stats)
 
@@ -417,7 +465,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             history = db.get_daily_pnl_history(days=30)
-        except Exception:
+        except Exception as e:
+            logger.debug("Dashboard history fetch failed: %s", e)
             history = []
         _send_json(self, history)
 
@@ -429,9 +478,28 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             avg = db.get_avg_slippage()
-        except Exception:
+        except Exception as e:
+            logger.debug("Dashboard slippage fetch failed: %s", e)
             avg = 0.0
         _send_json(self, {"avg_slippage": avg})
+
+    def _handle_failures(self):
+        """Failed trades with error context and failure statistics."""
+        db = _get_db()
+        if not db:
+            _send_json(self, {"trades": [], "stats": {}})
+            return
+        try:
+            failed_trades = db.get_failed_trades(limit=50)
+        except Exception as e:
+            logger.debug("Dashboard failed trades fetch failed: %s", e)
+            failed_trades = []
+        try:
+            stats = db.get_failure_stats()
+        except Exception as e:
+            logger.debug("Dashboard failure stats fetch failed: %s", e)
+            stats = {}
+        _send_json(self, {"trades": failed_trades, "stats": stats})
 
     # -------------------------------------------------------------------
     # Kill switch endpoints
@@ -461,8 +529,8 @@ class _Handler(BaseHTTPRequestHandler):
             if body:
                 parsed = json.loads(body)
                 reason = parsed.get("reason", "dashboard")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Dashboard pause body parse failed: %s", e)
         _send_json(self, pause(reason))
 
     def _handle_resume_post(self, body: bytes = b""):

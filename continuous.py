@@ -439,6 +439,43 @@ def _get_market_lock(market: str) -> threading.Lock:
         return _market_locks[market]
 
 
+# Priority weights: time-sensitive strategies execute before regular ones.
+# Higher weight = execute sooner.
+_PRIORITY_WEIGHTS = {
+    "StalePriceOpp": 3.0,       # Most time-sensitive: stale prices disappear quickly
+    "ResolutionSnipeOpp": 2.5,  # Resolution imminent: price converges fast
+    "Binary": 2.0,              # Pure arb: guaranteed profit, execute quickly
+    "KalshiBinary": 2.0,
+    "Cross": 2.0,
+    "TriangularCross": 2.0,
+    "MultiCross": 2.0,
+    "NegRisk": 1.8,
+    "EventDivergence": 1.5,     # Signal-based: less urgent
+    "ConvergenceOpp": 1.3,
+    "MarketMake": 1.0,          # Lowest priority: always-on, not time-critical
+}
+
+
+def _execution_priority(opp: dict) -> float:
+    """Score an opportunity for execution priority ordering.
+
+    Combines time-sensitivity weight with capital efficiency.
+    Time-sensitive opportunities (stale prices, resolution snipes) execute
+    first regardless of absolute profit size.
+    """
+    opp_type = opp.get("type", "")
+    efficiency = capital_efficiency_score(opp)
+
+    # Find the matching priority weight via prefix
+    weight = 1.0
+    for prefix, w in _PRIORITY_WEIGHTS.items():
+        if opp_type.startswith(prefix):
+            weight = w
+            break
+
+    return weight * efficiency
+
+
 def _check_platform_balance(executor, opportunities, notifier, scan_count):
     """Check platform capital allocation and alert on imbalance.
 
@@ -988,7 +1025,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         if opp.get("_clob_depth", 0) >= args.min_depth
                     ]
 
-                all_opportunities.sort(key=capital_efficiency_score, reverse=True)
+                all_opportunities.sort(key=_execution_priority, reverse=True)
 
                 if args.limit:
                     all_opportunities = all_opportunities[:args.limit]
@@ -1007,6 +1044,18 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 dashboard_state.open_positions = db.get_open_positions_count()
                 dashboard_state.daily_pnl = db.get_daily_pnl()
                 dashboard_state.ws_connections = (1 if ws_task and not ws_task.done() else 0)
+                # Update Layer 2-5 dashboard counters
+                dashboard_state.stale_detections = sum(
+                    1 for o in all_opportunities if o.get("type") == "StalePriceOpp")
+                dashboard_state.resolution_snipes = sum(
+                    1 for o in all_opportunities if o.get("type") == "ResolutionSnipeOpp")
+                dashboard_state.convergence_signals = sum(
+                    1 for o in all_opportunities if o.get("type") == "ConvergenceOpp")
+                if _market_maker:
+                    mm_status = _market_maker.get_status()
+                    dashboard_state.mm_active_markets = mm_status["active_markets"]
+                    dashboard_state.mm_active_orders = mm_status["active_orders"]
+                    dashboard_state.mm_total_exposure = mm_status["total_exposure"]
 
                 # Update metrics
                 if _metrics:

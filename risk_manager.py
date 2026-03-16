@@ -18,6 +18,13 @@ class RiskManager:
         self.min_net_roi = config.get("min_net_roi", 0)
         self.allow_better_reentry = config.get("allow_better_reentry", True)
         self.reentry_improvement_threshold = config.get("reentry_improvement_threshold", 0.20)
+        # MM-specific limits
+        self.mm_max_inventory_per_market = config.get("mm_max_inventory", 50.0)
+        self.mm_max_total_exposure = config.get("mm_max_total_exposure", 500.0)
+
+    # Opportunity types that skip depth and dedup checks
+    _SKIP_DEPTH_TYPES = frozenset({"MarketMake", "EventDivergence", "ConvergenceOpp"})
+    _SKIP_DEDUP_TYPES = frozenset({"MarketMake"})
 
     def check(self, opportunity: dict, db, balances: dict | None = None) -> tuple[bool, str]:
         """Check if an opportunity passes all risk gates.
@@ -41,8 +48,8 @@ class RiskManager:
             return False, f"Max open positions reached ({open_count}/{self.max_open_positions})"
 
         # 3. Balance check
+        opp_type = opportunity.get("type", "")
         if balances:
-            opp_type = opportunity.get("type", "")
             # Parse total cost from string like "$0.9500"
             total_cost_str = opportunity.get("total_cost", "$0")
             total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
@@ -81,16 +88,18 @@ class RiskManager:
                     return False, f"Insufficient Polymarket balance (${pm_balance:.2f})"
 
         # 4. Order book depth check (tiered by ROI)
+        # Skip depth check for types that create liquidity or are signal-based
         depth = opportunity.get("_clob_depth", 0)
         net_profit = opportunity.get("net_profit", 0)
         total_cost_str = opportunity.get("total_cost", "$0")
         total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
         roi = net_profit / total_cost if total_cost > 0 else 0
 
-        # High-ROI opportunities (>5%) use lower depth threshold
-        depth_threshold = self.min_liquidity_high_roi if roi > 0.05 else self.min_liquidity
-        if depth < depth_threshold:
-            return False, f"Insufficient depth ({depth:.0f} < {depth_threshold:.0f})"
+        if opp_type not in self._SKIP_DEPTH_TYPES:
+            # High-ROI opportunities (>5%) use lower depth threshold
+            depth_threshold = self.min_liquidity_high_roi if roi > 0.05 else self.min_liquidity
+            if depth < depth_threshold:
+                return False, f"Insufficient depth ({depth:.0f} < {depth_threshold:.0f})"
 
         # 5. Net ROI check (skip when min_net_roi == 0)
         if self.min_net_roi > 0 and total_cost > 0:
@@ -98,8 +107,9 @@ class RiskManager:
                 return False, f"ROI too low ({roi:.2%} < {self.min_net_roi:.2%})"
 
         # 6. Dedup: not already trading this market (with smart re-entry)
+        # Skip for MM — market makers continuously quote the same markets
         market = opportunity.get("market", "")
-        if db.is_market_active(market):
+        if opp_type not in self._SKIP_DEDUP_TYPES and db.is_market_active(market):
             if self.allow_better_reentry:
                 existing_pnl = db.get_active_market_expected_pnl(market)
                 if existing_pnl is not None and net_profit > existing_pnl * (1 + self.reentry_improvement_threshold):
@@ -108,6 +118,12 @@ class RiskManager:
                     return False, "Already trading this market"
             else:
                 return False, "Already trading this market"
+
+        # 7. MM-specific: check inventory exposure limits
+        if opp_type == "MarketMake":
+            inventory = opportunity.get("_inventory", 0)
+            if abs(inventory) >= self.mm_max_inventory_per_market:
+                return False, f"MM inventory limit reached ({abs(inventory):.0f} >= {self.mm_max_inventory_per_market:.0f})"
 
         return True, "OK"
 
