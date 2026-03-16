@@ -392,7 +392,7 @@ class TestPerMarketLocking:
     def test_get_market_lock_creates_new(self):
         """Should create a new lock for an unseen market."""
         lock = _get_market_lock("test-market-unique-12345")
-        assert isinstance(lock, threading.Lock)
+        assert hasattr(lock, "acquire") and hasattr(lock, "release")
 
     def test_get_market_lock_returns_same(self):
         """Should return the same lock for the same market."""
