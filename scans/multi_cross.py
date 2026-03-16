@@ -29,6 +29,20 @@ logger = logging.getLogger(__name__)
 # Minimum fuzzy overlap ratio to consider two event titles a match
 _EVENT_MATCH_THRESHOLD = 0.70
 
+# Synonym map for outcome labels that differ across platforms
+_OUTCOME_SYNONYMS = {
+    "tie": "draw",
+    "tied": "draw",
+}
+
+
+def _normalize_outcome_label(label: str) -> str:
+    """Normalize an outcome label with synonym replacement."""
+    norm = normalize_title(label)
+    for old, new in _OUTCOME_SYNONYMS.items():
+        norm = norm.replace(old, new)
+    return norm
+
 
 # ---------------------------------------------------------------------------
 # Event-level matching
@@ -130,10 +144,14 @@ def _match_outcomes(
     outcomes = []
 
     # Build Kalshi outcome index
+    # Use yes_sub_title (e.g. "Frosinone", "Bari", "Tie") when available —
+    # Kalshi multi-outcome markets share the same title (e.g. "Frosinone vs
+    # Bari Winner?") with per-outcome labels only in yes_sub_title.
     kalshi_by_norm: list[tuple[dict, str, float]] = []
     for km in kalshi_markets:
-        title = km.get("title", km.get("ticker", ""))
-        norm = normalize_title(title)
+        sub_title = km.get("yes_sub_title", "")
+        title = sub_title if sub_title else km.get("title", km.get("ticker", ""))
+        norm = _normalize_outcome_label(title)
         if kalshi_client:
             yes_price, _ = kalshi_client.get_market_price(km)
         else:
@@ -145,7 +163,7 @@ def _match_outcomes(
 
     for pm_m in pm_markets:
         label = pm_m.get("groupItemTitle", pm_m.get("question", "?"))
-        pm_norm = normalize_title(label)
+        pm_norm = _normalize_outcome_label(label)
         prices = parse_outcome_prices(pm_m)
         pm_yes = prices[0] if prices else None
 
@@ -268,12 +286,23 @@ def scan_multi_cross(
 
         # Match individual outcomes
         outcomes = _match_outcomes(pm_markets, kalshi_markets, kalshi_client)
+
+        # Require ALL Polymarket outcomes to be matched — if any outcome is
+        # dropped, the total cost is artificially low and produces false arbs
+        if len(outcomes) != len(pm_markets):
+            logger.debug(
+                "MultiCross skipped: '%s' matched %d/%d outcomes",
+                pm_event.get("title", "?")[:40], len(outcomes), len(pm_markets),
+            )
+            continue
         if len(outcomes) < 2:
             continue
 
-        # Sanity check: need outcomes covering a reasonable fraction of the event
+        # Sanity check: sum of cheapest per-outcome should be close to 1.0
+        # (since exactly one outcome wins, the fair sum is ~1.0)
+        # With the all-outcomes-matched check above, this is a secondary filter
         total_cost = sum(o["best_price"] for o in outcomes)
-        if len(outcomes) >= 3 and total_cost < 0.50:
+        if total_cost < 0.50:
             logger.warning(
                 "Likely missing outcomes in multi-cross: '%s' (%d matched, sum=%.3f)",
                 pm_event.get("title", "?")[:60], len(outcomes), total_cost,
@@ -281,8 +310,17 @@ def scan_multi_cross(
             continue
 
         # Compare: is cross-platform cheaper than single-platform?
-        pm_total = sum(o["pm_price"] for o in outcomes if o["pm_price"] is not None)
-        kalshi_total = sum(o["kalshi_price"] for o in outcomes if o["kalshi_price"] is not None)
+        # Require ALL outcomes to have prices on each platform being compared
+        pm_prices = [o["pm_price"] for o in outcomes]
+        kalshi_prices = [o["kalshi_price"] for o in outcomes]
+        if all(p is not None for p in pm_prices):
+            pm_total = sum(pm_prices)
+        else:
+            pm_total = float("inf")
+        if all(p is not None for p in kalshi_prices):
+            kalshi_total = sum(kalshi_prices)
+        else:
+            kalshi_total = float("inf")
         single_best = min(pm_total, kalshi_total)
 
         # Only report if cross-platform mix is actually cheaper than both single-platforms

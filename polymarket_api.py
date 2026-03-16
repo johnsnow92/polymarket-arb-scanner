@@ -176,6 +176,8 @@ def get_clob_prices(market: dict) -> dict | None:
     except (json.JSONDecodeError, ValueError):
         return None
 
+    if isinstance(token_ids, (int, float)):
+        return None
     if not token_ids or len(token_ids) < 2:
         return None
 
