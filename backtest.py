@@ -25,10 +25,42 @@ try:
         net_profit_triangular,
         net_profit_gemini_binary,
         net_profit_ibkr_binary,
+        net_profit_multi_cross,
+        net_profit_betfair_backall,
+        net_profit_betfair_backlay,
+        net_profit_smarkets_backall,
+        net_profit_smarkets_backlay,
+        net_profit_sxbet_backall,
+        net_profit_sxbet_backlay,
+        net_profit_matchbook_backall,
+        net_profit_matchbook_backlay,
+        net_profit_cross_generic,
     )
 except ImportError:
     # Graceful fallback if fee functions are unavailable
     pass
+
+# Strategy layer classification for filtering and reporting
+STRATEGY_LAYERS = {
+    "Binary": 1, "NegRisk": 1, "KalshiBinary": 1, "KalshiMulti": 1,
+    "Cross": 1, "BetfairBackAll": 1, "BetfairBackLay": 1,
+    "SmarketsBackAll": 1, "SmarketsBackLay": 1,
+    "SXBetBackAll": 1, "SXBetBackLay": 1,
+    "MatchbookBackAll": 1, "MatchbookBackLay": 1,
+    "GeminiBinary": 1, "GeminiMulti": 1, "IBKRBinary": 1,
+    "MultiCross": 1, "TriangularCross": 1,
+    "StalePriceOpp": 2, "ResolutionSnipeOpp": 2,
+    "MarketMake": 3,
+    "EventDivergence": 4, "ConvergenceOpp": 4,
+}
+
+LAYER_NAMES = {
+    1: "Pure Arbitrage",
+    2: "Near-Arbitrage",
+    3: "Market Making",
+    4: "Informed Trading",
+    5: "Capital Optimization",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +86,7 @@ class BacktestResult:
             "=" * 60,
             "BACKTEST RESULTS",
             "=" * 60,
-            f"Period: {self.initial_balance:.2f} initial balance",
+            f"Initial balance:  ${self.initial_balance:.2f}",
             f"Final balance:    ${self.final_balance:.2f}",
             f"Total P&L:        ${self.total_pnl:+.2f}",
             f"Return:           {(self.total_pnl / self.initial_balance * 100) if self.initial_balance > 0 else 0:.2f}%",
@@ -62,9 +94,32 @@ class BacktestResult:
             f"Win rate:         {self.win_rate:.1%}",
             f"Max drawdown:     ${self.max_drawdown:.2f}",
             f"Sharpe ratio:     {self.sharpe_ratio:.3f}",
-            "",
-            "Trades by type:",
         ]
+
+        # Group by strategy layer
+        layer_stats: dict[int, dict] = {}
+        for opp_type, stats in self.trades_by_type.items():
+            layer = _get_layer(opp_type)
+            if layer not in layer_stats:
+                layer_stats[layer] = {"count": 0, "pnl": 0.0, "wins": 0}
+            layer_stats[layer]["count"] += stats["count"]
+            layer_stats[layer]["pnl"] += stats["pnl"]
+            layer_stats[layer]["wins"] += stats["wins"]
+
+        if layer_stats:
+            lines.append("")
+            lines.append("P&L by layer:")
+            for layer_num in sorted(layer_stats.keys()):
+                ls = layer_stats[layer_num]
+                name = LAYER_NAMES.get(layer_num, f"Layer {layer_num}")
+                wr = ls["wins"] / ls["count"] if ls["count"] > 0 else 0
+                lines.append(
+                    f"  L{layer_num} {name}: {ls['count']} trades, "
+                    f"P&L ${ls['pnl']:+.4f}, win rate {wr:.1%}"
+                )
+
+        lines.append("")
+        lines.append("Trades by type:")
         for opp_type, stats in sorted(self.trades_by_type.items()):
             lines.append(
                 f"  {opp_type}: {stats['count']} trades, "
@@ -175,7 +230,7 @@ class BacktestEngine:
 
             # Recalculate fees using fee functions if available
             realized_profit = self._recalc_profit_with_fees(
-                opp_t, price_a, price_b, units, net_profit,
+                opp_t, price_a, price_b, units, net_profit, snap=snap,
             )
 
             # Execute the simulated trade
@@ -255,6 +310,7 @@ class BacktestEngine:
         price_b: float | None,
         units: float,
         fallback_profit: float,
+        snap: dict | None = None,
     ) -> float:
         """Recalculate profit using fee functions from fees.py.
 
@@ -267,22 +323,67 @@ class BacktestEngine:
         try:
             if opp_type == "Binary":
                 result = net_profit_binary_internal(price_a, price_b)
+            elif opp_type.startswith("NegRisk"):
+                # Multi-outcome: price_a = cheapest, price_b = total_cost
+                result = net_profit_negrisk_internal([price_a, price_b])
             elif opp_type.startswith("KalshiBinary"):
                 result = net_profit_kalshi_binary(price_a, price_b)
-            elif opp_type.startswith("Cross"):
-                result = net_profit_cross_platform(price_a, price_b, "yes", "no")
+            elif opp_type.startswith("KalshiMulti"):
+                result = net_profit_kalshi_multi([price_a, price_b])
+            elif opp_type == "TriangularCross":
+                plat_a = (snap or {}).get("platform_a", "polymarket")
+                plat_b = (snap or {}).get("platform_b", "kalshi")
+                result = net_profit_triangular(price_a, price_b, plat_a, plat_b)
+            elif opp_type.startswith("MultiCross"):
+                plats = (snap or {}).get("platforms", ["polymarket", "kalshi"])
+                result = net_profit_multi_cross([price_a, price_b], plats[:2])
+            elif opp_type == "BetfairBackAll":
+                result = net_profit_betfair_backall([price_a, price_b])
+            elif opp_type == "BetfairBackLay":
+                result = net_profit_betfair_backlay(price_a, price_b)
+            elif opp_type == "SmarketsBackAll":
+                result = net_profit_smarkets_backall([price_a, price_b])
+            elif opp_type == "SmarketsBackLay":
+                result = net_profit_smarkets_backlay(price_a, price_b)
+            elif opp_type == "SXBetBackAll":
+                result = net_profit_sxbet_backall([price_a, price_b])
+            elif opp_type == "SXBetBackLay":
+                result = net_profit_sxbet_backlay(price_a, price_b)
+            elif opp_type == "MatchbookBackAll":
+                result = net_profit_matchbook_backall([price_a, price_b])
+            elif opp_type == "MatchbookBackLay":
+                result = net_profit_matchbook_backlay(price_a, price_b)
             elif opp_type.startswith("Gemini"):
                 result = net_profit_gemini_binary(price_a, price_b)
             elif opp_type.startswith("IBKR"):
                 result = net_profit_ibkr_binary(price_a, price_b)
-            elif opp_type == "TriangularCross":
-                result = net_profit_triangular(price_a, price_b, "", "")
+            elif opp_type.startswith("Cross"):
+                plat_a = (snap or {}).get("platform_a", "polymarket")
+                plat_b = (snap or {}).get("platform_b", "kalshi")
+                result = net_profit_cross_generic(price_a, price_b, "yes", "no",
+                                                  plat_a, plat_b)
+            elif opp_type in ("StalePriceOpp", "ResolutionSnipeOpp", "ConvergenceOpp",
+                              "EventDivergence", "MarketMake"):
+                # Signal/directional trades — profit is estimated at scan time
+                # Use the snapshot's stored net_profit directly
+                return fallback_profit * units
             else:
                 return fallback_profit * units
 
             return result.get("net_profit", fallback_profit) * units
         except (NameError, TypeError, Exception):
             return fallback_profit * units
+
+
+def _get_layer(opp_type: str) -> int:
+    """Determine the strategy layer for an opportunity type."""
+    if opp_type in STRATEGY_LAYERS:
+        return STRATEGY_LAYERS[opp_type]
+    # Prefix match for parameterized types like "NegRisk(3)", "Cross(PM_YES + K_NO)"
+    for prefix, layer in STRATEGY_LAYERS.items():
+        if opp_type.startswith(prefix):
+            return layer
+    return 0  # Unknown
 
 
 def main():
@@ -317,6 +418,14 @@ def main():
     parser.add_argument(
         "--type", dest="opp_type", default=None,
         help="Filter by opportunity type (e.g. Binary, Cross, KalshiBinary)",
+    )
+    parser.add_argument(
+        "--strategy", default=None,
+        help="Filter by strategy keyword (e.g. 'all', 'arb', 'mm', 'stale')",
+    )
+    parser.add_argument(
+        "--layer", type=int, default=None, choices=[1, 2, 3, 4, 5],
+        help="Filter by strategy layer (1=Pure Arb, 2=Near-Arb, 3=MM, 4=Informed, 5=Optimization)",
     )
     parser.add_argument(
         "--db", default=None,

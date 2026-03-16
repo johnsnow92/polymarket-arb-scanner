@@ -439,6 +439,68 @@ def _get_market_lock(market: str) -> threading.Lock:
         return _market_locks[market]
 
 
+def _check_platform_balance(executor, opportunities, notifier, scan_count):
+    """Check platform capital allocation and alert on imbalance.
+
+    When one platform holds >60% of total capital but generates <30% of
+    opportunities, emits a rebalancing alert via the notifier.
+    """
+    # Count opportunity flow per platform
+    platform_opp_counts: dict[str, int] = {}
+    for opp in opportunities:
+        plat = opp.get("_platform", "")
+        if not plat:
+            # Infer from type
+            opp_type = opp.get("type", "")
+            if "Kalshi" in opp_type:
+                plat = "kalshi"
+            elif "Betfair" in opp_type:
+                plat = "betfair"
+            elif "Smarkets" in opp_type:
+                plat = "smarkets"
+            elif "Gemini" in opp_type:
+                plat = "gemini"
+            elif "IBKR" in opp_type:
+                plat = "ibkr"
+            else:
+                plat = "polymarket"
+        platform_opp_counts[plat] = platform_opp_counts.get(plat, 0) + 1
+
+    total_opps = sum(platform_opp_counts.values())
+    if total_opps < 5:
+        return  # Not enough data to assess
+
+    # Fetch balances (uses executor's cached balance fetch)
+    try:
+        balances = executor._fetch_balances("Cross")
+    except Exception:
+        return
+    if not balances:
+        return
+
+    total_balance = sum(v for v in balances.values() if isinstance(v, (int, float)))
+    if total_balance <= 0:
+        return
+
+    for platform, balance in balances.items():
+        if not isinstance(balance, (int, float)) or balance <= 0:
+            continue
+        capital_pct = balance / total_balance
+        opp_flow = platform_opp_counts.get(platform, 0)
+        opp_pct = opp_flow / total_opps if total_opps > 0 else 0
+
+        # Alert if capital is concentrated but opportunity flow is low
+        if capital_pct > 0.60 and opp_pct < 0.30:
+            msg = (
+                f"REBALANCE ALERT: {platform} holds {capital_pct:.0%} of capital "
+                f"(${balance:.0f}) but only {opp_pct:.0%} of opportunity flow "
+                f"({opp_flow}/{total_opps}). Consider moving funds."
+            )
+            logger.warning(msg)
+            if hasattr(notifier, "notify_text"):
+                notifier.notify_text(msg)
+
+
 def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                    kalshi_private_key_path, executor, db, price_cache,
                    extra_clients=None, notifier=None, pm_trader=None,
@@ -910,6 +972,14 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 # Periodic price tracker cleanup
                 if _price_tracker and scan_count % 10 == 0:
                     _price_tracker.cleanup(max_age_seconds=300)
+
+                # Platform fund rebalancing check (every 5 scans)
+                if scan_count % 5 == 0 and notifier:
+                    try:
+                        _check_platform_balance(
+                            executor, all_opportunities, notifier, scan_count)
+                    except Exception as exc:
+                        logger.debug("Rebalancing check failed: %s", exc)
 
                 # Apply filters
                 if args.min_depth > 0:

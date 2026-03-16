@@ -266,23 +266,6 @@ def net_profit_spread_polymarket(ask: float, bid: float) -> dict:
     }
 
 
-def net_profit_spread_kalshi(ask: float, bid: float) -> dict:
-    """Calculate net profit for a Kalshi spread capture (buy at ask, sell at bid).
-
-    Both buy and sell pay taker fees.
-    """
-    if bid <= ask:
-        return {"gross_spread": bid - ask, "fees": 0, "net_profit": bid - ask}
-
-    gross = bid - ask
-    fees = kalshi_taker_fee(ask) + kalshi_taker_fee(bid)
-    return {
-        "gross_spread": gross,
-        "fees": fees,
-        "net_profit": gross - fees,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Betfair standalone fee calculations
 # ---------------------------------------------------------------------------
@@ -854,4 +837,169 @@ def net_profit_cross_sxbet(
         "net_profit": gross_spread - fees - gas,
     }
 
+
+# ---------------------------------------------------------------------------
+# Multi-outcome cross-platform fee calculation
+# ---------------------------------------------------------------------------
+
+def net_profit_multi_cross(
+    outcome_prices: list[float],
+    outcome_platforms: list[str],
+) -> dict:
+    """Calculate net profit for a multi-outcome cross-platform arbitrage.
+
+    Buys YES on each outcome on potentially different platforms.  Exactly one
+    outcome wins and pays $1.  The arb is profitable when the total cost of
+    buying YES on every outcome (across the cheapest platforms) is less than
+    $1 minus all fees.
+
+    Fees are computed per-outcome:
+    - Entry fees are always charged (platform-specific).
+    - Win fee is charged only on the outcome that settles YES.  Since we
+      don't know which one wins, we take the worst-case (highest) win fee
+      across all outcomes.
+
+    Gas: one POLYGON_GAS_ESTIMATE is charged if any leg is on Polymarket.
+
+    Args:
+        outcome_prices: YES price for each outcome (one per outcome).
+        outcome_platforms: Platform name for each outcome (parallel list).
+
+    Returns:
+        Dict with gross_spread, fees, and net_profit.
+    """
+    total_cost = sum(outcome_prices)
+
+    if total_cost >= 1.0:
+        return {"gross_spread": 1.0 - total_cost, "fees": 0, "net_profit": 1.0 - total_cost}
+
+    gross_spread = 1.0 - total_cost
+
+    # Entry fees: always paid on every leg regardless of outcome
+    entry_fees = sum(
+        _platform_entry_fee(p, plat)
+        for p, plat in zip(outcome_prices, outcome_platforms)
+    )
+
+    # Win fee: depends on which outcome wins — take worst case
+    win_fees_per_outcome = [
+        _platform_win_fee(p, plat)
+        for p, plat in zip(outcome_prices, outcome_platforms)
+    ]
+    worst_win_fee = max(win_fees_per_outcome) if win_fees_per_outcome else 0.0
+
+    fees = entry_fees + worst_win_fee
+
+    # Gas: one charge if any leg touches Polymarket
+    gas = POLYGON_GAS_ESTIMATE if "polymarket" in outcome_platforms else 0.0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fees + gas,
+        "net_profit": gross_spread - fees - gas,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dynamic fee routing — pick lowest-fee path for cross-platform opportunities
+# ---------------------------------------------------------------------------
+
+# Real-time fee schedule per platform (can be updated at runtime for promos)
+PLATFORM_FEE_SCHEDULE: dict[str, dict[str, float]] = {
+    "polymarket": {"taker": 0.02, "maker": 0.00, "gas": POLYGON_GAS_ESTIMATE},
+    "kalshi": {"taker": 0.07, "maker": 0.00, "gas": 0.0},
+    "betfair": {"taker": 0.05, "maker": 0.05, "gas": 0.0},
+    "smarkets": {"taker": 0.02, "maker": 0.02, "gas": 0.0},
+    "sxbet": {"taker": 0.00, "maker": 0.00, "gas": 0.0},
+    "matchbook": {"taker": 0.00, "maker": 0.00, "gas": 0.0},
+    "gemini": {"taker": 0.05, "maker": 0.01, "gas": 0.0},
+    "ibkr": {"taker": 0.00, "maker": 0.00, "gas": 0.0},
+}
+
+
+def estimate_total_fee(platform: str, price: float, order_type: str = "taker") -> float:
+    """Estimate total fee for a trade on a platform.
+
+    Args:
+        platform: Platform name.
+        price: Trade price (0-1).
+        order_type: "taker" or "maker".
+
+    Returns:
+        Estimated fee in dollars per contract.
+    """
+    schedule = PLATFORM_FEE_SCHEDULE.get(platform, {})
+    fee_rate = schedule.get(order_type, 0.0)
+    gas = schedule.get("gas", 0.0)
+
+    if platform == "polymarket":
+        return polymarket_fee(price, 1.0) + gas
+    elif platform == "kalshi":
+        return kalshi_taker_fee(price) if order_type == "taker" else 0.0
+    elif platform == "gemini":
+        return gemini_fee(price, fee_rate) + gas
+    elif platform in ("betfair", "smarkets"):
+        # Commission on winnings
+        return (1.0 - price) * fee_rate
+    else:
+        return gas
+
+
+def find_lowest_fee_path(
+    platforms: list[str],
+    yes_prices: dict[str, float],
+    no_prices: dict[str, float],
+) -> dict | None:
+    """Find the lowest-fee cross-platform path for an arb opportunity.
+
+    Given YES and NO prices across multiple platforms, finds the pair
+    (buy YES on platform A, buy NO on platform B) that minimizes total fees.
+
+    Args:
+        platforms: List of platform names with prices.
+        yes_prices: {platform: yes_ask_price} for each platform.
+        no_prices: {platform: no_ask_price} for each platform.
+
+    Returns:
+        Dict with best_yes_platform, best_no_platform, total_cost,
+        estimated_fees, net_profit, or None if no profitable path exists.
+    """
+    best = None
+
+    for yes_plat in platforms:
+        yes_p = yes_prices.get(yes_plat)
+        if yes_p is None or yes_p <= 0 or yes_p >= 1:
+            continue
+        for no_plat in platforms:
+            if no_plat == yes_plat:
+                continue
+            no_p = no_prices.get(no_plat)
+            if no_p is None or no_p <= 0 or no_p >= 1:
+                continue
+
+            total_cost = yes_p + no_p
+            if total_cost >= 1.0:
+                continue
+
+            # Estimate fees for this path
+            yes_fee = estimate_total_fee(yes_plat, yes_p)
+            no_fee = estimate_total_fee(no_plat, no_p)
+            total_fees = yes_fee + no_fee
+            net_profit = 1.0 - total_cost - total_fees
+
+            if net_profit <= 0:
+                continue
+
+            if best is None or net_profit > best["net_profit"]:
+                best = {
+                    "best_yes_platform": yes_plat,
+                    "best_no_platform": no_plat,
+                    "yes_price": yes_p,
+                    "no_price": no_p,
+                    "total_cost": total_cost,
+                    "estimated_fees": total_fees,
+                    "net_profit": net_profit,
+                }
+
+    return best
 

@@ -375,7 +375,7 @@ class TestDisplayResults:
         with patch("sys.stdout", buf):
             scanner._display_results([], json_output=False)
         output = buf.getvalue()
-        assert "0 arbitrage" in output
+        assert "0 opportunities" in output
 
     def test_json_output(self):
         scanner = _import_scanner()

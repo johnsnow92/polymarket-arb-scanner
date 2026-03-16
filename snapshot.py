@@ -47,6 +47,18 @@ class SnapshotRecorder:
             CREATE INDEX IF NOT EXISTS idx_snapshots_opp_type
                 ON price_snapshots(opp_type);
         """)
+        # Add columns for Layer 2-4 strategy metadata (backward-compatible)
+        for col, col_type in [
+            ("direction", "TEXT"),
+            ("confidence", "REAL"),
+            ("strategy_layer", "INTEGER"),
+        ]:
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE price_snapshots ADD COLUMN {col} {col_type}"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         self.conn.commit()
 
     def record_snapshot(self, opportunities: list[dict]) -> int:
@@ -84,10 +96,17 @@ class SnapshotRecorder:
             # Fees = gross_spread - net_profit
             fees = gross_spread - net_profit if gross_spread > net_profit else 0.0
 
+            # Extract Layer 2-4 metadata
+            direction = opp.get("_direction", "")
+            confidence = opp.get("confidence")
+            if isinstance(confidence, str):
+                confidence = {"HIGH": 0.9, "MEDIUM": 0.7, "LOW": 0.5}.get(confidence)
+            strategy_layer = self._get_strategy_layer(opp_type)
+
             rows.append((
                 now, market, platform_a, platform_b,
                 price_a, price_b, gross_spread, fees,
-                net_profit, opp_type,
+                net_profit, opp_type, direction, confidence, strategy_layer,
             ))
 
         if not rows:
@@ -98,8 +117,8 @@ class SnapshotRecorder:
                 """INSERT INTO price_snapshots
                    (timestamp, market, platform_a, platform_b,
                     price_a, price_b, gross_spread, fees,
-                    net_profit, opp_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    net_profit, opp_type, direction, confidence, strategy_layer)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
             self.conn.commit()
@@ -152,6 +171,20 @@ class SnapshotRecorder:
         elif opp_type == "EventDivergence":
             platform = opp.get("_platform", "")
             return platform, "metaculus", *self._parse_prices_str(prices_str)
+        elif opp_type == "StalePriceOpp":
+            return (opp.get("_stale_platform", ""), opp.get("_fresh_platform", ""),
+                    opp.get("_stale_price"), opp.get("_fresh_price"))
+        elif opp_type == "ResolutionSnipeOpp":
+            platform = opp.get("_platform", "")
+            return platform, platform, opp.get("_price"), 1.0
+        elif opp_type == "ConvergenceOpp":
+            return (opp.get("_platform", ""), "median",
+                    opp.get("_trade_price"), opp.get("_median_price"))
+        elif opp_type == "MarketMake":
+            platform = opp.get("_platform", "")
+            return platform, platform, opp.get("_bid_price"), opp.get("_ask_price")
+        elif opp_type.startswith("MultiCross"):
+            return "multi", "cross", *self._parse_prices_str(prices_str)
 
         return "", "", None, None
 
@@ -214,6 +247,24 @@ class SnapshotRecorder:
                     (start_time, end_time),
                 ).fetchall()
             return [dict(r) for r in rows]
+
+    @staticmethod
+    def _get_strategy_layer(opp_type: str) -> int:
+        """Determine the strategy layer for an opportunity type."""
+        _LAYERS = {
+            "Binary": 1, "NegRisk": 1, "KalshiBinary": 1, "KalshiMulti": 1,
+            "Cross": 1, "BetfairBack": 1, "SmarketsBack": 1, "SXBetBack": 1,
+            "MatchbookBack": 1, "GeminiBinary": 1, "GeminiMulti": 1,
+            "IBKRBinary": 1, "MultiCross": 1, "TriangularCross": 1,
+            "Spread": 1,
+            "StalePriceOpp": 2, "ResolutionSnipeOpp": 2,
+            "MarketMake": 3,
+            "EventDivergence": 4, "ConvergenceOpp": 4,
+        }
+        for prefix, layer in _LAYERS.items():
+            if opp_type.startswith(prefix):
+                return layer
+        return 0
 
     def get_snapshot_count(self) -> int:
         """Return total number of snapshots in the database."""

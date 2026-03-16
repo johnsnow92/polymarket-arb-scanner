@@ -11,7 +11,7 @@ class TestDisplayResults:
     def test_no_opportunities_message(self, capsys):
         display_results([])
         captured = capsys.readouterr()
-        assert "0 arbitrage opportunities found" in captured.out
+        assert "0 opportunities found" in captured.out
         assert "No opportunities above" in captured.out
 
     def test_table_output(self, capsys):
@@ -28,7 +28,7 @@ class TestDisplayResults:
         }]
         display_results(opps, json_output=False)
         captured = capsys.readouterr()
-        assert "1 arbitrage opportunities found" in captured.out
+        assert "1 opportunities found" in captured.out
         assert "Binary" in captured.out
         assert "$0.0300" in captured.out
 
