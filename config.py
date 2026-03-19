@@ -226,6 +226,15 @@ IBKR_ORDER_RATE_LIMIT = _env_float("IBKR_ORDER_RATE_LIMIT", "5.0")
 METACULUS_API_KEY = os.getenv("METACULUS_API_KEY")
 METACULUS_CACHE_TTL = _env_float("METACULUS_CACHE_TTL", "300")
 
+# ---------------------------------------------------------------------------
+# Feature flags — defaults are false for local dev safety.
+# Enable in production via Railway env vars:
+#   MM_ENABLED=true              — Market making engine
+#   SNAPSHOT_ENABLED=true        — Price snapshot recording for backtesting
+#   DYNAMIC_FEE_ENABLED=true     — Real-time Polygon gas price monitoring
+#   EVENT_MONITOR_ENABLED=true   — Metaculus/Manifold signal aggregation
+# ---------------------------------------------------------------------------
+
 # Dynamic fee arbitrage (GasMonitor)
 POLYGON_RPC_URL = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
 DYNAMIC_FEE_ENABLED = _env_bool("DYNAMIC_FEE_ENABLED", "false")
@@ -241,9 +250,9 @@ STALE_PRICE_MOVE_PCT = _env_float("STALE_PRICE_MOVE_PCT", "0.03")
 
 # Market making
 MM_ENABLED = _env_bool("MM_ENABLED", "false")
-MM_MIN_SPREAD = _env_float("MM_MIN_SPREAD", "0.03")
+MM_MIN_SPREAD = _env_float("MM_MIN_SPREAD", "0.02")  # 2% minimum spread width
 MM_QUOTE_SIZE = _env_float("MM_QUOTE_SIZE", "5.0")
-MM_MAX_INVENTORY = _env_float("MM_MAX_INVENTORY", "50.0")
+MM_MAX_INVENTORY = _env_float("MM_MAX_INVENTORY", "500.0")  # $500 per market cap
 MM_MAX_TOTAL_EXPOSURE = _env_float("MM_MAX_TOTAL_EXPOSURE", "500.0")
 MM_REFRESH_INTERVAL = _env_float("MM_REFRESH_INTERVAL", "10.0")
 
