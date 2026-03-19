@@ -1,0 +1,382 @@
+# REQUIREMENTS.md — Polymarket Arb Scanner
+
+## Requirement Categories
+
+- **INTEG** — Integration: wire existing code into the live pipeline
+- **ENABLE** — Feature Enablement: flip switches, configure for production
+- **HARDEN** — Production Hardening: validate, secure, make robust
+- **MONITOR** — Observability: dashboards, metrics, alerts
+- **OPTIMIZE** — Capital Optimization: maximize returns
+- **LIVE** — Go Live: deploy and validate in production
+
+---
+
+## INTEG — Integration
+
+### INTEG-01: Wire `find_lowest_fee_path()` into cross-platform scans
+
+**What**: `fees.py:find_lowest_fee_path()` (lines 948-1004) exists but is never called outside tests. Cross-platform scans and the executor should use it to route trades through the lowest-fee platform path.
+
+**Where**: `scans/cross.py`, `executor.py`, `fees.py`
+
+**Acceptance**: When a cross-platform opportunity is detected, the executor selects the platform pair that minimizes total fees. Verified by unit test showing fee-optimal routing vs naive routing.
+
+**Strategies affected**: #9 (fee promotional arbitrage), #16 (dynamic fee routing)
+
+---
+
+### INTEG-02: Fix market making one-shot mode `dry_run` hardcode ✓ COMPLETE (01-02)
+
+**What**: `cli.py:488` hardcodes `dry_run=True` when instantiating `MarketMaker` in one-shot mode, ignoring `--exec-mode` flag.
+
+**Where**: `cli.py` line ~488
+
+**Acceptance**: `python scanner.py --mode mm --exec-mode full-auto` creates a MarketMaker with `dry_run=False`. Default (`--dry-run`) still sets `dry_run=True`.
+
+**Strategies affected**: #10, #11, #12 (all market making)
+
+---
+
+### INTEG-03: Add Kalshi to continuous mode resolution scan ✓ COMPLETE (01-02)
+
+**What**: `continuous.py` lines 1009-1017 only feeds Polymarket markets to `scan_resolution_snipes()`. Kalshi markets should also be scanned.
+
+**Where**: `continuous.py`
+
+**Acceptance**: Resolution sniping in continuous mode detects near-settled Kalshi markets. Verified by test with mocked Kalshi data.
+
+**Strategies affected**: #7 (resolution sniping)
+
+---
+
+### INTEG-04: Wire `update_bankroll()` into continuous mode ✓ COMPLETE (01-02)
+
+**What**: `position_sizer.py:update_bankroll()` (lines 328-337) exists but is never called in `continuous.py`. Bankroll is initialized once and never updated after trades settle.
+
+**Where**: `continuous.py`, `position_sizer.py`
+
+**Acceptance**: After each trade execution cycle in continuous mode, `update_bankroll()` is called with the current total balance across platforms. Position sizing reflects actual available capital.
+
+**Strategies affected**: #17 (Kelly criterion sizing)
+
+---
+
+### INTEG-05: Wire stale scan awareness into one-shot diagnostic
+
+**What**: Stale scan IS included in one-shot "all" mode (cli.py lines 369-376) but logs a warning that it has no historical data. This is correct behavior — stale detection requires WebSocket feeds. No code change needed; this is a documentation/awareness item.
+
+**Where**: N/A (already correct)
+
+**Acceptance**: CLAUDE.md accurately reflects that stale scan in one-shot mode is informational only. Users understand to use `--continuous` for real stale detection.
+
+**Strategies affected**: #8 (stale price exploitation)
+
+---
+
+## ENABLE — Feature Enablement
+
+### ENABLE-01: Enable market making with safe defaults
+
+**What**: Set `MM_ENABLED` to be configurable with production-safe defaults. The 528-line market making engine is fully built. Start with conservative spread widths and small position limits.
+
+**Where**: `config.py`, Railway env vars
+
+**Acceptance**: Market making runs in continuous mode when `MM_ENABLED=true`. Default spread width and inventory limits prevent excessive exposure.
+
+**Strategies affected**: #10, #11, #12
+
+---
+
+### ENABLE-02: Enable snapshot recording for backtesting
+
+**What**: Set `SNAPSHOT_ENABLED=true` in production to accumulate historical price data for backtesting.
+
+**Where**: `config.py`, Railway env vars
+
+**Acceptance**: `snapshot.py` records price snapshots to SQLite. `backtest.py` can replay them. Data accumulates without impacting scan performance.
+
+**Strategies affected**: #20 (backtesting-driven tuning)
+
+---
+
+### ENABLE-03: Enable dynamic fee monitoring
+
+**What**: Set `DYNAMIC_FEE_ENABLED=true` with a Polygon RPC URL for real-time gas price monitoring on Polymarket trades.
+
+**Where**: `config.py`, `gas_monitor.py`, Railway env vars
+
+**Acceptance**: Gas monitor fetches real-time Polygon gas prices. Executor rejects trades where profit < dynamic gas+fee threshold.
+
+**Strategies affected**: #16 (dynamic fee routing)
+
+---
+
+### ENABLE-04: Enable event monitor for signal aggregation
+
+**What**: Set `EVENT_MONITOR_ENABLED=true` to activate Metaculus/Manifold signal aggregation.
+
+**Where**: `config.py`, Railway env vars
+
+**Acceptance**: Event monitor runs in continuous mode, producing divergence signals that feed into informed trading decisions.
+
+**Strategies affected**: #13, #14, #15
+
+---
+
+### ENABLE-05: Configure all 8 platform credentials in Railway
+
+**What**: Ensure all platform API credentials are set as Railway environment variables for production deployment.
+
+**Where**: Railway dashboard / `railway.toml`
+
+**Acceptance**: Each platform client initializes successfully in production. `validate_config()` passes for all enabled platforms.
+
+**Strategies affected**: All 20
+
+---
+
+## HARDEN — Production Hardening
+
+### HARDEN-01: Live dry-run test per strategy type
+
+**What**: Run each of the 20 strategy types against real API data in `--dry-run` mode. Verify that detected opportunities are genuine by manual spot-checking against platform UIs.
+
+**Where**: All scan modules
+
+**Acceptance**: Each strategy type produces at least one valid detection (or confirms zero opportunities exist at that moment). False positive rate measured and documented.
+
+**Strategies affected**: All 20
+
+---
+
+### HARDEN-02: Validate fee calculations against actual platform charges
+
+**What**: Compare `fees.py` calculations against actual post-trade fee breakdowns from each platform's trade history API.
+
+**Where**: `fees.py`, platform APIs
+
+**Acceptance**: Fee calculations match actual charges within 0.1% for at least 5 trades per platform.
+
+**Strategies affected**: All cross-platform strategies
+
+---
+
+### HARDEN-03: Structured logging for trade decisions
+
+**What**: Add structured JSON logging for every trade decision — why accepted, why rejected (which risk check failed, profit below threshold, etc.).
+
+**Where**: `executor.py`, `risk_manager.py`
+
+**Acceptance**: Every `execute()` call produces a structured log entry with decision rationale. Logs are queryable by strategy type, platform, and outcome.
+
+**Strategies affected**: All 20
+
+---
+
+### HARDEN-04: Rate-limit awareness per platform
+
+**What**: Parse rate-limit headers from API responses. Implement adaptive backoff when approaching limits. Currently retries use `tenacity` but don't adapt to rate-limit signals.
+
+**Where**: All `*_api.py` modules
+
+**Acceptance**: No 429 errors in steady-state operation. Backoff triggers before hitting hard limits.
+
+**Strategies affected**: All 20
+
+---
+
+### HARDEN-05: Idempotent order placement
+
+**What**: Add client-side UUID per order to prevent duplicate submissions on retries or crash recovery.
+
+**Where**: `executor.py`, platform traders
+
+**Acceptance**: A crash mid-execution followed by `recovery.py` reconciliation does not produce duplicate orders on any platform.
+
+**Strategies affected**: All execution paths
+
+---
+
+## MONITOR — Observability
+
+### MONITOR-01: Dashboard UI with live P&L and positions
+
+**What**: Enhance `dashboard_ui.py` with real-time P&L chart, open positions table, and per-strategy performance breakdown.
+
+**Where**: `dashboard_ui.py`, `dashboard.py`
+
+**Acceptance**: GET `/` shows live P&L, positions, and strategy breakdown. Auto-refreshes every 30s.
+
+---
+
+### MONITOR-02: Per-strategy metrics
+
+**What**: Track win rate, average profit, volume, and execution latency per strategy type using `metrics.py`.
+
+**Where**: `metrics.py`, `executor.py`
+
+**Acceptance**: GET `/metrics` exposes Prometheus-compatible counters and histograms broken down by strategy type.
+
+---
+
+### MONITOR-03: Anomaly alerting
+
+**What**: Alert on sudden loss spikes, API failures, balance drops, or sustained zero-opportunity periods.
+
+**Where**: `alerting.py`, `notifier.py`
+
+**Acceptance**: Webhook fires within 60s of anomaly detection. Alerts include severity, affected strategy, and suggested action.
+
+---
+
+### MONITOR-04: Platform fund rebalancing alerts
+
+**What**: Alert when capital allocation across platforms drifts from optimal distribution based on opportunity flow.
+
+**Where**: `alerting.py`, `position_sizer.py`
+
+**Acceptance**: Weekly rebalancing recommendation sent via webhook with current vs recommended allocation per platform.
+
+---
+
+## OPTIMIZE — Capital Optimization
+
+### OPTIMIZE-01: Dynamic fee schedule updates
+
+**What**: Support runtime promotional rate changes (e.g., Polymarket fee holidays, Matchbook 0% promos) without redeployment.
+
+**Where**: `fees.py`, `config.py`
+
+**Acceptance**: Changing a `*_FEE_RATE` env var on Railway takes effect within one scan cycle without restart.
+
+---
+
+### OPTIMIZE-02: Automated backtest-to-config feedback loop
+
+**What**: After accumulating snapshot data (ENABLE-02), automatically run backtests and suggest threshold adjustments.
+
+**Where**: `backtest.py`, `config.py`
+
+**Acceptance**: Weekly automated backtest produces a report with recommended `MIN_NET_ROI`, `FUZZY_MATCH_THRESHOLD`, and other tuning params. Recommendations applied via env vars.
+
+---
+
+### OPTIMIZE-03: Priority execution lane for time-sensitive strategies
+
+**What**: Resolution sniping and stale price exploitation are time-critical. Add a priority queue that bypasses normal execution ordering for these strategies.
+
+**Where**: `continuous.py`, `executor.py`
+
+**Acceptance**: Time-sensitive opportunities execute within 500ms of detection, ahead of queued non-urgent trades.
+
+---
+
+### OPTIMIZE-04: Live bankroll tracking across all platforms
+
+**What**: Periodically fetch actual balances from all 8 platforms and update position sizer.
+
+**Where**: `continuous.py`, `position_sizer.py`, platform APIs
+
+**Acceptance**: `update_bankroll()` called every 5 minutes with aggregated balance from all platforms. Position sizing reflects real capital.
+
+---
+
+### OPTIMIZE-05: Automated fund rebalancing recommendations
+
+**What**: Extend MONITOR-04 from alerts to actionable recommendations with one-click execution (manual transfer, since cross-platform transfers require human action).
+
+**Where**: `alerting.py`, `dashboard_ui.py`
+
+**Acceptance**: Dashboard shows recommended transfers between platforms with expected ROI impact.
+
+---
+
+## LIVE — Go Live
+
+### LIVE-01: Deploy Layer 1 in full-auto mode
+
+**What**: Set `DRY_RUN=false`, `EXECUTION_MODE=full-auto` with Layer 1 strategies only. Conservative `MAX_TRADE_SIZE`.
+
+**Where**: Railway env vars
+
+**Acceptance**: Bot executes Layer 1 trades autonomously. All trades logged to `trades.db`.
+
+---
+
+### LIVE-02: Monitor and tune Layer 1 for 48 hours
+
+**What**: Watch P&L, false positive rate, and execution success rate. Adjust thresholds as needed.
+
+**Where**: Dashboard, `trades.db` analysis
+
+**Acceptance**: Layer 1 produces net positive P&L or identified issues are resolved before proceeding.
+
+---
+
+### LIVE-03: Enable Layer 2 (near-arbitrage)
+
+**What**: Add resolution sniping, stale price exploitation, and fee routing to the live pipeline.
+
+**Where**: Railway env vars
+
+**Acceptance**: Layer 2 strategies execute alongside Layer 1. Net P&L remains positive.
+
+---
+
+### LIVE-04: Enable Layer 3 (market making)
+
+**What**: Set `MM_ENABLED=true` with conservative parameters.
+
+**Where**: Railway env vars
+
+**Acceptance**: Market making quotes placed and filled. Inventory stays within limits.
+
+---
+
+### LIVE-05: Enable Layer 4 (informed trading)
+
+**What**: Set `EVENT_MONITOR_ENABLED=true` and activate convergence/divergence strategies.
+
+**Where**: Railway env vars
+
+**Acceptance**: Informed trading strategies execute. Signal quality validated against outcomes.
+
+---
+
+### LIVE-06: 7-day validation against success criteria
+
+**What**: Run all layers for 7 days and measure against the 3 success criteria.
+
+**Where**: `trades.db` analysis
+
+**Acceptance**:
+1. Net positive P&L in `trades.db` over 7 days
+2. <5% false positive rate on detected opportunities
+3. At least one profitable autonomous round-trip trade
+
+---
+
+## Strategy-to-Requirement Traceability
+
+| Strategy | Requirements |
+|----------|-------------|
+| #1 Binary/NegRisk internal | HARDEN-01, LIVE-01 |
+| #2 Back-all/Back-lay | HARDEN-01, LIVE-01 |
+| #3 Cross-platform 2-way | INTEG-01, HARDEN-01, LIVE-01 |
+| #4 Multi-outcome cross-platform | INTEG-01, HARDEN-01, LIVE-01 |
+| #5 Triangular (3-way) | INTEG-01, HARDEN-01, LIVE-01 |
+| #6 Spread detection | HARDEN-01, LIVE-01 |
+| #7 Resolution sniping | INTEG-03, HARDEN-01, LIVE-03, OPTIMIZE-03 |
+| #8 Stale price exploitation | INTEG-05, HARDEN-01, LIVE-03, OPTIMIZE-03 |
+| #9 Fee promotional arbitrage | INTEG-01, OPTIMIZE-01, LIVE-03 |
+| #10 Passive market making | INTEG-02, ENABLE-01, HARDEN-01, LIVE-04 |
+| #11 Cross-platform MM | INTEG-02, ENABLE-01, HARDEN-01, LIVE-04 |
+| #12 Inventory-hedged MM | INTEG-02, ENABLE-01, HARDEN-01, LIVE-04 |
+| #13 Event divergence | ENABLE-04, HARDEN-01, LIVE-05 |
+| #14 Cross-platform convergence | ENABLE-04, HARDEN-01, LIVE-05 |
+| #15 Multi-source signal aggregation | ENABLE-04, HARDEN-01, LIVE-05 |
+| #16 Dynamic fee routing | INTEG-01, ENABLE-03, OPTIMIZE-01 |
+| #17 Kelly criterion sizing | INTEG-04, OPTIMIZE-04 |
+| #18 Platform fund rebalancing | MONITOR-04, OPTIMIZE-05 |
+| #19 Latency optimization | OPTIMIZE-03 |
+| #20 Backtesting-driven tuning | ENABLE-02, OPTIMIZE-02 |
