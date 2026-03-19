@@ -596,3 +596,52 @@ class TestJsonOutput:
         call_args = mock_display.call_args
         # display_results(all_opportunities, args.json) — second positional arg is True
         assert call_args[0][1] is True
+
+
+# ---------------------------------------------------------------------------
+# MarketMaker dry_run respects --exec-mode (INTEG-02)
+# ---------------------------------------------------------------------------
+
+
+class TestMarketMakerDryRun:
+    """MarketMaker must use executor.dry_run — not hardcoded True."""
+
+    @patch.object(_cli_mod, "display_results")
+    @patch.object(_cli_mod, "dashboard_state")
+    def test_market_maker_respects_exec_mode_full_auto(self, mock_dash, mock_display):
+        """When exec-mode is full-auto, MarketMaker gets dry_run=False."""
+        executor = _make_executor(dry_run=False)
+        args = _make_args(mode="mm")
+
+        with patch("market_maker.MarketMaker") as mock_mm_cls:
+            mock_mm_instance = MagicMock()
+            mock_mm_instance.generate_opportunities.return_value = []
+            mock_mm_cls.return_value = mock_mm_instance
+
+            _cli_mod._run_oneshot(args, 0.01, None, executor, _make_db())
+
+        mock_mm_cls.assert_called_once()
+        _, call_kwargs = mock_mm_cls.call_args
+        assert call_kwargs.get("dry_run") is False, (
+            "MarketMaker should receive dry_run=False when executor.dry_run is False"
+        )
+
+    @patch.object(_cli_mod, "display_results")
+    @patch.object(_cli_mod, "dashboard_state")
+    def test_market_maker_respects_exec_mode_dry_run(self, mock_dash, mock_display):
+        """When executor is in dry_run mode, MarketMaker gets dry_run=True."""
+        executor = _make_executor(dry_run=True)
+        args = _make_args(mode="mm")
+
+        with patch("market_maker.MarketMaker") as mock_mm_cls:
+            mock_mm_instance = MagicMock()
+            mock_mm_instance.generate_opportunities.return_value = []
+            mock_mm_cls.return_value = mock_mm_instance
+
+            _cli_mod._run_oneshot(args, 0.01, None, executor, _make_db())
+
+        mock_mm_cls.assert_called_once()
+        _, call_kwargs = mock_mm_cls.call_args
+        assert call_kwargs.get("dry_run") is True, (
+            "MarketMaker should receive dry_run=True when executor.dry_run is True"
+        )

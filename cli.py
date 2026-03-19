@@ -485,7 +485,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                 quote_size=MM_QUOTE_SIZE,
                 max_inventory=MM_MAX_INVENTORY,
                 max_total_exposure=MM_MAX_TOTAL_EXPOSURE,
-                dry_run=True,
+                dry_run=executor.dry_run,
             )
             # Register liquid markets for MM
             if poly_markets:
