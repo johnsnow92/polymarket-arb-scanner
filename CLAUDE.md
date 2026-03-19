@@ -132,7 +132,7 @@ Scan modules:
 - `ibkr.py` — IBKR ForecastEx binary only (BUY-only, $0.00 commission)
 - `multi_cross.py` — multi-outcome cross-platform (cheapest YES per outcome across Polymarket + Kalshi, fuzzy event-title matching)
 - `triangular.py` — 3-way cross-platform (union-find grouping of pairwise matches)
-- `stale.py` — stale price exploitation (detects slow-updating platforms)
+- `stale.py` — stale price exploitation (detects slow-updating platforms). **Note:** In one-shot mode (`scanner.py` without `--continuous`), the stale scan runs but produces no results because it requires historical WebSocket price data to detect staleness. Use `--continuous` mode for real stale detection. One-shot mode logs an informational warning.
 - `resolution.py` — resolution sniping (near-certain outcomes at a discount)
 - `convergence.py` — cross-platform convergence (outlier price → median)
 - `helpers.py` — shared utilities (token IDs, CLOB fetch, scoring)
@@ -249,6 +249,28 @@ All env vars are defined in `config.py` with defaults. Key groups:
 - Tuning: `RESCAN_INTERVAL`, `WS_TRIGGER_THRESHOLD`, `WS_SUBSCRIPTION_LIMIT`, `FUZZY_MATCH_THRESHOLD`
 - Infra: `WEBHOOK_URL`, `DASHBOARD_PORT`, `DATA_DIR`, `LOG_LEVEL`, `LOG_FILE`
 - Proxies: `POLYMARKET_PROXY_URL`, `KALSHI_PROXY_URL`
+
+### Railway Production Configuration
+
+The following env vars should be set in Railway for production deployment (Railway Dashboard -> Project -> Service -> Variables):
+
+**Feature Flags (all default to false in config.py):**
+- `MM_ENABLED=true` — Enable market making engine
+- `SNAPSHOT_ENABLED=true` — Enable price snapshot recording for backtesting
+- `DYNAMIC_FEE_ENABLED=true` — Enable real-time Polygon gas monitoring
+- `EVENT_MONITOR_ENABLED=true` — Enable Metaculus/Manifold signal aggregation
+
+**Market Making Tuning:**
+- `MM_MIN_SPREAD=0.02` — 2% minimum spread width
+- `MM_MAX_INVENTORY=500.0` — $500 per market inventory cap
+
+**Dynamic Fees:**
+- `POLYGON_RPC_URL=https://polygon-rpc.com` — Polygon RPC for gas monitoring (or use Alchemy/Infura for reliability)
+
+**Platform Credentials (all 8 trading platforms):**
+Already documented above. Ensure ALL platform credentials are set for full cross-platform coverage: `POLYMARKET_PRIVATE_KEY`, `KALSHI_API_KEY_ID`/`KALSHI_PRIVATE_KEY_PATH`, `BETFAIR_APP_KEY`/`BETFAIR_USERNAME`/`BETFAIR_PASSWORD`, `SMARKETS_API_KEY`, `SXBET_API_KEY`, `MATCHBOOK_USERNAME`/`MATCHBOOK_PASSWORD`, `GEMINI_API_KEY`/`GEMINI_API_SECRET`, `IBKR_HOST`/`IBKR_PORT`/`IBKR_CLIENT_ID`.
+
+Note: `POLYMARKET_PRIVATE_KEY` and `KALSHI_API_KEY_ID`/`KALSHI_PRIVATE_KEY_PATH` should already be configured from initial deployment. The IBKR connection requires IB Gateway running and reachable from Railway — requires a persistent IB Gateway host (not a local machine).
 
 ## Agent Team Notes
 
