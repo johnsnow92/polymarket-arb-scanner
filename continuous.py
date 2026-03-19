@@ -720,6 +720,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             logger.warning("Failed to initialize snapshot recorder: %s", e)
 
     _last_snapshot_time = 0.0
+    _last_bankroll_refresh = 0.0
+    _bankroll_refresh_interval = 300.0  # 5 minutes
     _last_daily_reset_date = time.strftime("%Y-%m-%d", time.gmtime())
 
     # Import alert_manager for daily resets
@@ -1016,6 +1018,24 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     except Exception as exc:
                         logger.debug("Resolution snipe scan failed: %s", exc)
 
+                # Kalshi resolution sniping
+                if args.mode in ("all", "resolution") and kalshi_data:
+                    try:
+                        from scans.resolution import scan_resolution_snipes
+                        # kalshi_data is (events, markets_by_event, event_titles)
+                        # Flatten markets_by_event dict into a flat list for resolution scan
+                        kalshi_flat_markets = []
+                        if len(kalshi_data) >= 2 and kalshi_data[1]:
+                            for _evt_ticker, _mkts in kalshi_data[1].items():
+                                kalshi_flat_markets.extend(_mkts)
+                        if kalshi_flat_markets:
+                            k_res_opps = scan_resolution_snipes(
+                                kalshi_flat_markets, platform="kalshi", min_profit=min_profit,
+                            )
+                            all_opportunities.extend(k_res_opps)
+                    except Exception as exc:
+                        logger.debug("Kalshi resolution snipe scan failed: %s", exc)
+
                 # Layer 4: Cross-platform convergence
                 if args.mode in ("all", "convergence"):
                     try:
@@ -1200,6 +1220,18 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         try:
                             if executor.execute(opp):
                                 executed += 1
+                                # Immediate bankroll refresh after trade (per user decision)
+                                try:
+                                    balances = executor._fetch_balances("Cross")
+                                    if balances and executor.position_sizer:
+                                        total = sum(
+                                            v for v in balances.values()
+                                            if isinstance(v, (int, float))
+                                        )
+                                        if total > 0:
+                                            executor.position_sizer.update_bankroll(total)
+                                except Exception as exc:
+                                    logger.debug("Post-trade bankroll refresh failed: %s", exc)
                         except Exception as e:
                             logger.error("Execution error: %s", e)
                     logger.info("Executed: %d/%d", executed, len(all_opportunities))
@@ -1223,6 +1255,27 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                             _last_snapshot_time = now
                         except Exception as e:
                             logger.warning("Snapshot recording failed: %s", e)
+
+                # Timer-based bankroll refresh (every 5 minutes)
+                nonlocal _last_bankroll_refresh
+                _now = time.time()
+                if _now - _last_bankroll_refresh >= _bankroll_refresh_interval:
+                    try:
+                        balances = executor._fetch_balances("Cross")
+                        if balances and executor.position_sizer:
+                            total = sum(
+                                v for v in balances.values() if isinstance(v, (int, float))
+                            )
+                            if total > 0:
+                                executor.position_sizer.update_bankroll(total)
+                                logger.info(
+                                    "Bankroll refreshed: $%.2f across %d platforms",
+                                    total, len(balances),
+                                )
+                        _last_bankroll_refresh = _now
+                    except Exception as exc:
+                        logger.debug("Bankroll refresh failed: %s", exc)
+                        _last_bankroll_refresh = _now  # Don't retry immediately on failure
 
                 # Rebuild opportunity index for WS-triggered execution
                 opp_index.rebuild(all_opportunities)

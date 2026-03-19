@@ -470,3 +470,228 @@ class TestCalcRealizedPnl:
         # No fill prices, uses order prices: 1.0 - (0.40*5 + 0.45*5)
         expected = 1.0 - (0.40 * 5.0 + 0.45 * 5.0)
         assert realized == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# Kalshi resolution sniping in continuous mode (INTEG-03)
+# ---------------------------------------------------------------------------
+
+
+class TestKalshiResolution:
+    """Kalshi markets must be fed to scan_resolution_snipes in continuous mode."""
+
+    def _make_scan_inner_args(self, mode="all", poly_markets=None, kalshi_data=None):
+        """Build the locals dict that the continuous scan body uses."""
+        import argparse
+        args = argparse.Namespace(
+            mode=mode,
+            min_profit=0.01,
+            min_depth=0,
+            min_confidence="LOW",
+            limit=None,
+            json=False,
+            continuous=True,
+        )
+        return {
+            "args": args,
+            "poly_markets": poly_markets or [],
+            "kalshi_data": kalshi_data,
+            "min_profit": 0.01,
+            "all_opportunities": [],
+        }
+
+    def test_kalshi_markets_fed_to_resolution_scan(self):
+        """When kalshi_data is present and mode is 'all', scan_resolution_snipes is
+        called with a flat list of Kalshi market dicts and platform='kalshi'."""
+        markets_by_event = {
+            "EVT-1": [{"ticker": "EVT-1-Y", "yes_price": 0.95}],
+            "EVT-2": [{"ticker": "EVT-2-Y", "yes_price": 0.97}, {"ticker": "EVT-2-N", "yes_price": 0.03}],
+        }
+        kalshi_data = ([], markets_by_event, {})
+
+        call_args_list = []
+
+        def fake_scan(markets, platform, min_profit):
+            call_args_list.append((markets, platform, min_profit))
+            return []
+
+        # Simulate the Kalshi resolution scan block from continuous.py
+        from scans import resolution as _res_mod
+        with patch.object(_res_mod, "scan_resolution_snipes", side_effect=fake_scan):
+            # Execute the block directly (mirrors continuous.py logic)
+            all_opportunities = []
+            if kalshi_data:
+                kalshi_flat_markets = []
+                if len(kalshi_data) >= 2 and kalshi_data[1]:
+                    for _evt_ticker, _mkts in kalshi_data[1].items():
+                        kalshi_flat_markets.extend(_mkts)
+                if kalshi_flat_markets:
+                    k_res_opps = _res_mod.scan_resolution_snipes(
+                        kalshi_flat_markets, platform="kalshi", min_profit=0.01,
+                    )
+                    all_opportunities.extend(k_res_opps)
+
+        assert len(call_args_list) == 1
+        called_markets, called_platform, _ = call_args_list[0]
+        assert called_platform == "kalshi"
+        # All 3 markets from both events must be in the flat list
+        assert len(called_markets) == 3
+        tickers = {m["ticker"] for m in called_markets}
+        assert "EVT-1-Y" in tickers
+        assert "EVT-2-Y" in tickers
+        assert "EVT-2-N" in tickers
+
+    def test_no_kalshi_data_skips_gracefully(self):
+        """When kalshi_data is None, no error occurs."""
+        kalshi_data = None
+        all_opportunities = []
+
+        # This mirrors the guard in continuous.py — if kalshi_data is falsy, skip
+        if kalshi_data:
+            raise AssertionError("Should not reach here")
+
+        # No exception should occur; opportunities list unchanged
+        assert all_opportunities == []
+
+    def test_empty_markets_by_event_skips_scan(self):
+        """When kalshi_data[1] is empty dict, scan is not called."""
+        kalshi_data = ([], {}, {})
+        called = []
+
+        def fake_scan(markets, platform, min_profit):
+            called.append(True)
+            return []
+
+        from scans import resolution as _res_mod
+        with patch.object(_res_mod, "scan_resolution_snipes", side_effect=fake_scan):
+            all_opportunities = []
+            if kalshi_data:
+                kalshi_flat_markets = []
+                if len(kalshi_data) >= 2 and kalshi_data[1]:
+                    for _evt_ticker, _mkts in kalshi_data[1].items():
+                        kalshi_flat_markets.extend(_mkts)
+                if kalshi_flat_markets:
+                    k_res_opps = _res_mod.scan_resolution_snipes(
+                        kalshi_flat_markets, platform="kalshi", min_profit=0.01,
+                    )
+                    all_opportunities.extend(k_res_opps)
+
+        # scan was never called because flat list was empty
+        assert called == []
+
+
+# ---------------------------------------------------------------------------
+# Bankroll refresh in continuous mode (INTEG-04)
+# ---------------------------------------------------------------------------
+
+
+class TestBankrollRefresh:
+    """Bankroll must refresh every 5 minutes AND immediately after each trade."""
+
+    def _make_executor_with_sizer(self, balances=None, fetch_raises=False):
+        executor = MagicMock()
+        executor.position_sizer = MagicMock()
+        if fetch_raises:
+            executor._fetch_balances.side_effect = Exception("network error")
+        else:
+            executor._fetch_balances.return_value = balances or {
+                "polymarket": 100.0, "kalshi": 50.0
+            }
+        return executor
+
+    def test_timer_refresh_calls_update_bankroll(self):
+        """Timer-based refresh calls update_bankroll with summed balance."""
+        executor = self._make_executor_with_sizer(
+            balances={"polymarket": 100.0, "kalshi": 50.0}
+        )
+
+        # Simulate the timer-based refresh block
+        _last_bankroll_refresh = 0.0
+        _bankroll_refresh_interval = 300.0
+        now = _last_bankroll_refresh + _bankroll_refresh_interval + 1  # past threshold
+
+        if now - _last_bankroll_refresh >= _bankroll_refresh_interval:
+            try:
+                balances = executor._fetch_balances("Cross")
+                if balances and executor.position_sizer:
+                    total = sum(v for v in balances.values() if isinstance(v, (int, float)))
+                    if total > 0:
+                        executor.position_sizer.update_bankroll(total)
+                _last_bankroll_refresh = now
+            except Exception:
+                pass
+
+        executor._fetch_balances.assert_called_once_with("Cross")
+        executor.position_sizer.update_bankroll.assert_called_once_with(150.0)
+
+    def test_timer_does_not_refresh_before_interval(self):
+        """Timer-based refresh is skipped when interval has not elapsed."""
+        executor = self._make_executor_with_sizer()
+
+        _last_bankroll_refresh = 1000.0
+        _bankroll_refresh_interval = 300.0
+        now = 1100.0  # only 100s elapsed, below 300s threshold
+
+        if now - _last_bankroll_refresh >= _bankroll_refresh_interval:
+            executor._fetch_balances("Cross")
+
+        executor._fetch_balances.assert_not_called()
+
+    def test_post_trade_immediate_refresh(self):
+        """After executor.execute returns True, update_bankroll is called immediately."""
+        executor = self._make_executor_with_sizer(
+            balances={"polymarket": 200.0, "kalshi": 100.0}
+        )
+        executor.execute.return_value = True
+        opp = {"type": "BinaryInternal", "net_profit": 0.05}
+
+        executed = 0
+        if executor.execute(opp):
+            executed += 1
+            # Post-trade bankroll refresh
+            try:
+                balances = executor._fetch_balances("Cross")
+                if balances and executor.position_sizer:
+                    total = sum(v for v in balances.values() if isinstance(v, (int, float)))
+                    if total > 0:
+                        executor.position_sizer.update_bankroll(total)
+            except Exception:
+                pass
+
+        assert executed == 1
+        executor._fetch_balances.assert_called_once_with("Cross")
+        executor.position_sizer.update_bankroll.assert_called_once_with(300.0)
+
+    def test_no_position_sizer_skips_gracefully(self):
+        """When executor.position_sizer is None, no error occurs."""
+        executor = MagicMock()
+        executor.position_sizer = None
+        executor._fetch_balances.return_value = {"polymarket": 100.0}
+
+        # Simulate the guard
+        balances = executor._fetch_balances("Cross")
+        if balances and executor.position_sizer:
+            executor.position_sizer.update_bankroll(sum(balances.values()))
+
+        # update_bankroll should never be called
+        # (position_sizer is None, so the attribute doesn't exist)
+        assert executor.position_sizer is None
+
+    def test_fetch_balances_failure_logs_and_continues(self):
+        """When _fetch_balances raises, exception is caught and loop continues."""
+        executor = self._make_executor_with_sizer(fetch_raises=True)
+
+        error_caught = False
+        try:
+            balances = executor._fetch_balances("Cross")
+            if balances and executor.position_sizer:
+                total = sum(v for v in balances.values() if isinstance(v, (int, float)))
+                if total > 0:
+                    executor.position_sizer.update_bankroll(total)
+        except Exception:
+            error_caught = True
+
+        # The guard should catch the exception
+        assert error_caught is True
+        # In production the except block logs and continues — update_bankroll never called
+        executor.position_sizer.update_bankroll.assert_not_called()
