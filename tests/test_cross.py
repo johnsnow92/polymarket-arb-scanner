@@ -663,3 +663,178 @@ class TestRefineCrossAllWithClob:
         # The CLOB refinement should have run — verify net_profit updated
         # (exact value depends on fee func; just verify it was attempted)
         assert "net_profit" in opp
+
+
+# ---------------------------------------------------------------------------
+# _fee_path attachment (find_lowest_fee_path wiring)
+# ---------------------------------------------------------------------------
+
+class TestFeePath:
+    @patch("scans.cross.SEMANTIC_MATCHING_ENABLED", False)
+    @patch("scans.cross.filter_dust", side_effect=lambda x: x)
+    @patch("scans.cross.find_lowest_fee_path")
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
+    @patch("scans.cross._days_to_resolution", return_value=3.0)
+    @patch("scans.cross._within_resolution_window", return_value=True)
+    @patch("scans.cross._extract_token_ids", return_value=["tok_y", "tok_n"])
+    @patch("scans.cross._parallel_fetch_kalshi")
+    @patch("scans.cross.net_profit_cross_platform")
+    @patch("scans.cross.detect_inverted", return_value=False)
+    @patch("scans.cross.parse_outcome_prices", return_value=[0.35, 0.65])
+    @patch("scans.cross.match_markets_to_events")
+    @patch("scans.cross.get_binary_markets")
+    def test_fee_path_attached_on_cross_platform(
+        self, mock_binary, mock_match, mock_prices, mock_inv,
+        mock_fee, mock_pf_kalshi, mock_tokens, mock_window,
+        mock_days, mock_refine, mock_find_path, mock_dust,
+    ):
+        """scan_cross_platform opps carry _fee_path when find_lowest_fee_path returns a dict."""
+        from scans.cross import scan_cross_platform
+        pm_market = {"question": "Will A?", "conditionId": "pm1", "volume": "1000"}
+        kalshi_event = {"title": "Will A?", "event_ticker": "EVT-1"}
+        kalshi_market = {"ticker": "MKT-1", "title": "Will A?"}
+
+        mock_binary.return_value = [pm_market]
+        mock_match.return_value = [{
+            "polymarket": pm_market,
+            "kalshi_event": kalshi_event,
+            "similarity": 90,
+            "confidence": "HIGH",
+        }]
+        mock_pf_kalshi.return_value = {"EVT-1": [kalshi_market]}
+
+        kalshi = MagicMock()
+        kalshi.fetch_all_events.return_value = [kalshi_event]
+        kalshi.get_market_price.return_value = (0.40, 0.60)
+
+        mock_fee.return_value = {"net_profit": 0.05, "fees": 0.01, "gross_spread": 0.06}
+
+        fake_fee_path = {
+            "best_yes_platform": "polymarket",
+            "best_no_platform": "kalshi",
+            "yes_price": 0.35,
+            "no_price": 0.60,
+            "total_cost": 0.95,
+            "estimated_fees": 0.01,
+            "net_profit": 0.04,
+        }
+        mock_find_path.return_value = fake_fee_path
+
+        result = scan_cross_platform([pm_market], kalshi, 0.005,
+                                     kalshi_events_preloaded=[kalshi_event])
+        assert len(result) >= 1
+        opp = result[0]
+        assert "_fee_path" in opp
+        fee_path = opp["_fee_path"]
+        assert "best_yes_platform" in fee_path
+        assert "best_no_platform" in fee_path
+        assert "yes_price" in fee_path
+        assert "no_price" in fee_path
+        assert "total_cost" in fee_path
+        assert "estimated_fees" in fee_path
+        assert "net_profit" in fee_path
+
+    @patch("scans.cross.SEMANTIC_MATCHING_ENABLED", False)
+    @patch("scans.cross.filter_dust", side_effect=lambda x: x)
+    @patch("scans.cross.find_lowest_fee_path")
+    @patch("scans.cross._refine_cross_with_clob", side_effect=lambda opps, *a, **kw: opps)
+    @patch("scans.cross._days_to_resolution", return_value=3.0)
+    @patch("scans.cross._within_resolution_window", return_value=True)
+    @patch("scans.cross._extract_token_ids", return_value=["tok_y", "tok_n"])
+    @patch("scans.cross._parallel_fetch_kalshi")
+    @patch("scans.cross.net_profit_cross_platform")
+    @patch("scans.cross.detect_inverted", return_value=False)
+    @patch("scans.cross.parse_outcome_prices", return_value=[0.35, 0.65])
+    @patch("scans.cross.match_markets_to_events")
+    @patch("scans.cross.get_binary_markets")
+    def test_fee_path_absent_when_no_profitable_path(
+        self, mock_binary, mock_match, mock_prices, mock_inv,
+        mock_fee, mock_pf_kalshi, mock_tokens, mock_window,
+        mock_days, mock_refine, mock_find_path, mock_dust,
+    ):
+        """When find_lowest_fee_path returns None, _fee_path key must be ABSENT (not set to None)."""
+        from scans.cross import scan_cross_platform
+        pm_market = {"question": "Will B?", "conditionId": "pm2", "volume": "500"}
+        kalshi_event = {"title": "Will B?", "event_ticker": "EVT-2"}
+        kalshi_market = {"ticker": "MKT-2", "title": "Will B?"}
+
+        mock_binary.return_value = [pm_market]
+        mock_match.return_value = [{
+            "polymarket": pm_market,
+            "kalshi_event": kalshi_event,
+            "similarity": 85,
+            "confidence": "MEDIUM",
+        }]
+        mock_pf_kalshi.return_value = {"EVT-2": [kalshi_market]}
+
+        kalshi = MagicMock()
+        kalshi.fetch_all_events.return_value = [kalshi_event]
+        kalshi.get_market_price.return_value = (0.50, 0.50)
+
+        mock_fee.return_value = {"net_profit": 0.05, "fees": 0.01, "gross_spread": 0.06}
+        mock_find_path.return_value = None  # No profitable fee path found
+
+        result = scan_cross_platform([pm_market], kalshi, 0.005,
+                                     kalshi_events_preloaded=[kalshi_event])
+        assert len(result) >= 1
+        opp = result[0]
+        assert "_fee_path" not in opp  # Key must be absent, not set to None
+
+    @patch("scans.cross.filter_dust", side_effect=lambda x: x)
+    @patch("scans.cross.find_lowest_fee_path")
+    @patch("scans.cross._refine_cross_all_with_clob")
+    @patch("scans.cross.get_binary_markets")
+    @patch("scans.cross.match_cross_platform")
+    @patch("scans.cross.parse_outcome_prices", return_value=[0.35, 0.65])
+    @patch("scans.cross._days_to_resolution", return_value=3.0)
+    def test_fee_path_on_cross_all(
+        self, mock_days, mock_prices, mock_match, mock_binary, mock_refine, mock_find_path, mock_dust,
+    ):
+        """scan_cross_all opps carry _fee_path when find_lowest_fee_path returns a dict."""
+        from scans.cross import scan_cross_all
+        pm_market = {"question": "Will C?", "conditionId": "pm3",
+                      "tokens": [{"token_id": "ty", "outcome": "Yes"}, {"token_id": "tn", "outcome": "No"}]}
+        kalshi_market = {"ticker": "K-3", "title": "Will C?"}
+
+        mock_binary.return_value = [pm_market]
+        mock_match.return_value = [{
+            "market_a": pm_market,
+            "market_b": kalshi_market,
+            "platform_a": "polymarket",
+            "platform_b": "kalshi",
+            "similarity": 90,
+            "confidence": "HIGH",
+            "title_a": "Will C?",
+            "title_b": "Will C?",
+        }]
+
+        kalshi_client = MagicMock()
+        kalshi_client.get_market_price.return_value = (0.40, 0.60)
+
+        fake_fee_path = {
+            "best_yes_platform": "polymarket",
+            "best_no_platform": "kalshi",
+            "yes_price": 0.35,
+            "no_price": 0.60,
+            "total_cost": 0.95,
+            "estimated_fees": 0.01,
+            "net_profit": 0.04,
+        }
+        mock_find_path.return_value = fake_fee_path
+
+        # _refine_cross_all_with_clob is called for side effects only (mutates in-place)
+        mock_refine.return_value = None
+
+        with patch("scans.cross.SEMANTIC_MATCHING_ENABLED", False):
+            result = scan_cross_all(
+                [pm_market],
+                {"kalshi": (kalshi_client, [kalshi_market])},
+                0.001,  # very low threshold to ensure opp is kept
+            )
+
+        if result:
+            opp = result[0]
+            assert "_fee_path" in opp
+            fee_path = opp["_fee_path"]
+            assert "best_yes_platform" in fee_path
+            assert "best_no_platform" in fee_path

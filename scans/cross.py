@@ -17,6 +17,7 @@ from fees import (
     net_profit_cross_gemini,
     net_profit_cross_ibkr,
     net_profit_cross_generic,
+    find_lowest_fee_path,
 )
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
@@ -304,6 +305,43 @@ def scan_cross_platform(
     # Stage 2: Refine with CLOB ask prices
     opportunities = _refine_cross_with_clob(opportunities, markets_by_key, min_profit, price_cache=price_cache)
 
+    # Attach fee path hints — scan-time metadata for executor re-validation
+    for opp in opportunities:
+        prices_str = opp.get("prices", "")
+        k_yes = opp.get("_kalshi_yes")
+        k_no = opp.get("_kalshi_no")
+        if k_yes is None or k_no is None:
+            continue
+        # Parse Polymarket side from prices string (e.g. "PM_Y=0.400 K_N=0.550")
+        pm_yes = pm_no = None
+        for part in prices_str.split():
+            if "=" not in part:
+                continue
+            key, val = part.split("=", 1)
+            try:
+                v = float(val)
+            except ValueError:
+                continue
+            if key == "PM_Y":
+                pm_yes = v
+            elif key == "PM_N":
+                pm_no = v
+        # Reconstruct both sides: PM_YES and PM_NO are complementary at mid-price level
+        # Use explicit values where available; approximate the missing side
+        if pm_yes is not None and pm_no is None:
+            pm_no = round(1.0 - pm_yes, 3)
+        elif pm_no is not None and pm_yes is None:
+            pm_yes = round(1.0 - pm_no, 3)
+        if pm_yes is None or pm_no is None:
+            continue
+        fee_path = find_lowest_fee_path(
+            ["polymarket", "kalshi"],
+            {"polymarket": pm_yes, "kalshi": k_yes},
+            {"polymarket": pm_no, "kalshi": k_no},
+        )
+        if fee_path:
+            opp["_fee_path"] = fee_path
+
     opportunities = filter_dust(opportunities)
 
     return opportunities
@@ -467,6 +505,55 @@ def scan_cross_all(
 
     # Stage 2: Refine Polymarket side with CLOB ask prices
     _refine_cross_all_with_clob(opportunities, min_profit, price_cache=price_cache)
+
+    # Attach fee path hints for cross-all opportunities
+    # prices_str format: "{pa}_Y={price} {pb}_N={price}" or "{pa}_N={price} {pb}_Y={price}"
+    # Each opp has exactly one YES price (buy YES on one platform) and one NO price (buy NO on other)
+    for opp in opportunities:
+        pa = opp.get("_platform_a", "")
+        pb = opp.get("_platform_b", "")
+        if not pa or not pb:
+            continue
+        prices_str = opp.get("prices", "")
+        a_yes = a_no = b_yes = b_no = 0.0
+        pa_up = pa.upper()
+        pb_up = pb.upper()
+        pa2 = pa[:2].upper()
+        pb2 = pb[:2].upper()
+        for part in prices_str.split():
+            if "=" not in part:
+                continue
+            key, val = part.split("=", 1)
+            try:
+                v = float(val)
+            except ValueError:
+                continue
+            key_upper = key.upper()
+            if key_upper in (f"{pa_up}_Y", f"{pa2}_Y"):
+                a_yes = v
+            elif key_upper in (f"{pa_up}_N", f"{pa2}_N"):
+                a_no = v
+            elif key_upper in (f"{pb_up}_Y", f"{pb2}_Y"):
+                b_yes = v
+            elif key_upper in (f"{pb_up}_N", f"{pb2}_N"):
+                b_no = v
+        # Build yes/no price dicts from the parsed values
+        # Strategy "A_YES + B_NO": yes_p has a_yes, no_p has b_no
+        # Strategy "A_NO + B_YES": yes_p has b_yes, no_p has a_no
+        yes_prices: dict[str, float] = {}
+        no_prices: dict[str, float] = {}
+        if a_yes:
+            yes_prices[pa] = a_yes
+        if b_yes:
+            yes_prices[pb] = b_yes
+        if a_no:
+            no_prices[pa] = a_no
+        if b_no:
+            no_prices[pb] = b_no
+        if yes_prices and no_prices:
+            fee_path = find_lowest_fee_path([pa, pb], yes_prices, no_prices)
+            if fee_path:
+                opp["_fee_path"] = fee_path
 
     opportunities = filter_dust(opportunities)
 
