@@ -739,6 +739,124 @@ class TestFetchBalances:
 
 
 # ---------------------------------------------------------------------------
+# Fee path re-validation and routing in _build_legs for Cross types
+# ---------------------------------------------------------------------------
+
+class TestFeePathExecution:
+    def test_build_legs_routes_using_fee_path(self, executor):
+        """When Cross opp has _fee_path, legs are built using fee_path platform routing."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "Cross(PM_YES + K_NO)",
+            "prices": "PM_Y=0.300 K_N=0.350",
+            "_token_ids": ["token_yes", "token_no"],
+            "_kalshi_ticker": "TICKER-FP",
+            "_fee_path": {
+                "best_yes_platform": "polymarket",
+                "best_no_platform": "kalshi",
+                "yes_price": 0.305,
+                "no_price": 0.355,
+                "total_cost": 0.660,
+                "estimated_fees": 0.010,
+                "net_profit": 0.040,
+            },
+        }
+        fresh_path = {
+            "best_yes_platform": "polymarket",
+            "best_no_platform": "kalshi",
+            "yes_price": 0.305,
+            "no_price": 0.355,
+            "total_cost": 0.660,
+            "estimated_fees": 0.010,
+            "net_profit": 0.040,
+        }
+        with mpatch("executor.find_lowest_fee_path", return_value=fresh_path):
+            legs = executor._build_legs(opp, 5.0)
+
+        assert len(legs) == 2
+        assert legs[0]["platform"] == "polymarket"
+        assert legs[1]["platform"] == "kalshi"
+
+    def test_build_legs_no_fee_path_uses_default(self, executor):
+        """When Cross opp has no _fee_path, executor builds legs using default prices_str parsing."""
+        opp = {
+            "type": "Cross(PM_YES + K_NO)",
+            "prices": "PM_Y=0.300 K_N=0.350",
+            "_token_ids": ["token_yes", "token_no"],
+            "_kalshi_ticker": "TICKER-DEF",
+            # No _fee_path key
+        }
+        legs = executor._build_legs(opp, 5.0)
+        assert len(legs) == 2
+        assert legs[0]["platform"] == "polymarket"
+        assert legs[0]["price"] == pytest.approx(0.300)
+        assert legs[1]["platform"] == "kalshi"
+        assert legs[1]["side"] == "no"
+        assert legs[1]["_ticker"] == "TICKER-DEF"
+
+    def test_revalidation_calls_find_lowest_fee_path(self, executor):
+        """When _fee_path is present, executor calls find_lowest_fee_path for re-validation."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "Cross(PM_YES + K_NO)",
+            "prices": "PM_Y=0.300 K_N=0.350",
+            "_token_ids": ["token_yes", "token_no"],
+            "_kalshi_ticker": "TICKER-RV",
+            "_fee_path": {
+                "best_yes_platform": "polymarket",
+                "best_no_platform": "kalshi",
+                "yes_price": 0.305,
+                "no_price": 0.355,
+                "total_cost": 0.660,
+                "estimated_fees": 0.010,
+                "net_profit": 0.040,
+            },
+        }
+        fresh_path = {
+            "best_yes_platform": "polymarket",
+            "best_no_platform": "kalshi",
+            "yes_price": 0.305,
+            "no_price": 0.355,
+            "total_cost": 0.660,
+            "estimated_fees": 0.010,
+            "net_profit": 0.040,
+        }
+        with mpatch("executor.find_lowest_fee_path", return_value=fresh_path) as mock_flp:
+            executor._build_legs(opp, 5.0)
+        mock_flp.assert_called_once()
+
+    def test_stale_fee_path_falls_back_to_default(self, executor):
+        """When _fee_path re-validation returns None (stale), executor falls back to default routing."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "Cross(PM_YES + K_NO)",
+            "prices": "PM_Y=0.300 K_N=0.350",
+            "_token_ids": ["token_yes", "token_no"],
+            "_kalshi_ticker": "TICKER-STALE",
+            "_fee_path": {
+                "best_yes_platform": "polymarket",
+                "best_no_platform": "kalshi",
+                "yes_price": 0.305,
+                "no_price": 0.355,
+                "total_cost": 0.660,
+                "estimated_fees": 0.010,
+                "net_profit": 0.040,
+            },
+        }
+        # Re-validation returns None — fee path no longer profitable
+        with mpatch("executor.find_lowest_fee_path", return_value=None):
+            legs = executor._build_legs(opp, 5.0)
+
+        # Falls back to default prices_str routing — PM_Y=0.300 K_N=0.350
+        assert len(legs) == 2
+        assert legs[0]["platform"] == "polymarket"
+        assert legs[0]["price"] == pytest.approx(0.300)
+        assert legs[1]["platform"] == "kalshi"
+        assert legs[1]["side"] == "no"
+        assert legs[1]["_ticker"] == "TICKER-STALE"
+
+
+# ---------------------------------------------------------------------------
 # Adaptive revalidation threshold
 # ---------------------------------------------------------------------------
 

@@ -43,6 +43,7 @@ from fees import (
     net_profit_gemini_binary,
     net_profit_ibkr_binary,
     net_profit_multi_cross,
+    find_lowest_fee_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -1048,7 +1049,51 @@ class ArbitrageExecutor:
             # Layer 3: market making — bid+ask pair
             legs = self._build_mm_legs(opportunity, size)
         elif opp_type.startswith("Cross"):
-            # One leg on Polymarket, one on Kalshi
+            # Re-validate fee path if scan provided a hint (per user decision: confirm or override)
+            fee_path = opportunity.get("_fee_path")
+            if fee_path:
+                fresh = find_lowest_fee_path(
+                    [fee_path["best_yes_platform"], fee_path["best_no_platform"]],
+                    {fee_path["best_yes_platform"]: fee_path["yes_price"]},
+                    {fee_path["best_no_platform"]: fee_path["no_price"]},
+                )
+                if fresh and fresh["net_profit"] > 0:
+                    logger.info(
+                        f"Fee path re-validated: {fresh['best_yes_platform']} YES + "
+                        f"{fresh['best_no_platform']} NO, net=${fresh['net_profit']:.4f}"
+                    )
+                    yes_plat = fresh["best_yes_platform"]
+                    no_plat = fresh["best_no_platform"]
+                    yes_price = fresh["yes_price"]
+                    no_price = fresh["no_price"]
+
+                    # Build YES leg using fee-path-optimal platform
+                    yes_leg: dict = {"platform": yes_plat, "side": "BUY", "token": "yes",
+                                     "price": yes_price}
+                    if yes_plat == "polymarket":
+                        yes_leg["_token_id"] = token_ids[0] if len(token_ids) > 0 else ""
+                    elif yes_plat == "kalshi":
+                        yes_leg["side"] = "yes"
+                        yes_leg["action"] = "buy"
+                        yes_leg["_ticker"] = opportunity.get("_kalshi_ticker", "")
+
+                    # Build NO leg using fee-path-optimal platform
+                    no_leg: dict = {"platform": no_plat, "side": "BUY", "token": "no",
+                                    "price": no_price}
+                    if no_plat == "polymarket":
+                        no_leg["_token_id"] = token_ids[1] if len(token_ids) > 1 else ""
+                    elif no_plat == "kalshi":
+                        no_leg["side"] = "no"
+                        no_leg["action"] = "buy"
+                        no_leg["_ticker"] = opportunity.get("_kalshi_ticker", "")
+
+                    legs = [yes_leg, no_leg]
+                    return legs
+                else:
+                    logger.info("Fee path stale (no longer profitable), falling back to default routing")
+                    # Fall through to default prices_str routing below
+
+            # Default routing: parse prices_str (backward compatible)
             prices_str = opportunity.get("prices", "")
             kalshi_ticker = opportunity.get("_kalshi_ticker", "")
             if "PM_Y=" in prices_str and "K_N=" in prices_str:
