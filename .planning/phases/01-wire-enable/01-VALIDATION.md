@@ -1,9 +1,9 @@
 ---
 phase: 1
 slug: wire-enable
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: approved
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-03-19
 ---
 
@@ -36,27 +36,30 @@ created: 2026-03-19
 
 ## Per-Task Verification Map
 
-| Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
-|---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 01-01-01 | 01 | 1 | INTEG-01 | integration | `pytest tests/ -k "fee_path or lowest_fee" -v` | ❌ W0 | ⬜ pending |
-| 01-01-02 | 01 | 1 | INTEG-02 | unit | `pytest tests/ -k "market_maker or mm" -v` | ✅ | ⬜ pending |
-| 01-01-03 | 01 | 1 | INTEG-03 | unit | `pytest tests/ -k "resolution" -v` | ✅ | ⬜ pending |
-| 01-01-04 | 01 | 1 | INTEG-04 | unit | `pytest tests/ -k "bankroll or position_sizer" -v` | ❌ W0 | ⬜ pending |
-| 01-01-05 | 01 | 1 | INTEG-05 | manual | N/A — documentation only | N/A | ⬜ pending |
-| 01-02-01 | 02 | 1 | ENABLE-01 | unit | `pytest tests/ -k "market_maker" -v` | ✅ | ⬜ pending |
-| 01-02-02 | 02 | 1 | ENABLE-02 | unit | `pytest tests/ -k "snapshot" -v` | ✅ | ⬜ pending |
-| 01-02-03 | 02 | 1 | ENABLE-03 | unit | `pytest tests/ -k "gas_monitor" -v` | ✅ | ⬜ pending |
-| 01-02-04 | 02 | 1 | ENABLE-04 | unit | `pytest tests/ -k "event_monitor" -v` | ✅ | ⬜ pending |
-| 01-02-05 | 02 | 1 | ENABLE-05 | manual | N/A — Railway env var config | N/A | ⬜ pending |
+| Task ID | Plan | Wave | Requirement | Test Type | Automated Command | Wave 0 | Status |
+|---------|------|------|-------------|-----------|-------------------|--------|--------|
+| 01-01-T1 | 01 | 1 | INTEG-01 (scan) | unit (tdd=true) | `pytest tests/test_cross.py -x -k "fee_path or FeePath" -v` | tdd task creates tests | pending |
+| 01-01-T2 | 01 | 1 | INTEG-01 (exec) | unit (tdd=true) | `pytest tests/test_executor.py -x -k "fee_path or FeePath" -v` | tdd task creates tests | pending |
+| 01-02-T1a | 02 | 1 | INTEG-02 | unit (tdd=true) | `pytest tests/test_cli.py -x -k "market_maker" -v` | tdd task creates tests | pending |
+| 01-02-T1b | 02 | 1 | INTEG-03 | unit (tdd=true) | `pytest tests/test_continuous.py -x -k "kalshi_resolution or KalshiResolution" -v` | tdd task creates tests | pending |
+| 01-02-T2 | 02 | 1 | INTEG-04 | unit (tdd=true) | `pytest tests/test_continuous.py -x -k "bankroll or BankrollRefresh" -v` | tdd task creates tests | pending |
+| 01-03-T1 | 03 | 1 | ENABLE-01..04 | config verify | `python -c "from config import MM_MIN_SPREAD, MM_MAX_INVENTORY; assert ..."` | N/A (config only) | pending |
+| 01-03-T2 | 03 | 1 | INTEG-05 | doc verify | `python -c "content = open('CLAUDE.md').read(); assert 'stale' in ..."` | N/A (docs only) | pending |
+| 01-03-T3 | 03 | 1 | ENABLE-05 | checkpoint | checkpoint:human-action (Railway config) | N/A (manual) | pending |
 
-*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+*Status: pending / green / red / flaky*
 
 ---
 
-## Wave 0 Requirements
+## Wave 0 Strategy
 
-- Existing infrastructure covers most phase requirements.
-- New tests may be needed for `find_lowest_fee_path()` integration and `update_bankroll()` wiring — these will be created as part of implementation tasks.
+Wave 0 test gaps are satisfied by `tdd="true"` on implementation tasks. Each tdd task writes tests FIRST (RED phase), then implements (GREEN phase). This means:
+
+- Plan 01-01 Tasks 1-2: Tests created as part of TDD RED phase before implementation
+- Plan 01-02 Tasks 1-2: Tests created as part of TDD RED phase before implementation
+- Plan 01-03: No tests needed (config defaults + documentation + checkpoint)
+
+No separate Wave 0 plan is required because all code-producing tasks use TDD workflow.
 
 ---
 
@@ -65,17 +68,17 @@ created: 2026-03-19
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
 | Stale scan documentation | INTEG-05 | Documentation-only change | Verify CLAUDE.md contains stale scan one-shot behavior docs |
-| Railway env vars configured | ENABLE-05 | External service config | Check Railway dashboard for all 8 platform credential env vars |
+| Railway env vars configured | ENABLE-05 | External service config | checkpoint:human-action in Plan 01-03 Task 3 blocks completion |
 
 ---
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 30s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or tdd="true" creates tests before implementation
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covered by tdd="true" tasks (tests written in RED phase before implementation)
+- [x] No watch-mode flags
+- [x] Feedback latency < 30s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved
