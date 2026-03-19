@@ -15,7 +15,7 @@
 
 **Goal**: Connect all existing code into the live pipeline. All 20 strategies reachable from continuous mode with proper configuration.
 
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
 - [ ] 01-01-PLAN.md — Wire find_lowest_fee_path into cross-platform scans and executor
