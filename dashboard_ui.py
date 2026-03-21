@@ -374,6 +374,37 @@ a:hover { text-decoration: underline; }
     </div>
   </div>
 
+  <!-- Per-Strategy P&L (MONITOR-01) + Platform Capital Balances (OPTIMIZE-04/05) -->
+  <div class="grid-2">
+    <div class="section">
+      <div class="section-header">Per-Strategy P&amp;L</div>
+      <div class="section-body">
+        <div class="chart-container"><canvas id="strategyPnlChart"></canvas></div>
+      </div>
+      <div class="section-body no-pad">
+        <table class="tbl" id="strategy-pnl-table">
+          <thead><tr><th>Strategy</th><th class="right">Trades</th><th class="right">Win Rate</th><th class="right">Total P&amp;L</th><th class="right">Avg Profit</th></tr></thead>
+          <tbody id="strategy-pnl-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-header">
+        <span>Platform Capital Balances</span>
+        <span id="balances-updated" style="color:var(--text-muted);font-size:0.76rem"></span>
+      </div>
+      <div class="section-body">
+        <div class="chart-container"><canvas id="balancesChart"></canvas></div>
+      </div>
+      <div class="section-body no-pad">
+        <table class="tbl" id="balances-table">
+          <thead><tr><th>Platform</th><th class="right">Balance</th><th class="right">Current %</th><th class="right">Target %</th><th>Action</th></tr></thead>
+          <tbody id="balances-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <!-- Open Positions -->
   <div class="section">
     <div class="section-header">
@@ -474,6 +505,8 @@ a:hover { text-decoration: underline; }
 const REFRESH = __REFRESH_SECONDS__ * 1000;
 let pnlChart = null;
 let platformChart = null;
+let strategyPnlChart = null;
+let balancesChart = null;
 
 // ---------------------------------------------------------------------------
 // Fetch helpers
@@ -597,6 +630,138 @@ function updatePlatformChart(platforms) {
   platformChart.data.labels = platforms.map(p => p.platform);
   platformChart.data.datasets[0].data = platforms.map(p => p.count);
   platformChart.update('none');
+}
+
+// ---------------------------------------------------------------------------
+// Per-Strategy P&L chart (MONITOR-01)
+// ---------------------------------------------------------------------------
+function initStrategyPnlChart() {
+  const ctx = $('strategyPnlChart').getContext('2d');
+  strategyPnlChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: [], datasets: [{
+      label: 'Total P&L',
+      data: [],
+      backgroundColor: [],
+      borderRadius: 3,
+      barPercentage: 0.7,
+    }]},
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          ticks: { color: '#8b8fa3', font: { size: 11 }, callback: v => '$' + v.toFixed(2) },
+          grid: { color: '#2d3148' },
+        },
+        y: { ticks: { color: '#8b8fa3', font: { size: 11 } }, grid: { display: false } },
+      },
+    },
+  });
+}
+
+function updateStrategyPnlChart(data) {
+  if (!strategyPnlChart || !data) return;
+  const strategies = data.strategies || [];
+  strategyPnlChart.data.labels = strategies.map(s => s.strategy);
+  strategyPnlChart.data.datasets[0].data = strategies.map(s => s.total_pnl);
+  strategyPnlChart.data.datasets[0].backgroundColor = strategies.map(s =>
+    s.total_pnl >= 0 ? '#22c55e' : '#ef4444'
+  );
+  strategyPnlChart.update('none');
+}
+
+function renderStrategyPnlTable(data) {
+  const tbody = $('strategy-pnl-tbody');
+  const strategies = (data && data.strategies) ? data.strategies : [];
+  if (strategies.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No trade data yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = strategies.map(s => {
+    const winRate = s.trade_count > 0 ? ((s.win_count / s.trade_count) * 100).toFixed(1) + '%' : '--';
+    return `<tr>
+      <td>${s.strategy}</td>
+      <td class="mono right">${s.trade_count}</td>
+      <td class="mono right">${winRate}</td>
+      <td class="mono right ${pnlClass(s.total_pnl)}">${fmtUSD(s.total_pnl)}</td>
+      <td class="mono right ${pnlClass(s.avg_profit)}">${fmtUSD(s.avg_profit)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Platform Balances chart (OPTIMIZE-04, OPTIMIZE-05)
+// ---------------------------------------------------------------------------
+function initBalancesChart() {
+  const ctx = $('balancesChart').getContext('2d');
+  const colors = ['#6366f1','#3b82f6','#22c55e','#eab308','#ef4444','#ec4899','#f97316','#14b8a6'];
+  balancesChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: colors, borderWidth: 0 }] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '65%',
+      plugins: {
+        legend: { position: 'right', labels: { color: '#e4e6f0', font: { size: 12 }, padding: 12 } },
+      },
+    },
+  });
+}
+
+function updateBalancesChart(data) {
+  if (!balancesChart || !data) return;
+  const balances = data.balances || {};
+  const platforms = Object.keys(balances);
+  if (platforms.length === 0) {
+    balancesChart.data.labels = ['No data'];
+    balancesChart.data.datasets[0].data = [1];
+    balancesChart.data.datasets[0].backgroundColor = ['#2d3148'];
+    balancesChart.update('none');
+    return;
+  }
+  balancesChart.data.labels = platforms;
+  balancesChart.data.datasets[0].data = platforms.map(p => balances[p]);
+  balancesChart.update('none');
+  const ts = $('balances-updated');
+  if (ts) ts.textContent = data.last_updated ? 'Updated: ' + fmtTime(data.last_updated) : '';
+}
+
+function renderBalancesTable(balancesData, rebalanceData) {
+  const tbody = $('balances-tbody');
+  const balances = (balancesData && balancesData.balances) ? balancesData.balances : {};
+  const total = (balancesData && balancesData.total) ? balancesData.total : 0;
+  const recs = (rebalanceData && rebalanceData.recommendations) ? rebalanceData.recommendations : [];
+  const recsByPlatform = {};
+  recs.forEach(r => { recsByPlatform[r.platform] = r; });
+
+  const platforms = Object.keys(balances);
+  if (platforms.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No balance data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = platforms.map(p => {
+    const bal = balances[p];
+    const pct = total > 0 ? ((bal / total) * 100).toFixed(1) + '%' : '--';
+    const rec = recsByPlatform[p];
+    const recPct = rec ? (rec.recommended_pct * 100).toFixed(1) + '%' : pct;
+    let action = '--';
+    if (rec) {
+      const amt = rec.transfer_amount;
+      if (amt > 0) action = '<span class="positive">&#8593; Receive $' + Math.abs(amt).toFixed(2) + '</span>';
+      else action = '<span class="negative">&#8595; Send $' + Math.abs(amt).toFixed(2) + '</span>';
+    }
+    return `<tr>
+      <td>${p}</td>
+      <td class="mono right">$${parseFloat(bal).toFixed(2)}</td>
+      <td class="mono right">${pct}</td>
+      <td class="mono right">${recPct}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ---------------------------------------------------------------------------
@@ -895,7 +1060,8 @@ async function refresh() {
   spinner.style.display = 'inline-block';
 
   const [status, health, slippage, history, strategies, positions,
-         platforms, trades, opportunities, alerts, pauseState, failures] = await Promise.all([
+         platforms, trades, opportunities, alerts, pauseState, failures,
+         strategyPnl, balancesData, rebalanceData] = await Promise.all([
     api('/status'),
     api('/api/health'),
     api('/api/slippage'),
@@ -908,6 +1074,9 @@ async function refresh() {
     api('/alerts'),
     api('/api/pause'),
     api('/api/failures'),
+    api('/api/strategy-pnl'),
+    api('/api/balances'),
+    api('/api/rebalance'),
   ]);
 
   renderStatus(status);
@@ -923,6 +1092,10 @@ async function refresh() {
   updatePnlChart(history);
   renderKillSwitch(pauseState);
   renderFailures(failures);
+  updateStrategyPnlChart(strategyPnl);
+  renderStrategyPnlTable(strategyPnl);
+  updateBalancesChart(balancesData);
+  renderBalancesTable(balancesData, rebalanceData);
 
   // Positions subtitle
   if (platforms && platforms.length > 0) {
@@ -940,6 +1113,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initPnlChart();
   initPlatformChart();
   initFailureChart();
+  initStrategyPnlChart();
+  initBalancesChart();
   refresh();
   setInterval(refresh, REFRESH);
 });
