@@ -223,7 +223,7 @@ class ArbitrageExecutor:
             logger.info(f"{prefix}Risk blocked: {reason}")
             self._log_skipped(opportunity, f"risk:{reason}")
             if _metrics:
-                _metrics.inc("risk_rejections", {"reason": reason[:50]})
+                _metrics.inc("risk_rejections", {"strategy": opp_type, "reason": reason[:50]})
             return False
 
         # 2b. Dynamic fee check (GasMonitor)
@@ -272,7 +272,7 @@ class ArbitrageExecutor:
         if self.dry_run:
             result = self._dry_run_log(opportunity, legs, size)
             if _metrics and result:
-                _metrics.inc("trades_executed", {"platform": opp_type, "status": "dry_run"})
+                _metrics.inc("trades_executed", {"strategy": opp_type, "status": "dry_run"})
             return result
         else:
             # Use concurrent execution when enabled and all legs support cancellation
@@ -282,11 +282,11 @@ class ArbitrageExecutor:
                 result = self._execute_legs(opportunity, legs, size)
             if _metrics:
                 latency = time.time() - _exec_start
-                _metrics.observe("execution_latency_seconds", {"type": opp_type}, latency)
+                _metrics.observe("execution_latency_seconds", {"strategy": opp_type}, latency)
                 if result:
-                    _metrics.inc("trades_executed", {"platform": opp_type, "status": "filled"})
+                    _metrics.inc("trades_executed", {"strategy": opp_type, "status": "filled"})
                 else:
-                    _metrics.inc("trades_failed", {"platform": opp_type, "reason": "execution"})
+                    _metrics.inc("trades_failed", {"strategy": opp_type, "reason": "execution"})
             # HARDEN-03: log live execution decision
             if result:
                 self._write_decision(opportunity, "execute", "filled")

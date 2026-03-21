@@ -21,6 +21,8 @@ class AlertType(str, Enum):
     WS_DISCONNECT = "WS_DISCONNECT"
     SCAN_FAILURE = "SCAN_FAILURE"
     BALANCE_LOW = "BALANCE_LOW"
+    LOSS_SPIKE = "LOSS_SPIKE"
+    ZERO_OPP_PERIOD = "ZERO_OPP_PERIOD"
 
 
 class Severity(str, Enum):
@@ -72,6 +74,12 @@ class AlertManager:
         # Track whether 80% and 100% warnings have fired today
         self._loss_80_fired = False
         self._loss_100_fired = False
+
+        # MONITOR-03: Anomaly detection state
+        # Rolling window of absolute loss amounts (maxlen=20) for spike detection
+        self._trade_losses: deque[float] = deque(maxlen=20)
+        # Count of consecutive scans that returned zero opportunities
+        self._zero_opp_count: int = 0
 
     def alert(
         self,
@@ -217,6 +225,65 @@ class AlertManager:
                 {"current": current, "max_limit": max_limit},
             )
 
+        return False
+
+    def record_trade_result(self, profit: float) -> None:
+        """Record a trade result for loss-spike detection.
+
+        Only losing trades (profit < 0) are stored in the rolling window.
+
+        Args:
+            profit: Net profit of the trade (negative means a loss).
+        """
+        if profit < 0:
+            self._trade_losses.append(abs(profit))
+
+    def check_loss_spike(self, loss_amount: float) -> bool:
+        """Fire a CRITICAL alert if a single loss is more than 3x the rolling average.
+
+        Guards against false positives by requiring at least 10 trades in the
+        rolling window before any alert can fire (Pitfall 5 guard).
+
+        Args:
+            loss_amount: Absolute value of the loss to evaluate.
+
+        Returns:
+            True if a LOSS_SPIKE alert was fired.
+        """
+        if len(self._trade_losses) < 10:
+            return False
+        avg = sum(self._trade_losses) / len(self._trade_losses)
+        if avg > 0 and loss_amount > 3 * avg:
+            return self.alert(
+                AlertType.LOSS_SPIKE,
+                Severity.CRITICAL,
+                f"Loss spike detected: ${loss_amount:.2f} is {loss_amount / avg:.1f}x the rolling average (${avg:.2f})",
+                {"loss": loss_amount, "avg": avg, "ratio": loss_amount / avg},
+            )
+        return False
+
+    def check_zero_opp_period(self, opportunities_found: int) -> bool:
+        """Fire a WARNING alert after 5+ consecutive scans with zero opportunities.
+
+        Resets the counter whenever at least one opportunity is found.
+
+        Args:
+            opportunities_found: Number of opportunities found in this scan.
+
+        Returns:
+            True if a ZERO_OPP_PERIOD alert was fired.
+        """
+        if opportunities_found > 0:
+            self._zero_opp_count = 0
+            return False
+        self._zero_opp_count += 1
+        if self._zero_opp_count >= 5:
+            return self.alert(
+                AlertType.ZERO_OPP_PERIOD,
+                Severity.WARNING,
+                f"No opportunities found for {self._zero_opp_count} consecutive scans",
+                {"consecutive_empty_scans": self._zero_opp_count},
+            )
         return False
 
     def get_recent_alerts(self, count: int = 20) -> list[dict]:
