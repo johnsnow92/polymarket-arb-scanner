@@ -4,7 +4,7 @@ import logging
 
 from gemini_api import GeminiClient
 from fees import net_profit_gemini_binary, net_profit_gemini_multi
-from config import GEMINI_FEE_RATE
+import config
 from scans.helpers import filter_dust
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ def scan_gemini_binary(gemini_client: GeminiClient, min_profit: float) -> list[d
         if yes_price <= 0 or no_price <= 0:
             continue
 
-        result = net_profit_gemini_binary(yes_price, no_price, fee_rate=GEMINI_FEE_RATE)
+        result = net_profit_gemini_binary(yes_price, no_price, fee_rate=config.GEMINI_FEE_RATE)
         if result["net_profit"] >= min_profit:
             total = yes_price + no_price
             contracts = event.get("contracts", [])
@@ -127,7 +127,7 @@ def scan_gemini_multi(gemini_client: GeminiClient, min_profit: float) -> list[di
         if not valid or not prices:
             continue
 
-        result = net_profit_gemini_multi(prices, fee_rate=GEMINI_FEE_RATE)
+        result = net_profit_gemini_multi(prices, fee_rate=config.GEMINI_FEE_RATE)
         if result["net_profit"] >= min_profit:
             total = sum(prices)
             n = len(prices)

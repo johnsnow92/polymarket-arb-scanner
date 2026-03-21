@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from betfair_api import BetfairClient
 from fees import net_profit_betfair_backall, net_profit_betfair_backlay
-from config import BETFAIR_COMMISSION_RATE
+import config
 from scans.helpers import filter_dust
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def scan_betfair_backall(betfair_client: BetfairClient, min_profit: float) -> li
         if not valid or not implied_probs:
             continue
 
-        result = net_profit_betfair_backall(implied_probs, BETFAIR_COMMISSION_RATE)
+        result = net_profit_betfair_backall(implied_probs, config.BETFAIR_COMMISSION_RATE)
         if result["net_profit"] >= min_profit:
             total = sum(implied_probs)
             n = len(implied_probs)
@@ -197,7 +197,7 @@ def scan_betfair_backlay(betfair_client: BetfairClient, min_profit: float) -> li
             back_prob = 1.0 / best_back
             lay_prob = 1.0 / best_lay
 
-            result = net_profit_betfair_backlay(back_prob, lay_prob, BETFAIR_COMMISSION_RATE)
+            result = net_profit_betfair_backlay(back_prob, lay_prob, config.BETFAIR_COMMISSION_RATE)
             if result["net_profit"] >= min_profit:
                 catalog = catalog_by_id.get(market_id, {})
                 market_name = catalog.get("marketName", "Unknown")

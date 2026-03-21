@@ -4,7 +4,7 @@ import logging
 
 from smarkets_api import SmarketsClient
 from fees import net_profit_smarkets_backall, net_profit_smarkets_backlay
-from config import SMARKETS_COMMISSION_RATE
+import config
 from scans.helpers import filter_dust
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def scan_smarkets_backall(smarkets_client: SmarketsClient, min_profit: float) ->
         if not valid or not implied_probs:
             continue
 
-        result = net_profit_smarkets_backall(implied_probs, SMARKETS_COMMISSION_RATE)
+        result = net_profit_smarkets_backall(implied_probs, config.SMARKETS_COMMISSION_RATE)
         if result["net_profit"] >= min_profit:
             total = sum(implied_probs)
             n = len(implied_probs)
@@ -149,7 +149,7 @@ def scan_smarkets_backlay(smarkets_client: SmarketsClient, min_profit: float) ->
             if lay_prob <= back_prob:
                 continue
 
-            result = net_profit_smarkets_backlay(back_prob, lay_prob, SMARKETS_COMMISSION_RATE)
+            result = net_profit_smarkets_backlay(back_prob, lay_prob, config.SMARKETS_COMMISSION_RATE)
             if result["net_profit"] >= min_profit:
                 event_info = market.get("_event", {})
                 event_name = event_info.get("name", "")
