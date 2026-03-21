@@ -55,7 +55,7 @@ Plans:
 **Plans:** 3 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — Structured JSONL decision logging and circuit breaker module
+- [x] 02-01-PLAN.md — Structured JSONL decision logging and circuit breaker module
 - [ ] 02-02-PLAN.md — Idempotent order placement and fee verification
 - [ ] 02-03-PLAN.md — Per-strategy integration test scripts
 
