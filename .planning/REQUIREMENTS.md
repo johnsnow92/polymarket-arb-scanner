@@ -209,7 +209,7 @@
 
 ---
 
-### MONITOR-02: Per-strategy metrics
+### MONITOR-02: Per-strategy metrics ✓ COMPLETE (03-01)
 
 **What**: Track win rate, average profit, volume, and execution latency per strategy type using `metrics.py`.
 
@@ -219,7 +219,7 @@
 
 ---
 
-### MONITOR-03: Anomaly alerting
+### MONITOR-03: Anomaly alerting ✓ COMPLETE (03-01)
 
 **What**: Alert on sudden loss spikes, API failures, balance drops, or sustained zero-opportunity periods.
 

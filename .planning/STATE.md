@@ -3,29 +3,30 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-03-21T08:08:52.017Z"
+last_updated: "2026-03-21T09:00:00.000Z"
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 6
-  completed_plans: 6
+  total_plans: 9
+  completed_plans: 7
 ---
 
 # STATE.md — Polymarket Arb Scanner
 
 ## Current Phase
 
-- **Phase 2: Harden & Test** — All 3 plans complete
+- **Phase 3: Monitor & Optimize** — Plan 1 complete
 
 ## Current Plan Position
 
-- **Phase:** 02-harden-test
-- **Plan:** 03 (COMPLETE)
-- **Status:** Phase 02 complete — ready for Phase 03
+- **Phase:** 3
+- **Plan:** 1 complete
+- **Status:** Executing Phase 03
 - **Tasks completed:** 1/1
 
 ## Session Log
 
+- **2026-03-21**: Plan 03-01 executed. Per-strategy metrics labels (strategy key) wired into executor.py. AlertManager extended with LOSS_SPIKE (3x avg, 10-trade guard) and ZERO_OPP_PERIOD (5 consecutive empty scans) detection. 22 new tests. 1553 tests passing. MONITOR-02 and MONITOR-03 complete.
 - **2026-03-21**: Plan 02-03 executed. Per-strategy integration tests (19 modes), run_all.py orchestrator, and RESULTS.md template created. Fixed BaseException catch bug in orchestrator. Phase 2 complete.
 - **2026-03-21**: Plan 02-02 executed. Idempotency key generation, DB dedup (has_recent_trade), recovery dedup (dedup_skipped), and fee verification script created. 19 tests added. All 8 platforms verified. HARDEN-05 and HARDEN-02 complete.
 - **2026-03-19**: Phase 1 context gathered. Decisions captured for fee routing (dual-layer, all cross-platform), MM params ($500/market, 2% spread, all platforms), feature enablement (all 4 flags), bankroll refresh (timer + post-trade, all 8 platforms).
@@ -50,7 +51,11 @@ progress:
 - [Phase 02-harden-test]: has_recent_trade excludes skipped:* actions so recorded skips do not trigger false-positive dedup on next legitimate attempt
 - [Phase 02-harden-test]: Recovery dedup marks as dedup_skipped (not failed) to distinguish intentional suppression from genuine failure
 - [Phase 02-harden-test]: catch BaseException (not Exception) in run_all.py to handle pytest.skip — Skipped inherits from BaseException
+- [Phase 03-monitor-optimize]: strategy label replaces platform label for all executor metrics — enables per-strategy P&L attribution in Prometheus
+- [Phase 03-monitor-optimize]: loss spike guard requires 10+ trades in rolling window to prevent false positives on early data
+- [Phase 03-monitor-optimize]: _trade_losses deque maxlen=20 gives rolling average over recent 20 trades only (older trades expire automatically)
+- [Phase 03-monitor-optimize]: check_loss_spike uses strictly-greater-than comparison so exactly 3x avg does not fire (intent: spike not threshold)
 
 ## Resume
 
-- Phase 02 complete. Next: Phase 03 (validate-deploy)
+- Phase 03 Plan 01 complete. Next: Phase 03 Plan 02 (validate-deploy)

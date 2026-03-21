@@ -87,10 +87,10 @@ Plans:
 
 **Goal**: Full visibility into bot performance. Automated capital optimization. Dashboard showing live P&L.
 
-**Plans:** 3 plans
+**Plans:** 1/3 plans complete
 
 Plans:
-- [ ] 03-01-PLAN.md — Per-strategy metrics wiring and anomaly alerting
+- [x] 03-01-PLAN.md — Per-strategy metrics wiring and anomaly alerting
 - [ ] 03-02-PLAN.md — Dashboard API endpoints, UI charts, and rebalancing
 - [ ] 03-03-PLAN.md — Priority execution queue, dynamic fee reload, and backtest feedback loop
 
