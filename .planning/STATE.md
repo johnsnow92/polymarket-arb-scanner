@@ -3,29 +3,30 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-03-21T08:58:53.242Z"
+last_updated: "2026-03-21T09:10:37.162Z"
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 9
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # STATE.md — Polymarket Arb Scanner
 
 ## Current Phase
 
-- **Phase 3: Monitor & Optimize** — Plan 2 complete
+- **Phase 3: Monitor & Optimize** — Plan 3 complete (phase complete)
 
 ## Current Plan Position
 
 - **Phase:** 3
-- **Plan:** 2 complete
-- **Status:** Executing Phase 03
+- **Plan:** 3 complete
+- **Status:** Phase 03 complete
 - **Tasks completed:** 2/2
 
 ## Session Log
 
+- **2026-03-21**: Plan 03-03 executed. asyncio.PriorityQueue added to continuous.py for WS-triggered priority execution. reload_fee_rates() added to config.py. build_recommendations()/write_recommendations() added to backtest.py. Hourly fee reload, nightly backtest, weekly rebalance digest, and zero-opp detection wired into scan loop. 16 new tests. 1588 tests passing. OPTIMIZE-01, OPTIMIZE-02, OPTIMIZE-03 complete. Phase 3 complete.
 - **2026-03-21**: Plan 03-02 executed. TradeDB.get_strategy_pnl() added. Three new API endpoints (/api/strategy-pnl, /api/balances, /api/rebalance) added to dashboard. Dashboard UI enhanced with per-strategy P&L horizontal bar chart and platform balances doughnut chart. 19 new tests. 1572 tests passing. MONITOR-01, MONITOR-04, OPTIMIZE-04, OPTIMIZE-05 complete.
 - **2026-03-21**: Plan 03-01 executed. Per-strategy metrics labels (strategy key) wired into executor.py. AlertManager extended with LOSS_SPIKE (3x avg, 10-trade guard) and ZERO_OPP_PERIOD (5 consecutive empty scans) detection. 22 new tests. 1553 tests passing. MONITOR-02 and MONITOR-03 complete.
 - **2026-03-21**: Plan 02-03 executed. Per-strategy integration tests (19 modes), run_all.py orchestrator, and RESULTS.md template created. Fixed BaseException catch bug in orchestrator. Phase 2 complete.
@@ -57,7 +58,10 @@ progress:
 - [Phase 03-monitor-optimize]: _trade_losses deque maxlen=20 gives rolling average over recent 20 trades only (older trades expire automatically)
 - [Phase 03-monitor-optimize]: check_loss_spike uses strictly-greater-than comparison so exactly 3x avg does not fire (intent: spike not threshold)
 - [Phase 03]: get_strategy_pnl uses opportunities.net_profit as proxy since trades table has no pnl column
+- [Phase 03]: Priority queue uses negated execution priority so time-sensitive opps (StalePriceOpp 3.0, ResolutionSnipeOpp 2.5) dequeue first from min-heap
+- [Phase 03]: reload_fee_rates() only touches fee rate globals — DRY_RUN and API keys are explicitly excluded
+- [Phase 03]: Nightly backtest runs via run_in_executor to avoid blocking asyncio event loop
 
 ## Resume
 
-- Phase 03 Plan 02 complete. Next: Phase 03 Plan 03 (if exists) or phase complete.
+- Phase 03 complete (all 3 plans done). Next: Phase 04 if it exists, otherwise project milestones review.
