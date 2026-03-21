@@ -52,6 +52,13 @@ Plans:
 
 **Goal**: Validate every strategy produces correct results with real API data. Confidence that live trading won't lose money due to bugs.
 
+**Plans:** 3 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Structured JSONL decision logging and circuit breaker module
+- [ ] 02-02-PLAN.md — Idempotent order placement and fee verification
+- [ ] 02-03-PLAN.md — Per-strategy integration test scripts
+
 ### Requirements
 
 | ID | Requirement | Key Files |
