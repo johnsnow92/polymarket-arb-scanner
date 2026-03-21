@@ -8,6 +8,9 @@ import time
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from config import BETFAIR_RATE_LIMIT
+from rate_limiter import PlatformCircuitBreaker
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,7 +25,9 @@ BETFAIR_ACCOUNT_URL = "https://api.betfair.com/exchange/account/rest/v1.0"
 # Rate limiting (thread-safe)
 _last_request_time = 0
 _rate_lock = threading.Lock()
-MIN_REQUEST_INTERVAL = 0.2  # 200ms between requests
+
+# HARDEN-04: circuit breaker — opens after 3 consecutive failures, resets after 30s
+_circuit = PlatformCircuitBreaker("betfair", fail_limit=3, reset_timeout=30.0)
 
 
 def _rate_limit():
@@ -30,8 +35,8 @@ def _rate_limit():
     with _rate_lock:
         now = time.time()
         elapsed = now - _last_request_time
-        if elapsed < MIN_REQUEST_INTERVAL:
-            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        if elapsed < BETFAIR_RATE_LIMIT:
+            time.sleep(BETFAIR_RATE_LIMIT - elapsed)
         _last_request_time = time.time()
 
 
@@ -120,6 +125,8 @@ class BetfairClient:
             logger.error("Betfair: must login before making API calls")
             return None
 
+        if _circuit.is_open():
+            raise _RateLimitError("Circuit open -- betfair in backoff")
         _rate_limit()
         try:
             resp = self.session.post(
@@ -128,6 +135,7 @@ class BetfairClient:
                 timeout=30,
             )
             if resp.status_code == 200:
+                _circuit.record_success()
                 return resp.json()
             if resp.status_code == 429:
                 logger.warning("Betfair rate limited on %s, retrying...", endpoint)
@@ -135,6 +143,7 @@ class BetfairClient:
             logger.warning("Betfair %s returned %s: %s", endpoint, resp.status_code, resp.text[:200])
             return None
         except (requests.ConnectionError, requests.Timeout, _RateLimitError):
+            _circuit.record_failure()
             raise  # Let tenacity retry these
         except requests.RequestException as e:
             logger.warning("Betfair %s failed: %s", endpoint, e)

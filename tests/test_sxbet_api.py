@@ -9,7 +9,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import sxbet_api
 from sxbet_api import SXBetClient, SXBET_API_URL
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    """Reset sxbet circuit breaker state between tests to prevent state bleed."""
+    sxbet_api._circuit.record_success()
+    yield
+    sxbet_api._circuit.record_success()
 
 
 @pytest.fixture

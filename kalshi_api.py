@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from config import KALSHI_RATE_LIMIT
+from rate_limiter import PlatformCircuitBreaker
 
 KALSHI_BASE_URL = "https://api.elections.kalshi.com"
 KALSHI_API_PATH = "/trade-api/v2"
@@ -24,6 +25,9 @@ KALSHI_API_PATH = "/trade-api/v2"
 # Rate limiting (thread-safe)
 _last_request_time = 0
 _rate_lock = threading.Lock()
+
+# HARDEN-04: circuit breaker — opens after 3 consecutive failures, resets after 30s
+_circuit = PlatformCircuitBreaker("kalshi", fail_limit=3, reset_timeout=30.0)
 
 
 def _rate_limit():
@@ -143,6 +147,8 @@ class KalshiClient:
     )
     def _request(self, method: str, path: str, params: dict | None = None, json_body: dict | None = None) -> requests.Response | None:
         """Make an authenticated request to Kalshi API with retry."""
+        if _circuit.is_open():
+            raise _RateLimitError("Circuit open -- kalshi in backoff")
         _rate_limit()
         headers = self._auth_headers(method, path)
         url = KALSHI_BASE_URL + KALSHI_API_PATH + path
@@ -157,9 +163,11 @@ class KalshiClient:
             )
             if resp.status_code == 429:
                 raise _RateLimitError(f"Rate limited: {method} {path}")
+            _circuit.record_success()
             return resp
         except (requests.ConnectionError, requests.Timeout) as e:
             logger.warning("Kalshi request failed (%s %s): %s", method, path, e)
+            _circuit.record_failure()
             raise
         except requests.RequestException as e:
             logger.warning("Kalshi request failed (%s %s): %s", method, path, e)

@@ -7,6 +7,9 @@ import time
 
 import requests
 
+from config import SXBET_RATE_LIMIT
+from rate_limiter import PlatformCircuitBreaker
+
 logger = logging.getLogger(__name__)
 
 SXBET_API_URL = "https://api.sx.bet"
@@ -14,7 +17,13 @@ SXBET_API_URL = "https://api.sx.bet"
 # Rate limiting (thread-safe)
 _last_request_time = 0
 _rate_lock = threading.Lock()
-MIN_REQUEST_INTERVAL = 0.1  # 100ms between requests
+
+# HARDEN-04: circuit breaker — opens after 3 consecutive failures, resets after 30s
+_circuit = PlatformCircuitBreaker("sxbet", fail_limit=3, reset_timeout=30.0)
+
+
+class _RateLimitError(Exception):
+    """Raised when circuit is open — prevents further requests during backoff."""
 
 
 def _rate_limit():
@@ -22,8 +31,8 @@ def _rate_limit():
     with _rate_lock:
         now = time.time()
         elapsed = now - _last_request_time
-        if elapsed < MIN_REQUEST_INTERVAL:
-            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        if elapsed < SXBET_RATE_LIMIT:
+            time.sleep(SXBET_RATE_LIMIT - elapsed)
         _last_request_time = time.time()
 
 
@@ -106,18 +115,23 @@ class SXBetClient:
             logger.error("SX Bet: must login before making API calls")
             return None
 
+        if _circuit.is_open():
+            raise _RateLimitError("Circuit open -- sxbet in backoff")
         _rate_limit()
         try:
             url = f"{SXBET_API_URL}{endpoint}"
             resp = self.session.request(method, url, params=params,
                                         json=json_data, timeout=30)
             if resp.status_code == 200:
+                _circuit.record_success()
                 return resp.json()
             logger.warning("SX Bet %s %s returned %s: %s",
                            method, endpoint, resp.status_code, resp.text[:200])
+            _circuit.record_failure()
             return None
         except requests.RequestException as exc:
             logger.warning("SX Bet %s %s failed: %s", method, endpoint, exc)
+            _circuit.record_failure()
             return None
 
     def fetch_all_markets(self) -> list[dict]:

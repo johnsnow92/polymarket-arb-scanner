@@ -9,7 +9,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import smarkets_api
 from smarkets_api import SmarketsClient, SMARKETS_API_URL
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    """Reset smarkets circuit breaker state between tests to prevent state bleed."""
+    smarkets_api._circuit.record_success()
+    yield
+    smarkets_api._circuit.record_success()
 
 
 @pytest.fixture

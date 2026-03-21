@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import threading
 import time
 import types
+import pytest
 from unittest.mock import MagicMock, patch
 
 # Mock tenacity before importing polymarket_api — the module uses decorators
@@ -26,8 +27,17 @@ for mod in ["py_clob_client", "py_clob_client.client", "py_clob_client.clob_type
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 
+import polymarket_api
 from polymarket_api import _rate_limit, _rate_lock
 from config import PM_RATE_LIMIT as MIN_REQUEST_INTERVAL
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    """Reset polymarket circuit breaker state between tests."""
+    polymarket_api._circuit.record_success()
+    yield
+    polymarket_api._circuit.record_success()
 
 
 # ---------------------------------------------------------------------------

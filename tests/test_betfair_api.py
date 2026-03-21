@@ -8,7 +8,16 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import requests
+import betfair_api
 from betfair_api import BetfairClient
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    """Reset betfair circuit breaker state between tests to prevent state bleed."""
+    betfair_api._circuit.record_success()
+    yield
+    betfair_api._circuit.record_success()
 
 
 @pytest.fixture

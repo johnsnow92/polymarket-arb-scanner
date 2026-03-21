@@ -11,6 +11,14 @@ import matchbook_api
 from matchbook_api import MatchbookClient
 
 
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    """Reset matchbook circuit breaker state between tests to prevent state bleed."""
+    matchbook_api._circuit.record_success()
+    yield
+    matchbook_api._circuit.record_success()
+
+
 @pytest.fixture
 def client():
     """Authenticated client with mocked session."""

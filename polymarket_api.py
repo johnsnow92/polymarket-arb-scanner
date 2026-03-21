@@ -10,6 +10,7 @@ from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from config import PM_RATE_LIMIT
+from rate_limiter import PlatformCircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,10 @@ class _RateLimitError(Exception):
     pass
 
 
+# HARDEN-04: circuit breaker — opens after 3 consecutive failures, resets after 30s
+_circuit = PlatformCircuitBreaker("polymarket", fail_limit=3, reset_timeout=30.0)
+
+
 def _rate_limit():
     global _last_request_time
     with _rate_lock:
@@ -59,12 +64,19 @@ def _rate_limit():
 )
 def _get_with_retry(url: str, params: dict = None, timeout: int = 30) -> requests.Response:
     """GET request with retry on 429, connection errors, and timeouts."""
+    if _circuit.is_open():
+        raise _RateLimitError("Circuit open -- polymarket in backoff")
     _rate_limit()
-    resp = _session.get(url, params=params, timeout=timeout)
-    if resp.status_code == 429:
-        raise _RateLimitError(f"Rate limited: {url}")
-    resp.raise_for_status()
-    return resp
+    try:
+        resp = _session.get(url, params=params, timeout=timeout)
+        if resp.status_code == 429:
+            raise _RateLimitError(f"Rate limited: {url}")
+        resp.raise_for_status()
+        _circuit.record_success()
+        return resp
+    except Exception:
+        _circuit.record_failure()
+        raise
 
 
 def fetch_all_markets(limit: int = 500, max_pages: int = 20) -> list[dict]:

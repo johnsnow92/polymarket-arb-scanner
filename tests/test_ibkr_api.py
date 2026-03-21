@@ -11,7 +11,16 @@ _mock_ib_insync = MagicMock()
 if "ib_insync" not in sys.modules:
     sys.modules["ib_insync"] = _mock_ib_insync
 
+import ibkr_api
 from ibkr_api import IBKRClient
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    """Reset ibkr circuit breaker state between tests to prevent state bleed."""
+    ibkr_api._circuit.record_success()
+    yield
+    ibkr_api._circuit.record_success()
 
 
 @pytest.fixture

@@ -9,7 +9,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import kalshi_api
 from kalshi_api import KalshiClient, _rate_limit, _RateLimitError, KALSHI_BASE_URL, KALSHI_API_PATH
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    """Reset kalshi circuit breaker state between tests to prevent state bleed."""
+    kalshi_api._circuit.record_success()
+    yield
+    kalshi_api._circuit.record_success()
 
 
 @pytest.fixture

@@ -10,7 +10,16 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import gemini_api
 from gemini_api import GeminiClient
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker():
+    """Reset gemini circuit breaker state between tests to prevent state bleed."""
+    gemini_api._circuit.record_success()
+    yield
+    gemini_api._circuit.record_success()
 
 
 @pytest.fixture

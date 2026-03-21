@@ -13,6 +13,7 @@ import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from config import GEMINI_RATE_LIMIT
+from rate_limiter import PlatformCircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,9 @@ GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://api.gemini.com")
 # Rate limiting (thread-safe)
 _last_request_time = 0
 _rate_lock = threading.Lock()
+
+# HARDEN-04: circuit breaker — opens after 3 consecutive failures, resets after 30s
+_circuit = PlatformCircuitBreaker("gemini", fail_limit=3, reset_timeout=30.0)
 
 
 def _rate_limit():
@@ -142,12 +146,15 @@ class GeminiClient:
         Returns:
             Response JSON or None on failure.
         """
+        if _circuit.is_open():
+            raise _RateLimitError("Circuit open -- gemini in backoff")
         _rate_limit()
         headers = self._sign_request(endpoint, payload_data)
         try:
             url = f"{self.base_url}{endpoint}"
             resp = self.session.post(url, headers=headers, timeout=30)
             if resp.status_code == 200:
+                _circuit.record_success()
                 return resp.json()
             if resp.status_code == 429:
                 logger.warning("Gemini rate limited on %s, retrying...", endpoint)
@@ -155,7 +162,8 @@ class GeminiClient:
             logger.warning("Gemini %s returned %s: %s",
                            endpoint, resp.status_code, resp.text[:200])
             return None
-        except requests.exceptions.ConnectionError:
+        except (requests.exceptions.ConnectionError, _RateLimitError):
+            _circuit.record_failure()
             raise
         except requests.RequestException as exc:
             logger.warning("Gemini %s failed: %s", endpoint, exc)

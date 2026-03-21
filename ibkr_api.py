@@ -18,8 +18,16 @@ import threading
 import time
 
 from config import IBKR_ORDER_RATE_LIMIT
+from rate_limiter import PlatformCircuitBreaker
 
 logger = logging.getLogger(__name__)
+
+# HARDEN-04: circuit breaker — opens after 3 consecutive failures, resets after 30s
+_circuit = PlatformCircuitBreaker("ibkr", fail_limit=3, reset_timeout=30.0)
+
+
+class _RateLimitError(Exception):
+    """Raised when circuit is open — prevents further requests during backoff."""
 
 # Rate limiting for orders (thread-safe)
 _last_order_time = 0
@@ -244,6 +252,8 @@ class IBKRClient:
             logger.error("IBKR: must connect before placing orders")
             return None
 
+        if _circuit.is_open():
+            raise _RateLimitError("Circuit open -- ibkr in backoff")
         _order_rate_limit()
 
         contract = self._contracts_cache.get(conid)
@@ -257,6 +267,7 @@ class IBKRClient:
             trade = self.ib.placeOrder(contract, order)
             self.ib.sleep(0.1)  # Allow time for order acknowledgment
 
+            _circuit.record_success()
             return {
                 "orderId": str(trade.order.orderId),
                 "status": trade.orderStatus.status,
@@ -265,6 +276,7 @@ class IBKRClient:
             }
         except Exception as e:
             logger.error("IBKR place_order failed for conid %s: %s", conid, e)
+            _circuit.record_failure()
             return None
 
     def get_order_status(self, order_id: str) -> dict | None:

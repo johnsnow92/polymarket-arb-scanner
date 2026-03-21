@@ -8,6 +8,9 @@ import time
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+from config import SMARKETS_RATE_LIMIT
+from rate_limiter import PlatformCircuitBreaker
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,7 +24,9 @@ SMARKETS_AUTH_URL = "https://api.smarkets.com/v3/sessions/"
 # Rate limiting (thread-safe)
 _last_request_time = 0
 _rate_lock = threading.Lock()
-MIN_REQUEST_INTERVAL = 0.2  # 200ms between requests
+
+# HARDEN-04: circuit breaker — opens after 3 consecutive failures, resets after 30s
+_circuit = PlatformCircuitBreaker("smarkets", fail_limit=3, reset_timeout=30.0)
 
 
 def _rate_limit():
@@ -29,8 +34,8 @@ def _rate_limit():
     with _rate_lock:
         now = time.time()
         elapsed = now - _last_request_time
-        if elapsed < MIN_REQUEST_INTERVAL:
-            time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+        if elapsed < SMARKETS_RATE_LIMIT:
+            time.sleep(SMARKETS_RATE_LIMIT - elapsed)
         _last_request_time = time.time()
 
 
@@ -105,12 +110,15 @@ class SmarketsClient:
             logger.error("Smarkets: must login before making API calls")
             return None
 
+        if _circuit.is_open():
+            raise _RateLimitError("Circuit open -- smarkets in backoff")
         _rate_limit()
         try:
             url = f"{SMARKETS_API_URL}{endpoint}"
             resp = self.session.request(method, url, params=params,
                                         json=json_data, timeout=30)
             if resp.status_code == 200:
+                _circuit.record_success()
                 return resp.json()
             if resp.status_code == 429:
                 logger.warning("Smarkets rate limited on %s %s, retrying...", method, endpoint)
@@ -119,6 +127,7 @@ class SmarketsClient:
                            method, endpoint, resp.status_code, resp.text[:200])
             return None
         except (requests.ConnectionError, requests.Timeout, _RateLimitError):
+            _circuit.record_failure()
             raise  # Let tenacity retry these
         except requests.RequestException as exc:
             logger.warning("Smarkets %s %s failed: %s", method, endpoint, exc)
