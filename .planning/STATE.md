@@ -3,29 +3,30 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-03-21T03:09:44.565Z"
+last_updated: "2026-03-21T08:30:00.000Z"
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 6
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # STATE.md — Polymarket Arb Scanner
 
 ## Current Phase
 
-- **Phase 1: Wire & Enable** — Plan 03 partially executed; paused at Task 3 (Railway human-action checkpoint)
+- **Phase 2: Harden & Test** — Plan 02 complete; ready for Plan 03
 
 ## Current Plan Position
 
-- **Phase:** 01-wire-enable
+- **Phase:** 02-harden-test
 - **Plan:** 03
 - **Status:** Executing Phase 02
-- **Tasks completed:** 2/3
+- **Tasks completed:** 0/0
 
 ## Session Log
 
+- **2026-03-21**: Plan 02-02 executed. Idempotency key generation, DB dedup (has_recent_trade), recovery dedup (dedup_skipped), and fee verification script created. 19 tests added. All 8 platforms verified. HARDEN-05 and HARDEN-02 complete.
 - **2026-03-19**: Phase 1 context gathered. Decisions captured for fee routing (dual-layer, all cross-platform), MM params ($500/market, 2% spread, all platforms), feature enablement (all 4 flags), bankroll refresh (timer + post-trade, all 8 platforms).
 - **2026-03-19**: Plan 01-03 executed. Tasks 1-2 complete. Config defaults updated (MM_MIN_SPREAD=0.02, MM_MAX_INVENTORY=500.0). CLAUDE.md updated with stale scan docs and Railway production guide. Paused at Task 3 (human-action: configure Railway env vars).
 - **2026-03-19**: Plan 01-02 executed. All 3 integration gaps closed: MM dry_run hardcode fixed (cli.py), Kalshi resolution scan added (continuous.py), bankroll refresh wired (timer + post-trade). 10 new tests added. 1484 tests passing.
@@ -44,9 +45,11 @@ progress:
 - Cross-all price parsing uses per-available-value dicts (not requiring both platforms in each dict) since each opp stores only one YES and one NO price
 - [Phase 02-harden-test]: Circuit breaker wired at outermost call level, outside tenacity, so circuit opens only after all retries exhausted
 - [Phase 02-harden-test]: Module-level circuit breaker instances (not per-instance) ensure shared state across all callers of a given platform
+- [Phase 02-harden-test]: Idempotency key uses minute bucket (Unix time // 60) so same order attempt within 60s maps to same key — window matches DB dedup window
+- [Phase 02-harden-test]: has_recent_trade excludes skipped:* actions so recorded skips do not trigger false-positive dedup on next legitimate attempt
+- [Phase 02-harden-test]: Recovery dedup marks as dedup_skipped (not failed) to distinguish intentional suppression from genuine failure
 
 ## Resume
 
-- File: `.planning/phases/01-wire-enable/01-03-PLAN.md`
-- Task: Task 3 — Configure Railway env vars (human-action checkpoint)
-- Signal: Type "configured" once Railway vars are set, or "skip" to defer
+- File: `.planning/phases/02-harden-test/02-03-PLAN.md`
+- Task: Task 1 — (next plan in phase)
