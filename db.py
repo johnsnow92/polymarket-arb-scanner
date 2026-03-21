@@ -447,6 +447,40 @@ class TradeDB:
                 for r in rows
             ]
 
+    def get_strategy_pnl(self) -> list[dict]:
+        """Get realized P&L per strategy type by joining trades with opportunities.
+
+        Uses the opportunities.net_profit column as a proxy for trade P&L since
+        the trades table does not have a dedicated pnl column. Each trade leg is
+        counted; win_count is based on the parent opportunity's net_profit > 0.
+
+        Returns:
+            List of dicts with keys: strategy, trade_count, win_count,
+            total_pnl, avg_profit. Ordered by total_pnl descending.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT o.type AS strategy,
+                          COUNT(t.id) AS trade_count,
+                          SUM(CASE WHEN o.net_profit > 0 THEN 1 ELSE 0 END) AS win_count,
+                          COALESCE(SUM(o.net_profit), 0) AS total_pnl,
+                          COALESCE(AVG(o.net_profit), 0) AS avg_profit
+                   FROM trades t
+                   JOIN opportunities o ON t.opportunity_id = o.id
+                   GROUP BY o.type
+                   ORDER BY total_pnl DESC"""
+            ).fetchall()
+            return [
+                {
+                    "strategy": r["strategy"],
+                    "trade_count": r["trade_count"],
+                    "win_count": r["win_count"],
+                    "total_pnl": round(r["total_pnl"], 4),
+                    "avg_profit": round(r["avg_profit"], 4),
+                }
+                for r in rows
+            ]
+
     def get_opportunity_stats_by_type(self) -> list[dict]:
         """Get opportunity statistics grouped by type.
 

@@ -33,6 +33,10 @@ class _DashboardState:
         self.ws_connections = 0
         self.opportunities_found = 0
         self.last_opportunities: list[dict] = []
+        # Capital tracking (OPTIMIZE-04, OPTIMIZE-05)
+        self.platform_balances: dict[str, float] = {}
+        self.last_bankroll_refresh: str | None = None
+        self.platform_opp_flow: dict[str, int] = {}
         # Layer 2-5 state
         self.mm_active_markets = 0
         self.mm_active_orders = 0
@@ -250,6 +254,9 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/failures": self._handle_failures,
             "/api/pause": self._handle_pause_get,
             "/api/db-stats": self._handle_db_stats,
+            "/api/strategy-pnl": self._handle_strategy_pnl,
+            "/api/balances": self._handle_balances,
+            "/api/rebalance": self._handle_rebalance,
         }
 
         handler_fn = routes.get(path)
@@ -517,6 +524,71 @@ class _Handler(BaseHTTPRequestHandler):
             _send_json(self, {"error": str(e)}, 500)
             return
         _send_json(self, stats)
+
+    def _handle_strategy_pnl(self):
+        """GET /api/strategy-pnl — per-strategy P&L breakdown from DB.
+
+        Returns:
+            JSON with ``strategies`` key: list of dicts with strategy,
+            trade_count, win_count, total_pnl, avg_profit fields.
+        """
+        db = _get_db()
+        if not db:
+            _send_json(self, {"strategies": []})
+            return
+        try:
+            strategies = db.get_strategy_pnl()
+        except Exception as e:
+            logger.debug("Dashboard strategy-pnl fetch failed: %s", e)
+            strategies = []
+        _send_json(self, {"strategies": strategies})
+
+    def _handle_balances(self):
+        """GET /api/balances — cached platform balances with total and timestamp.
+
+        Returns:
+            JSON with ``balances`` dict (platform -> float), ``total`` float,
+            and ``last_updated`` ISO timestamp string (or null).
+        """
+        balances = getattr(state, "platform_balances", {})
+        _send_json(self, {
+            "balances": balances,
+            "total": sum(v for v in balances.values() if isinstance(v, (int, float))),
+            "last_updated": getattr(state, "last_bankroll_refresh", None),
+        })
+
+    def _handle_rebalance(self):
+        """GET /api/rebalance — recommended capital transfers by opp-flow alignment.
+
+        Compares each platform's current capital percentage to its share of
+        historical opportunity flow. Recommends transfers when drift exceeds 5%.
+
+        Returns:
+            JSON with ``recommendations`` list and ``total_balance`` float.
+            Each recommendation has: platform, current_pct, recommended_pct,
+            current_balance, transfer_amount (positive = receive, negative = send).
+        """
+        balances = getattr(state, "platform_balances", {})
+        opp_flow = getattr(state, "platform_opp_flow", {})
+        total = sum(v for v in balances.values() if isinstance(v, (int, float)))
+        recommendations = []
+        if total > 0:
+            total_opps = sum(opp_flow.values()) or 1
+            for platform in set(list(balances.keys()) + list(opp_flow.keys())):
+                bal = balances.get(platform, 0)
+                opps = opp_flow.get(platform, 0)
+                current_pct = bal / total if total > 0 else 0
+                recommended_pct = opps / total_opps
+                diff = recommended_pct - current_pct
+                if abs(diff) > 0.05:  # only recommend if >5% drift
+                    recommendations.append({
+                        "platform": platform,
+                        "current_pct": round(current_pct, 4),
+                        "recommended_pct": round(recommended_pct, 4),
+                        "current_balance": round(bal, 2),
+                        "transfer_amount": round(diff * total, 2),
+                    })
+        _send_json(self, {"recommendations": recommendations, "total_balance": round(total, 2)})
 
     def _handle_pause_get(self):
         """GET /api/pause — return current kill switch state."""
