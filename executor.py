@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -108,6 +109,11 @@ class ArbitrageExecutor:
         # failing (e.g. insufficient liquidity) and is re-presented.
         self._failed_cooldowns: dict[str, float] = {}
         self._FAILED_COOLDOWN_SECS = FAILED_TRADE_COOLDOWN
+        # HARDEN-03: structured decision log (JSONL)
+        _data_dir = os.getenv("DATA_DIR", ".")
+        self._decision_log_path = os.path.join(_data_dir, "decisions.jsonl")
+        self._decision_log_lock = threading.Lock()
+        self._decision_fh = open(self._decision_log_path, "a", encoding="utf-8", buffering=1)
 
     def _get_cached_balances(self, opp_type: str) -> dict | None:
         """Return cached balances if fresh, otherwise fetch and cache.
@@ -256,6 +262,11 @@ class ArbitrageExecutor:
                     _metrics.inc("trades_executed", {"platform": opp_type, "status": "filled"})
                 else:
                     _metrics.inc("trades_failed", {"platform": opp_type, "reason": "execution"})
+            # HARDEN-03: log live execution decision
+            if result:
+                self._write_decision(opportunity, "execute", "filled")
+            else:
+                self._write_decision(opportunity, "reject", "execution_failed")
             # On failure, set a cooldown so the same opportunity is not
             # re-attempted immediately (prevents catastrophic retry loops).
             if not result:
@@ -1469,6 +1480,7 @@ class ArbitrageExecutor:
             )
 
         logger.info(f"[DRY RUN] Logged opportunity #{opp_id} with {len(legs)} legs.")
+        self._write_decision(opportunity, "execute", "dry_run")
         return True
 
     def _execute_legs(self, opportunity: dict, legs: list[dict], size: float) -> bool:
@@ -2290,3 +2302,33 @@ class ArbitrageExecutor:
             depth=opportunity.get("_clob_depth", 0),
             action=f"skipped:{reason}",
         )
+        self._write_decision(opportunity, "skip", reason)
+
+    def _write_decision(self, opp: dict, decision: str, reason: str, risk_check: str | None = None):
+        """Append one JSON line to decisions.jsonl (HARDEN-03).
+
+        Args:
+            opp: Opportunity dict from scanner.
+            decision: One of "skip", "execute", "reject".
+            reason: Human-readable reason string (e.g. "dry_run", "stale_prices").
+            risk_check: Optional risk check result description.
+        """
+        entry = {
+            "ts": time.time(),
+            "strategy": opp.get("type", ""),
+            "market": opp.get("market", ""),
+            "decision": decision,
+            "reason": reason,
+            "prices": opp.get("prices", ""),
+            "expected_profit": opp.get("net_profit", 0),
+            "expected_roi": opp.get("net_roi", ""),
+            "risk_check": risk_check,
+        }
+        line = json.dumps(entry) + "\n"
+        with self._decision_log_lock:
+            self._decision_fh.write(line)
+
+    def close(self):
+        """Release the JSONL decision log file handle."""
+        if hasattr(self, "_decision_fh") and self._decision_fh and not self._decision_fh.closed:
+            self._decision_fh.close()
