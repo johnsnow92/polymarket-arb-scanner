@@ -381,6 +381,112 @@ class BacktestEngine:
             return fallback_profit * units
 
 
+# ---------------------------------------------------------------------------
+# Nightly backtest-to-config feedback loop (OPTIMIZE-02)
+# ---------------------------------------------------------------------------
+
+def _suggest_min_roi(result: BacktestResult) -> float:
+    """Suggest a new MIN_NET_ROI based on backtest win rate.
+
+    - win_rate > 0.7: lower by 10% (safe to capture more opportunities)
+    - win_rate < 0.5: raise by 20% (be more selective)
+    - Otherwise: keep current value unchanged.
+    Clamped to [0.001, 0.05].
+    """
+    import config as _config
+    current = _config.MIN_NET_ROI
+    if result.win_rate > 0.7:
+        suggested = current * 0.90
+    elif result.win_rate < 0.5:
+        suggested = current * 1.20 if current > 0 else 0.005
+    else:
+        suggested = current
+    return max(0.001, min(0.05, suggested))
+
+
+def _suggest_fuzzy_threshold(result: BacktestResult) -> int:
+    """Suggest a new FUZZY_MATCH_THRESHOLD based on backtest win rate.
+
+    If win_rate < 0.5 (likely false positives from loose matching),
+    raise threshold by 3. Otherwise keep current.
+    Clamped to [60, 90].
+    """
+    import config as _config
+    current = _config.FUZZY_MATCH_THRESHOLD
+    if result.win_rate < 0.5:
+        suggested = current + 3
+    else:
+        suggested = current
+    return max(60, min(90, suggested))
+
+
+def _suggest_min_profit(result: BacktestResult) -> float:
+    """Suggest a new MIN_PROFIT_THRESHOLD based on average losing trade.
+
+    If there are losing trades, sets min profit to 1.2x the average
+    losing trade size to ensure we only trade when we can beat typical
+    losses. Falls back to current config value if no losing trades.
+    """
+    import config as _config
+    current = _config.DEFAULT_MIN_PROFIT
+    if result.losing_trades > 0 and result.trade_log:
+        losing = [abs(t["net_profit"]) for t in result.trade_log if t["net_profit"] < 0]
+        if losing:
+            avg_loss = sum(losing) / len(losing)
+            suggested = avg_loss * 1.2
+            return max(0.001, min(0.05, suggested))
+    return current
+
+
+def build_recommendations(result: BacktestResult) -> dict:
+    """Build a recommendations dict from a BacktestResult.
+
+    Returns a dict with suggested threshold adjustments, current values,
+    and per-strategy breakdown. Safe to call with zero-trade results.
+    """
+    import config as _config
+    from datetime import datetime
+
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "period_days": 7,
+        "total_trades": result.total_trades,
+        "win_rate": result.win_rate,
+        "recommended": {
+            "MIN_NET_ROI": _suggest_min_roi(result),
+            "FUZZY_MATCH_THRESHOLD": _suggest_fuzzy_threshold(result),
+            "MIN_PROFIT_THRESHOLD": _suggest_min_profit(result),
+        },
+        "current": {
+            "MIN_NET_ROI": _config.MIN_NET_ROI,
+            "FUZZY_MATCH_THRESHOLD": _config.FUZZY_MATCH_THRESHOLD,
+            "MIN_PROFIT_THRESHOLD": _config.DEFAULT_MIN_PROFIT,
+        },
+        "by_strategy": {
+            strategy: {
+                "win_rate": stats["wins"] / max(stats["count"], 1),
+                "avg_profit": stats["pnl"] / max(stats["count"], 1),
+            }
+            for strategy, stats in result.trades_by_type.items()
+        },
+    }
+
+
+def write_recommendations(result: BacktestResult, data_dir: str) -> str:
+    """Write backtest recommendations to a JSON file in data_dir.
+
+    Creates DATA_DIR/backtest_recommendations.json with suggested threshold
+    adjustments. Returns the absolute path of the written file.
+    """
+    import json
+    rec = build_recommendations(result)
+    path = os.path.join(data_dir, "backtest_recommendations.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh, indent=2)
+    logger.info("Backtest recommendations written to %s", path)
+    return path
+
+
 def _get_layer(opp_type: str) -> int:
     """Determine the strategy layer for an opportunity type."""
     if opp_type in STRATEGY_LAYERS:

@@ -23,6 +23,7 @@ from fees import (
     net_profit_cross_betfair,
     net_profit_cross_generic,
 )
+import config
 from config import (
     RESCAN_INTERVAL as CONFIG_RESCAN_INTERVAL,
     WS_SUBSCRIPTION_LIMIT as CONFIG_WS_SUBSCRIPTION_LIMIT,
@@ -653,22 +654,37 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             profit = recalculated_profit if recalculated_profit is not None else opp.get("net_profit", 0)
             if profit >= ws_trigger_threshold:
                 market_name = opp.get("market", "?")
-                if not _execution_semaphore.acquire(blocking=False):
-                    logger.debug("WS trigger: skipping %s — max concurrent executions reached",
-                                 market_name[:30])
-                    continue
-                lock = _get_market_lock(market_name)
-                if lock.acquire(blocking=False):
-                    try:
-                        opp["net_profit"] = profit
-                        logger.info("WS trigger: executing %s (profit $%.4f)",
-                                    market_name[:30], profit)
-                        executor.execute(opp)
-                    finally:
-                        lock.release()
+                # Push to priority queue for ordered execution (OPTIMIZE-03)
+                # Time-sensitive opps (stale, resolution) get higher priority (lower value = dequeues first)
+                nonlocal _seq_counter
+                opp_copy = dict(opp)
+                opp_copy["net_profit"] = profit
+                priority = -_execution_priority(opp_copy)
+                seq = _seq_counter
+                _seq_counter += 1
+                try:
+                    loop = asyncio.get_event_loop()
+                    asyncio.run_coroutine_threadsafe(
+                        _priority_queue.put((priority, seq, opp_copy)), loop
+                    )
+                except Exception as exc:
+                    # Fallback: execute directly if queue push fails
+                    logger.debug("Priority queue push failed, executing directly: %s", exc)
+                    if not _execution_semaphore.acquire(blocking=False):
+                        logger.debug("WS trigger: skipping %s — max concurrent executions reached",
+                                     market_name[:30])
+                        continue
+                    lock = _get_market_lock(market_name)
+                    if lock.acquire(blocking=False):
+                        try:
+                            logger.info("WS trigger: executing %s (profit $%.4f)",
+                                        market_name[:30], profit)
+                            executor.execute(opp_copy)
+                        finally:
+                            lock.release()
+                            _execution_semaphore.release()
+                    else:
                         _execution_semaphore.release()
-                else:
-                    _execution_semaphore.release()
 
     def _cleanup_price_cache():
         """Evict price cache entries older than the configured max age."""
@@ -723,6 +739,14 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     _last_bankroll_refresh = 0.0
     _bankroll_refresh_interval = 300.0  # 5 minutes
     _last_daily_reset_date = time.strftime("%Y-%m-%d", time.gmtime())
+    _last_fee_refresh = 0.0
+    _last_backtest_run = 0.0
+    _last_rebalance_digest = 0.0
+
+    # Monotonic sequence counter for PriorityQueue tie-breaking (thread-safe via GIL for int ops)
+    _seq_counter = 0
+    # asyncio.PriorityQueue for WS-triggered high-priority execution (OPTIMIZE-03)
+    _priority_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
 
     # Import alert_manager for daily resets
     try:
@@ -738,9 +762,70 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         kalshi_private_key_base64=kalshi_private_key_base64,
     )
 
+    async def _priority_consumer():
+        """Drain the priority queue, executing WS-triggered opps in priority order.
+
+        Time-sensitive opportunities (StalePriceOpp, ResolutionSnipeOpp) are
+        inserted with a lower queue value and thus execute before lower-priority
+        types. Logs a warning if execution latency exceeds 500ms (OPTIMIZE-03).
+        """
+        while not shutdown_event.is_set():
+            try:
+                try:
+                    item = await asyncio.wait_for(_priority_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
+                _priority_val, _seq, opp = item
+                market_name = opp.get("market", "?")
+                profit = opp.get("net_profit", 0)
+
+                if not _execution_semaphore.acquire(blocking=False):
+                    logger.debug(
+                        "Priority consumer: skipping %s — semaphore full", market_name[:30])
+                    _priority_queue.task_done()
+                    continue
+
+                lock = _get_market_lock(market_name)
+                if lock.acquire(blocking=False):
+                    try:
+                        _exec_start = time.time()
+                        logger.info(
+                            "Priority queue execute: %s (profit $%.4f, priority %.3f)",
+                            market_name[:30], profit, -_priority_val,
+                        )
+                        result = executor.execute(opp)
+                        _exec_elapsed_ms = (time.time() - _exec_start) * 1000
+                        if _exec_elapsed_ms > 500:
+                            logger.warning(
+                                "Priority execution latency %.0fms exceeded 500ms for %s",
+                                _exec_elapsed_ms, market_name[:30],
+                            )
+                        # Wire loss spike alerting (MONITOR-03)
+                        if result is False and _alert_manager:
+                            try:
+                                loss = abs(profit)
+                                _alert_manager.check_loss_spike(loss)
+                            except Exception:
+                                pass
+                    finally:
+                        lock.release()
+                        _execution_semaphore.release()
+                else:
+                    _execution_semaphore.release()
+
+                _priority_queue.task_done()
+            except Exception as exc:
+                logger.debug("Priority consumer error: %s", exc)
+
     async def _continuous_loop():
         ws_task = None
+        priority_consumer_task = None
         scan_count = 0
+
+        # Start priority consumer coroutine as a background task
+        priority_consumer_task = asyncio.create_task(_priority_consumer())
+        logger.info("Priority execution consumer started.")
 
         while not shutdown_event.is_set():
             scan_count += 1
@@ -1277,6 +1362,76 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         logger.debug("Bankroll refresh failed: %s", exc)
                         _last_bankroll_refresh = _now  # Don't retry immediately on failure
 
+                # Hourly fee rate reload (OPTIMIZE-01)
+                nonlocal _last_fee_refresh
+                if _now - _last_fee_refresh >= config.FEE_REFRESH_INTERVAL:
+                    try:
+                        fee_changes = config.reload_fee_rates()
+                        if fee_changes:
+                            logger.info("Fee rates updated: %s", fee_changes)
+                    except Exception as exc:
+                        logger.debug("Fee rate reload failed: %s", exc)
+                    _last_fee_refresh = _now
+
+                # Nightly backtest and threshold recommendations (OPTIMIZE-02)
+                nonlocal _last_backtest_run
+                if _now - _last_backtest_run >= config.BACKTEST_RUN_INTERVAL:
+                    async def _run_nightly_backtest():
+                        try:
+                            loop = asyncio.get_event_loop()
+                            from datetime import datetime as _dt, timedelta as _td
+                            _end_iso = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                            _start_iso = (_dt.utcnow() - _td(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+                            def _sync_run():
+                                from backtest import BacktestEngine, write_recommendations
+                                engine = BacktestEngine()
+                                result = engine.run(start_time=_start_iso, end_time=_end_iso)
+                                write_recommendations(result, config.DATA_DIR)
+                                logger.info(
+                                    "Nightly backtest complete: %d trades, %.1f%% win rate",
+                                    result.total_trades, result.win_rate * 100,
+                                )
+                            await loop.run_in_executor(None, _sync_run)
+                        except Exception:
+                            logger.exception("Nightly backtest failed")
+                    asyncio.ensure_future(_run_nightly_backtest())
+                    _last_backtest_run = _now
+
+                # Weekly rebalance digest (MONITOR-04)
+                nonlocal _last_rebalance_digest
+                if _now - _last_rebalance_digest >= config.REBALANCE_DIGEST_INTERVAL:
+                    try:
+                        from dashboard import state as _ds
+                        balances = getattr(_ds, "platform_balances", {})
+                        opp_flow = getattr(_ds, "platform_opp_flow", {})
+                        total = sum(v for v in balances.values() if isinstance(v, (int, float)))
+                        if total > 0 and notifier:
+                            total_opps = sum(opp_flow.values()) or 1
+                            lines = ["Weekly Rebalance Digest:"]
+                            for plat in sorted(balances.keys()):
+                                bal = balances.get(plat, 0)
+                                opps = opp_flow.get(plat, 0)
+                                cur_pct = bal / total * 100
+                                rec_pct = opps / total_opps * 100
+                                lines.append(
+                                    "  %s: $%.0f (%.0f%%) -> rec %.0f%%" % (
+                                        plat, bal, cur_pct, rec_pct)
+                                )
+                            if hasattr(notifier, "notify_text"):
+                                notifier.notify_text("\n".join(lines))
+                            logger.info("Weekly rebalance digest sent.")
+                    except Exception as exc:
+                        logger.debug("Rebalance digest failed: %s", exc)
+                    _last_rebalance_digest = _now
+
+                # Zero-opportunity anomaly detection (MONITOR-03)
+                if _alert_manager:
+                    try:
+                        _alert_manager.check_zero_opp_period(len(all_opportunities))
+                    except Exception:
+                        pass
+
                 # Rebuild opportunity index for WS-triggered execution
                 opp_index.rebuild(all_opportunities)
 
@@ -1356,6 +1511,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             ws_task.cancel()
             try:
                 await ws_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if priority_consumer_task:
+            priority_consumer_task.cancel()
+            try:
+                await priority_consumer_task
             except (asyncio.CancelledError, Exception):
                 pass
         logger.info("Shutdown complete.")

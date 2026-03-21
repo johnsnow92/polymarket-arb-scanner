@@ -352,6 +352,43 @@ ALERT_RATE_LIMIT_SECONDS = _env_float("ALERT_RATE_LIMIT_SECONDS", "300")
 ALERT_LOSS_STREAK_THRESHOLD = _env_int("ALERT_LOSS_STREAK_THRESHOLD", "5")
 ALERT_BALANCE_LOW_THRESHOLD = _env_float("ALERT_BALANCE_LOW_THRESHOLD", "10.0")
 
+# ---------------------------------------------------------------------------
+# Dynamic fee reload intervals and backtest scheduling
+# ---------------------------------------------------------------------------
+
+# How often (seconds) to re-read fee-related env vars and update globals.
+# Allows commission rate changes on Railway to take effect without restart.
+FEE_REFRESH_INTERVAL = _env_float("FEE_REFRESH_INTERVAL", "3600")  # 1 hour
+
+# How often (seconds) to run the nightly backtest and write recommendations.
+BACKTEST_RUN_INTERVAL = _env_float("BACKTEST_RUN_INTERVAL", "86400")  # 24 hours
+
+# How often (seconds) to emit the weekly platform-rebalance digest.
+REBALANCE_DIGEST_INTERVAL = _env_float("REBALANCE_DIGEST_INTERVAL", "604800")  # 7 days
+
+
+def reload_fee_rates() -> dict[str, tuple[float, float]]:
+    """Re-read fee-related env vars and update module globals.
+
+    Returns a dict of {var_name: (old_value, new_value)} for vars that changed.
+    IMPORTANT: Only updates fee rate globals. Does NOT touch DRY_RUN,
+    EXECUTION_MODE, API keys, or any non-fee configuration.
+    """
+    global BETFAIR_COMMISSION_RATE, SMARKETS_COMMISSION_RATE, GEMINI_FEE_RATE
+    _fee_vars = [
+        ("BETFAIR_COMMISSION_RATE", "0.03"),
+        ("SMARKETS_COMMISSION_RATE", "0.02"),
+        ("GEMINI_FEE_RATE", "0.05"),
+    ]
+    changes: dict[str, tuple[float, float]] = {}
+    for name, default in _fee_vars:
+        old_val = globals()[name]
+        new_val = _env_float(name, default)
+        if abs(new_val - old_val) > 1e-9:
+            changes[name] = (old_val, new_val)
+            globals()[name] = new_val
+    return changes
+
 
 # ---------------------------------------------------------------------------
 # Validation — called at module load to catch bad configuration early
