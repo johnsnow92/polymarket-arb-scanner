@@ -3,29 +3,30 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-03-21T09:00:00.000Z"
+last_updated: "2026-03-21T08:58:53.242Z"
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
 ---
 
 # STATE.md — Polymarket Arb Scanner
 
 ## Current Phase
 
-- **Phase 3: Monitor & Optimize** — Plan 1 complete
+- **Phase 3: Monitor & Optimize** — Plan 2 complete
 
 ## Current Plan Position
 
 - **Phase:** 3
-- **Plan:** 1 complete
+- **Plan:** 2 complete
 - **Status:** Executing Phase 03
-- **Tasks completed:** 1/1
+- **Tasks completed:** 2/2
 
 ## Session Log
 
+- **2026-03-21**: Plan 03-02 executed. TradeDB.get_strategy_pnl() added. Three new API endpoints (/api/strategy-pnl, /api/balances, /api/rebalance) added to dashboard. Dashboard UI enhanced with per-strategy P&L horizontal bar chart and platform balances doughnut chart. 19 new tests. 1572 tests passing. MONITOR-01, MONITOR-04, OPTIMIZE-04, OPTIMIZE-05 complete.
 - **2026-03-21**: Plan 03-01 executed. Per-strategy metrics labels (strategy key) wired into executor.py. AlertManager extended with LOSS_SPIKE (3x avg, 10-trade guard) and ZERO_OPP_PERIOD (5 consecutive empty scans) detection. 22 new tests. 1553 tests passing. MONITOR-02 and MONITOR-03 complete.
 - **2026-03-21**: Plan 02-03 executed. Per-strategy integration tests (19 modes), run_all.py orchestrator, and RESULTS.md template created. Fixed BaseException catch bug in orchestrator. Phase 2 complete.
 - **2026-03-21**: Plan 02-02 executed. Idempotency key generation, DB dedup (has_recent_trade), recovery dedup (dedup_skipped), and fee verification script created. 19 tests added. All 8 platforms verified. HARDEN-05 and HARDEN-02 complete.
@@ -55,7 +56,8 @@ progress:
 - [Phase 03-monitor-optimize]: loss spike guard requires 10+ trades in rolling window to prevent false positives on early data
 - [Phase 03-monitor-optimize]: _trade_losses deque maxlen=20 gives rolling average over recent 20 trades only (older trades expire automatically)
 - [Phase 03-monitor-optimize]: check_loss_spike uses strictly-greater-than comparison so exactly 3x avg does not fire (intent: spike not threshold)
+- [Phase 03]: get_strategy_pnl uses opportunities.net_profit as proxy since trades table has no pnl column
 
 ## Resume
 
-- Phase 03 Plan 01 complete. Next: Phase 03 Plan 02 (validate-deploy)
+- Phase 03 Plan 02 complete. Next: Phase 03 Plan 03 (if exists) or phase complete.
