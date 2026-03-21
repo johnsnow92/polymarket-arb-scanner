@@ -126,6 +126,13 @@ Plans:
 
 **Goal**: Progressive deployment from safest (Layer 1) to riskiest (Layer 4). 7-day validation against success criteria.
 
+**Plans:** 3 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — Deploy Layer 1 full-auto, pre-flight checks, 48h monitoring
+- [ ] 04-02-PLAN.md — Progressive Layer 2/3/4 enablement with monitoring gates
+- [ ] 04-03-PLAN.md — 7-day validation against success criteria
+
 ### Requirements
 
 | ID | Requirement | Timeline |
