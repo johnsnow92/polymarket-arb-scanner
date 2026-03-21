@@ -1,5 +1,6 @@
 """Arbitrage trade execution engine."""
 
+import hashlib
 import json
 import logging
 import os
@@ -48,6 +49,24 @@ from fees import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# HARDEN-05: Idempotency key generation
+# ---------------------------------------------------------------------------
+
+def _make_idempotency_key(market_id: str, side: str, price: float, extra: str = "") -> str:
+    """Return a 16-char hex key stable within a 60-second window (HARDEN-05).
+
+    The key is derived from: market_id, side, price (4 decimal places),
+    the current minute bucket (Unix time // 60), and an optional extra
+    discriminator. This ensures the same logical order attempt within a
+    single minute maps to the same key, allowing platforms and our own DB
+    to detect and reject duplicate submissions.
+    """
+    minute_bucket = int(time.time()) // 60
+    raw = f"{market_id}:{side}:{price:.4f}:{minute_bucket}:{extra}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 class ArbitrageExecutor:
@@ -176,6 +195,12 @@ class ArbitrageExecutor:
             remaining = int(cooldown_until - time.time())
             logger.debug(f"Cooldown active for {cooldown_key} ({remaining}s remaining). Skipping.")
             self._log_skipped(opportunity, "failed_cooldown")
+            return False
+
+        # 0c. HARDEN-05: Idempotency — reject duplicate within 60s window
+        if self.db.has_recent_trade(market, window_secs=60.0):
+            logger.debug(f"Duplicate trade for {market} within 60s window. Skipping.")
+            self._log_skipped(opportunity, "duplicate_trade")
             return False
 
         prefix = "[DRY RUN] " if self.dry_run else ""
@@ -1134,6 +1159,18 @@ class ArbitrageExecutor:
             elif "_platform_a" in opportunity:
                 # Generic cross-platform handler for cross-all opportunities
                 legs = self._build_cross_all_legs(opportunity, size)
+
+        # HARDEN-05: Attach a per-leg idempotency key before returning.
+        # Keys are stable within a 60-second minute bucket so that retries
+        # within the same minute are identifiable as duplicates by the platform.
+        market_id = opportunity.get("market", "")
+        for leg in legs:
+            side = leg.get("side", leg.get("token", leg.get("outcome", "")))
+            leg["_idempotency_key"] = _make_idempotency_key(
+                market_id=market_id,
+                side=str(side),
+                price=float(leg.get("price", 0)),
+            )
 
         return legs
 

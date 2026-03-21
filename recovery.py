@@ -73,6 +73,25 @@ def _reconcile_pending_trades(
             resolved += 1
             continue
 
+        # HARDEN-05: Skip trades that have already been reconciled or re-placed.
+        # If a sibling trade for the same opportunity is already filled/confirmed,
+        # this trade is a duplicate — mark as dedup_skipped and do not re-submit.
+        opportunity_id = trade.get("opportunity_id")
+        if opportunity_id is not None:
+            sibling_trades = db.get_trades_for_opportunity(opportunity_id)
+            if any(
+                t["status"] in ("filled", "confirmed", "settled")
+                for t in sibling_trades
+                if t["id"] != trade_id
+            ):
+                logger.info(
+                    "Trade #%d already has a filled sibling — marking dedup_skipped",
+                    trade_id,
+                )
+                db.update_trade_status(trade_id, "dedup_skipped")
+                resolved += 1
+                continue
+
         status = _check_order_status(
             platform, order_id,
             kalshi_client=kalshi_client,

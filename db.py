@@ -286,6 +286,24 @@ class TradeDB:
             ).fetchone()
             return row["cnt"] > 0
 
+    def has_recent_trade(self, market: str, window_secs: float = 60.0) -> bool:
+        """Return True if a non-skipped opportunity for this market exists within window.
+
+        Skipped opportunities (action LIKE 'skipped:%') are excluded so that
+        recording a skip does not trigger a false-positive dedup on the next
+        legitimate execution attempt. HARDEN-05.
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_secs)).isoformat()
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT 1 FROM opportunities
+                   WHERE market = ? AND timestamp > ? AND action NOT LIKE 'skipped:%'
+                   LIMIT 1""",
+                (market, cutoff),
+            ).fetchone()
+        return row is not None
+
     def get_active_market_expected_pnl(self, market: str) -> float | None:
         """Get the expected P&L of the best open position for this market.
 
