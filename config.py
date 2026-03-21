@@ -216,6 +216,12 @@ GEMINI_FEE_RATE = _env_float("GEMINI_FEE_RATE", "0.05")  # 5% taker / 1% maker
 GEMINI_ORDER_TYPE = os.getenv("GEMINI_ORDER_TYPE", "ioc")  # "ioc" or "gtc"
 GEMINI_RATE_LIMIT = _env_float("GEMINI_RATE_LIMIT", "0.1")
 
+# Exchange API rate limits (seconds between requests)
+BETFAIR_RATE_LIMIT = _env_float("BETFAIR_RATE_LIMIT", "0.2")    # 5/s
+SMARKETS_RATE_LIMIT = _env_float("SMARKETS_RATE_LIMIT", "0.2")  # 5/s
+SXBET_RATE_LIMIT = _env_float("SXBET_RATE_LIMIT", "0.2")        # 5/s
+MATCHBOOK_RATE_LIMIT = _env_float("MATCHBOOK_RATE_LIMIT", "0.2")  # 5/s
+
 # IBKR ForecastEx (via IB Gateway / TWS socket)
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = _env_int("IBKR_PORT", "4001")
