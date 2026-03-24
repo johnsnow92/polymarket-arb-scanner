@@ -257,6 +257,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/strategy-pnl": self._handle_strategy_pnl,
             "/api/balances": self._handle_balances,
             "/api/rebalance": self._handle_rebalance,
+            "/api/validation": self._handle_validation,
         }
 
         handler_fn = routes.get(path)
@@ -589,6 +590,104 @@ class _Handler(BaseHTTPRequestHandler):
                         "transfer_amount": round(diff * total, 2),
                     })
         _send_json(self, {"recommendations": recommendations, "total_balance": round(total, 2)})
+
+    def _handle_validation(self):
+        """GET /api/validation — run 7-day validation against success criteria.
+
+        Queries trades.db directly for the 3 milestone success criteria:
+        1. Net positive P&L
+        2. <5% false positive rate
+        3. At least 1 profitable round-trip trade
+        """
+        from datetime import datetime, timedelta, timezone
+        days = 7
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        if not _db:
+            _send_json(self, {"error": "No database available"}, 500)
+            return
+
+        conn = _db.conn
+        # Criterion 1: P&L
+        row = conn.execute(
+            "SELECT COALESCE(SUM(net_profit), 0) as total_pnl, COUNT(*) as count "
+            "FROM opportunities WHERE timestamp >= ? AND action IN ('executed','filled','dry_run')",
+            (since,)
+        ).fetchone()
+        total_pnl = row["total_pnl"]
+        opp_count = row["count"]
+
+        strategies = conn.execute(
+            "SELECT type, SUM(net_profit) as pnl, COUNT(*) as count "
+            "FROM opportunities WHERE timestamp >= ? AND action IN ('executed','filled','dry_run') "
+            "GROUP BY type ORDER BY pnl DESC",
+            (since,)
+        ).fetchall()
+
+        # Criterion 2: FP rate
+        det_row = conn.execute(
+            "SELECT COUNT(*) as detected, "
+            "SUM(CASE WHEN action IN ('executed','filled') THEN 1 ELSE 0 END) as executed, "
+            "SUM(CASE WHEN action LIKE 'skipped:%' OR action LIKE 'rejected:%' THEN 1 ELSE 0 END) as rejected "
+            "FROM opportunities WHERE timestamp >= ?",
+            (since,)
+        ).fetchone()
+        detected = det_row["detected"]
+        rejected = det_row["rejected"]
+        fp_rate = (rejected / detected * 100) if detected > 0 else 0
+
+        # Criterion 3: Profitable round-trip
+        rt_row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM opportunities o "
+            "JOIN trades t ON t.opportunity_id = o.id "
+            "WHERE o.timestamp >= ? AND o.net_profit > 0 AND t.status = 'filled'",
+            (since,)
+        ).fetchone()
+        profitable_roundtrips = rt_row["cnt"]
+
+        # Trade stats
+        trade_row = conn.execute(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN status='filled' THEN 1 ELSE 0 END) as filled, "
+            "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed "
+            "FROM trades WHERE timestamp >= ?",
+            (since,)
+        ).fetchone()
+
+        c1_pass = total_pnl > 0
+        c2_pass = fp_rate < 5
+        c3_pass = profitable_roundtrips > 0
+
+        _send_json(self, {
+            "period_days": days,
+            "criteria": {
+                "1_net_positive_pnl": {
+                    "passed": c1_pass,
+                    "total_pnl": round(total_pnl, 4),
+                    "opportunity_count": opp_count,
+                    "strategies": [{"type": s["type"], "pnl": round(s["pnl"], 4), "count": s["count"]} for s in strategies],
+                },
+                "2_fp_rate_under_5pct": {
+                    "passed": c2_pass,
+                    "detected": detected,
+                    "executed": det_row["executed"],
+                    "rejected": rejected,
+                    "fp_rate_pct": round(fp_rate, 2),
+                },
+                "3_profitable_roundtrip": {
+                    "passed": c3_pass,
+                    "profitable_count": profitable_roundtrips,
+                },
+            },
+            "trades": {
+                "total": trade_row["total"],
+                "filled": trade_row["filled"],
+                "failed": trade_row["failed"],
+                "success_rate_pct": round(trade_row["filled"] / trade_row["total"] * 100, 1) if trade_row["total"] > 0 else 0,
+            },
+            "overall_pass": c1_pass and c2_pass and c3_pass,
+            "milestone_status": "ACHIEVED" if (c1_pass and c2_pass and c3_pass) else "NOT ACHIEVED",
+        })
 
     def _handle_pause_get(self):
         """GET /api/pause — return current kill switch state."""
