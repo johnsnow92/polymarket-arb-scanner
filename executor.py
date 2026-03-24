@@ -368,21 +368,38 @@ class ArbitrageExecutor:
         - ROI 2-5%: moderate 80% of original profit
         - ROI < 2%: lenient — accept if profit > absolute floor
         Partial-CLOB opportunities use 80% max instead of 90%.
+
+        Multi-outcome opportunities (3+ legs) get a per-leg tolerance
+        bonus because each leg's re-fetch introduces independent noise.
         When disabled: always use strict 90% threshold.
         """
         is_partial = opp.get("_partial_clob", False)
+        opp_type = opp.get("type", "")
+
+        # Multi-outcome leg count scaling — each leg adds re-fetch noise
+        leg_count = 1
+        if "(" in opp_type:
+            try:
+                leg_count = int(opp_type.split("(")[1].rstrip(")"))
+            except (ValueError, IndexError):
+                leg_count = 1
+        # Each additional leg beyond 2 loosens threshold by 5% (capped at 30% bonus)
+        multi_bonus = min(0.30, max(0, (leg_count - 2)) * 0.05)
 
         if not self.revalidation_adaptive:
-            return original_profit * (0.8 if is_partial else 0.9)
+            base = 0.8 if is_partial else 0.9
+            return original_profit * max(0.5, base - multi_bonus)
 
         total_cost_str = opp.get("total_cost", "$0")
         total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
         roi = original_profit / total_cost if total_cost > 0 else 0
 
         if roi >= 0.05:
-            return original_profit * (0.8 if is_partial else 0.9)
+            base = 0.8 if is_partial else 0.9
+            return original_profit * max(0.5, base - multi_bonus)
         elif roi >= 0.02:
-            return original_profit * (0.7 if is_partial else 0.8)
+            base = 0.7 if is_partial else 0.8
+            return original_profit * max(0.4, base - multi_bonus)
         else:
             return self.revalidation_min_floor
 
@@ -551,15 +568,18 @@ class ArbitrageExecutor:
         """Revalidate a Kalshi multi-outcome opportunity."""
         tickers = opp.get("_kalshi_tickers", [])
         if not tickers or not self.kalshi_client:
+            logger.info("Revalidation: no tickers or no Kalshi client")
             return False
         yes_prices = []
         for ticker in tickers:
             book = self.kalshi_client.fetch_order_book(ticker)
             if not book:
+                logger.info("Revalidation: no order book for %s", ticker)
                 return False
             orderbook = book.get("orderbook", book)
             yes_entries = orderbook.get("yes", [])
             if not yes_entries:
+                logger.info("Revalidation: no yes entries for %s", ticker)
                 return False
             entry = yes_entries[0]
             price = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
