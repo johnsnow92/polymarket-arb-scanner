@@ -603,11 +603,12 @@ class _Handler(BaseHTTPRequestHandler):
         days = 7
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-        if not _db:
+        db = _get_db()
+        if not db:
             _send_json(self, {"error": "No database available"}, 500)
             return
 
-        conn = _db.conn
+        conn = db.conn
         # Criterion 1: P&L
         row = conn.execute(
             "SELECT COALESCE(SUM(net_profit), 0) as total_pnl, COUNT(*) as count "
