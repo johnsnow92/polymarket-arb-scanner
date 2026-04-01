@@ -44,7 +44,7 @@
 **Plans:** 3 plans
 Plans:
 - [x] 05-01-PLAN.md — Fee model overhaul + layer/revalidation config infrastructure
-- [ ] 05-02-PLAN.md — Layer tagging, layer-aware revalidation, calibration logging, maker routing
+- [x] 05-02-PLAN.md — Layer tagging, layer-aware revalidation, calibration logging, maker routing
 - [ ] 05-03-PLAN.md — Deploy to Railway, 72h calibration dry-run, enable first live trade
 
 ### Phase 6: Monitor & Harden
