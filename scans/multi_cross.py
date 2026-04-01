@@ -419,13 +419,15 @@ def _refine_multi_cross_with_clob(
 
         for leg in legs:
             if leg["platform"] == "polymarket" and leg.get("_token_id"):
-                # Build a minimal market dict for _fetch_clob_for_market
-                fake_market = {"clobTokenIds": leg["_token_id"]}
-                _, clob = _fetch_clob_for_market(fake_market, price_cache=price_cache)
-                if clob and clob.get("yes_ask"):
-                    new_prices.append(clob["yes_ask"])
+                # Multi-cross legs have a single YES token per outcome.
+                # Check WS price cache directly (not _fetch_clob_for_market
+                # which expects a full market dict with YES+NO token pair).
+                token_id = leg["_token_id"]
+                cached = price_cache.get(("polymarket", token_id)) if price_cache else None
+                if cached and cached.get("best_ask") is not None:
+                    new_prices.append(cached["best_ask"])
                     new_platforms.append("polymarket")
-                    leg["price"] = clob["yes_ask"]
+                    leg["price"] = cached["best_ask"]
                 else:
                     # Fallback to mid-price
                     new_prices.append(leg["price"])
