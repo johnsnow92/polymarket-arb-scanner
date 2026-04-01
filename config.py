@@ -148,7 +148,7 @@ PLATFORM_MIN_ORDER_SIZE: dict[str, float] = {
 POLYGON_GAS_ESTIMATE = _env_float("POLYGON_GAS_ESTIMATE", "0.005")
 
 # Revalidation
-REVALIDATION_MIN_FLOOR = _env_float("REVALIDATION_MIN_FLOOR", "0.003")
+REVALIDATION_MIN_FLOOR = _env_float("REVALIDATION_MIN_FLOOR", "0.001")
 REVALIDATION_ADAPTIVE = _env_bool("REVALIDATION_ADAPTIVE", "true")
 
 # API rate limits (seconds between requests)
@@ -331,7 +331,7 @@ MAX_CONCURRENT_WS_EXECUTIONS = _env_int("MAX_CONCURRENT_WS_EXECUTIONS", "5")
 # Price cache staleness (seconds) — different thresholds per use-case
 PRICE_CACHE_EVICTION_AGE = _env_float("PRICE_CACHE_EVICTION_AGE", "60")
 WS_CACHE_MAX_AGE_SCAN = _env_float("WS_CACHE_MAX_AGE_SCAN", "30")
-WS_CACHE_MAX_AGE_REVALIDATION = _env_float("WS_CACHE_MAX_AGE_REVALIDATION", "5")
+WS_CACHE_MAX_AGE_REVALIDATION = _env_float("WS_CACHE_MAX_AGE_REVALIDATION", "15")
 
 # WS feed stale detection threshold (seconds without any message)
 WS_STALE_FEED_SECONDS = _env_float("WS_STALE_FEED_SECONDS", "120")

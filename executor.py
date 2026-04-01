@@ -14,7 +14,13 @@ from config import (
     ENABLED_EXECUTION_PLATFORMS, PLATFORM_MIN_ORDER_SIZE,
     ORDER_TIME_IN_FORCE, GTC_ORDER_TIMEOUT,
     FAILED_TRADE_COOLDOWN, WS_CACHE_MAX_AGE_REVALIDATION,
+    REVALIDATION_MIN_FLOOR as CONFIG_REVALIDATION_MIN_FLOOR,
 )
+
+
+class _RevalidationAPIError(Exception):
+    """Raised when revalidation fails due to an API/network error, not price movement."""
+    pass
 
 # Conditional metrics import — never breaks if metrics.py is missing
 try:
@@ -210,10 +216,11 @@ class ArbitrageExecutor:
         _exec_start = time.time()
 
         # 1. Re-validate prices
-        if not self.dry_run and not self._revalidate(opportunity, self.price_cache):
+        _reval_result = True if self.dry_run else self._revalidate(opportunity, self.price_cache)
+        if not _reval_result:
             self._log_skipped(opportunity, "stale_prices")
             if _metrics:
-                _metrics.inc("revalidation_failures", {"type": opp_type})
+                _metrics.inc("revalidation_failures", {"type": opp_type, "reason": "price_degraded"})
             return False
 
         # 2. Risk gate (uses cached balances to avoid redundant API calls)
@@ -302,8 +309,13 @@ class ArbitrageExecutor:
     def _revalidate(self, opportunity: dict, price_cache: dict | None = None) -> bool:
         """Re-fetch current prices and verify the opportunity still exists.
 
-        Returns True if the opportunity is still profitable (>= 90% of original),
-        False if stale, degraded, or any API call fails.
+        Returns True if the opportunity is still profitable (>= threshold of original).
+        Returns False only when prices have genuinely degraded below threshold.
+
+        API/network failures are treated leniently: if the original ROI was >= 2%,
+        the opportunity is accepted despite the failed re-fetch (the CLOB prices
+        from scan time are still recent enough to act on). This prevents transient
+        API errors from causing 100% rejection rates.
         """
         opp_type = opportunity.get("type", "")
         original_profit = opportunity.get("net_profit", 0)
@@ -347,16 +359,33 @@ class ArbitrageExecutor:
                 return True  # MM quotes are continuously refreshed by the MM engine
             # Unknown type — proceed cautiously
             return True
+        except _RevalidationAPIError as e:
+            # API/network failure — not a price degradation.
+            # Accept if original ROI was strong enough (prices were CLOB-verified at scan).
+            total_cost_str = opportunity.get("total_cost", "$0")
+            total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
+            roi = original_profit / total_cost if total_cost > 0 else 0
+            if roi >= 0.02:
+                logger.info(
+                    "Revalidation API error for %s (ROI=%.1f%%), proceeding with scan prices: %s",
+                    opp_type, roi * 100, e,
+                )
+                return True
+            logger.info(
+                "Revalidation API error for %s (ROI=%.1f%% < 2%%), rejecting: %s",
+                opp_type, roi * 100, e,
+            )
+            return False
         except Exception as e:
-            logger.warning(f"Revalidation failed: {e}")
+            logger.warning(f"Revalidation unexpected error: {e}")
             return False
 
     def _check_ws_cache(self, price_cache: dict | None, platform: str, key: str) -> dict | None:
-        """Check WebSocket price cache for fresh data (< 5s old)."""
+        """Check WebSocket price cache for fresh data (< WS_CACHE_MAX_AGE_REVALIDATION seconds)."""
         if not price_cache:
             return None
         entry = price_cache.get((platform, key))
-        if entry and time.time() - entry.get("_ts", 0) < 5:
+        if entry and time.time() - entry.get("_ts", 0) < WS_CACHE_MAX_AGE_REVALIDATION:
             return entry
         return None
 
@@ -408,7 +437,7 @@ class ArbitrageExecutor:
         token_ids = opp.get("_token_ids", [])
         if len(token_ids) < 2:
             logger.warning("Revalidation: missing token IDs for binary")
-            return False
+            raise _RevalidationAPIError("missing token IDs for binary")
 
         # Try WS cache first, then API
         yes_ask = no_ask = None
@@ -422,19 +451,19 @@ class ArbitrageExecutor:
             yes_book = fetch_order_book(token_ids[0])
             no_book = fetch_order_book(token_ids[1])
             if not yes_book or not no_book:
-                return False
+                raise _RevalidationAPIError("failed to fetch order book for binary")
             yes_data = get_best_bid_ask(yes_book)
             no_data = get_best_bid_ask(no_book)
             yes_ask = yes_data["ask"]
             no_ask = no_data["ask"]
 
         if yes_ask is None or no_ask is None:
-            return False
+            raise _RevalidationAPIError("no ask price in order book for binary")
 
         result = net_profit_binary_internal(yes_ask, no_ask)
         threshold = self._get_revalidation_threshold(original_profit, opp)
         if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: profit degraded {original_profit:.4f} -> {result['net_profit']:.4f}")
+            logger.info(f"Revalidation: binary profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
             return False
         # Update opportunity with fresh prices
         opp["prices"] = f"Y={yes_ask:.3f} N={no_ask:.3f}"
@@ -445,28 +474,28 @@ class ArbitrageExecutor:
         """Revalidate a Polymarket NegRisk opportunity."""
         token_ids = opp.get("_token_ids", [])
         if not token_ids:
-            return False
+            raise _RevalidationAPIError("no token IDs for negrisk")
 
         yes_asks = []
         for tid in token_ids:
             if not tid:
-                return False
+                raise _RevalidationAPIError("empty token ID in negrisk")
             cached = self._check_ws_cache(price_cache, "polymarket", tid)
             if cached and cached.get("price") is not None:
                 yes_asks.append(cached["price"])
             else:
                 book = fetch_order_book(tid)
                 if not book:
-                    return False
+                    raise _RevalidationAPIError(f"failed to fetch order book for negrisk token {tid}")
                 data = get_best_bid_ask(book)
                 if data["ask"] is None:
-                    return False
+                    raise _RevalidationAPIError(f"no ask price for negrisk token {tid}")
                 yes_asks.append(data["ask"])
 
         result = net_profit_negrisk_internal(yes_asks)
         threshold = self._get_revalidation_threshold(original_profit, opp)
         if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: profit degraded {original_profit:.4f} -> {result['net_profit']:.4f}")
+            logger.info(f"Revalidation: negrisk profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
             return False
         opp["net_profit"] = result["net_profit"]
         return True
@@ -490,7 +519,7 @@ class ArbitrageExecutor:
                 yes_book = fetch_order_book(token_ids[0])
                 no_book = fetch_order_book(token_ids[1])
                 if not yes_book or not no_book:
-                    return False
+                    raise _RevalidationAPIError("failed to fetch PM order book for cross")
                 yes_data = get_best_bid_ask(yes_book)
                 no_data = get_best_bid_ask(no_book)
                 pm_yes = yes_data["ask"]
@@ -506,7 +535,7 @@ class ArbitrageExecutor:
             if k_yes is None or k_no is None:
                 book = self.kalshi_client.fetch_order_book(kalshi_ticker)
                 if not book:
-                    return False
+                    raise _RevalidationAPIError("failed to fetch Kalshi order book for cross")
                 # Parse Kalshi order book for best prices
                 orderbook = book.get("orderbook", book)
                 yes_entries = orderbook.get("yes", [])
@@ -519,7 +548,7 @@ class ArbitrageExecutor:
                     k_no = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
 
         if pm_yes is None or pm_no is None or k_yes is None or k_no is None:
-            return False
+            raise _RevalidationAPIError("incomplete prices after re-fetch for cross")
 
         result1 = net_profit_cross_platform(pm_yes, k_no, "yes", "no")
         result2 = net_profit_cross_platform(pm_no, k_yes, "no", "yes")
@@ -533,7 +562,7 @@ class ArbitrageExecutor:
 
         threshold = self._get_revalidation_threshold(original_profit, opp)
         if best < threshold:
-            logger.info(f"Revalidation: profit degraded {original_profit:.4f} -> {best:.4f}")
+            logger.info(f"Revalidation: cross profit degraded {original_profit:.4f} -> {best:.4f} (threshold={threshold:.4f})")
             return False
         opp["net_profit"] = best
         return True
@@ -542,15 +571,15 @@ class ArbitrageExecutor:
         """Revalidate a Kalshi binary opportunity."""
         ticker = opp.get("_kalshi_ticker", "")
         if not ticker or not self.kalshi_client:
-            return False
+            raise _RevalidationAPIError("no ticker or no Kalshi client for kalshi_binary")
         book = self.kalshi_client.fetch_order_book(ticker)
         if not book:
-            return False
+            raise _RevalidationAPIError(f"failed to fetch Kalshi order book for {ticker}")
         orderbook = book.get("orderbook", book)
         yes_entries = orderbook.get("yes", [])
         no_entries = orderbook.get("no", [])
         if not yes_entries or not no_entries:
-            return False
+            raise _RevalidationAPIError(f"empty order book entries for Kalshi {ticker}")
         y_entry = yes_entries[0]
         n_entry = no_entries[0]
         k_yes = float(y_entry[0]) / 100 if isinstance(y_entry, list) else float(y_entry.get("price", 0)) / 100
@@ -559,7 +588,7 @@ class ArbitrageExecutor:
         result = net_profit_kalshi_binary(k_yes, k_no)
         threshold = self._get_revalidation_threshold(original_profit, opp)
         if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: profit degraded {original_profit:.4f} -> {result['net_profit']:.4f}")
+            logger.info(f"Revalidation: kalshi_binary profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
             return False
         opp["net_profit"] = result["net_profit"]
         return True
@@ -568,26 +597,23 @@ class ArbitrageExecutor:
         """Revalidate a Kalshi multi-outcome opportunity."""
         tickers = opp.get("_kalshi_tickers", [])
         if not tickers or not self.kalshi_client:
-            logger.info("Revalidation: no tickers or no Kalshi client")
-            return False
+            raise _RevalidationAPIError("no tickers or no Kalshi client for kalshi_multi")
         yes_prices = []
         for ticker in tickers:
             book = self.kalshi_client.fetch_order_book(ticker)
             if not book:
-                logger.info("Revalidation: no order book for %s", ticker)
-                return False
+                raise _RevalidationAPIError(f"failed to fetch Kalshi order book for {ticker}")
             orderbook = book.get("orderbook", book)
             yes_entries = orderbook.get("yes", [])
             if not yes_entries:
-                logger.info("Revalidation: no yes entries for %s", ticker)
-                return False
+                raise _RevalidationAPIError(f"empty yes entries for Kalshi {ticker}")
             entry = yes_entries[0]
             price = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
             yes_prices.append(price)
         result = net_profit_kalshi_multi(yes_prices)
         threshold = self._get_revalidation_threshold(original_profit, opp)
         if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: profit degraded {original_profit:.4f} -> {result['net_profit']:.4f}")
+            logger.info(f"Revalidation: kalshi_multi profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
             return False
         opp["net_profit"] = result["net_profit"]
         return True
@@ -599,29 +625,29 @@ class ArbitrageExecutor:
         prices_str = opp.get("prices", "")
 
         if not platform_a or not platform_b:
-            return False
+            raise _RevalidationAPIError("missing platform info for triangular")
 
         # Parse current prices from prices string: "{platform}_Y={price} {platform}_N={price}"
         parts = prices_str.split()
         if len(parts) != 2:
-            return False
+            raise _RevalidationAPIError("unexpected prices format for triangular")
 
         yes_price = no_price = None
         for part in parts:
             if "=" not in part:
-                return False
+                raise _RevalidationAPIError("malformed price label in triangular")
             label, val = part.split("=", 1)
             try:
                 price = float(val)
             except ValueError:
-                return False
+                raise _RevalidationAPIError("non-numeric price in triangular")
             if label.endswith("_Y"):
                 yes_price = price
             elif label.endswith("_N"):
                 no_price = price
 
         if yes_price is None or no_price is None:
-            return False
+            raise _RevalidationAPIError("could not parse YES/NO prices for triangular")
 
         # Re-fetch YES-side price
         fresh_yes = self._refetch_platform_price(platform_a, opp, price_cache, "yes")
@@ -639,7 +665,7 @@ class ArbitrageExecutor:
         threshold = self._get_revalidation_threshold(original_profit, opp)
 
         if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: triangular profit degraded {original_profit:.4f} -> {result['net_profit']:.4f}")
+            logger.info(f"Revalidation: triangular profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
             return False
 
         # Update opportunity with fresh prices
@@ -651,7 +677,7 @@ class ArbitrageExecutor:
         """Revalidate a MultiCross opportunity by re-checking each leg's price."""
         outcome_legs = opp.get("_outcome_legs", [])
         if not outcome_legs:
-            return False
+            raise _RevalidationAPIError("no outcome legs for multi_cross")
 
         prices = []
         platforms = []
@@ -673,7 +699,7 @@ class ArbitrageExecutor:
         threshold = self._get_revalidation_threshold(original_profit, opp)
 
         if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: multi-cross profit degraded {original_profit:.4f} -> {result['net_profit']:.4f}")
+            logger.info(f"Revalidation: multi-cross profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
             return False
 
         opp["net_profit"] = result["net_profit"]

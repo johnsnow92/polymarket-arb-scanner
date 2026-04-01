@@ -432,7 +432,7 @@ class TestCheckWsCache:
         assert result is None
 
     def test_returns_none_when_stale(self, executor):
-        cache = {("polymarket", "tok1"): {"price": 0.50, "_ts": time.time() - 10}}
+        cache = {("polymarket", "tok1"): {"price": 0.50, "_ts": time.time() - 20}}
         result = executor._check_ws_cache(cache, "polymarket", "tok1")
         assert result is None
 
@@ -1412,8 +1412,8 @@ class TestRevalidateTriangular:
             # ROI = 0.10/0.70 = 14.3% (>5%) -> strict 90%: 0.02 < 0.09 -> fail
             assert result is False
 
-    def test_revalidate_triangular_missing_platforms(self, executor):
-        """TriangularCross revalidation fails with missing platform info."""
+    def test_revalidate_triangular_missing_platforms_high_roi(self, executor):
+        """TriangularCross with missing platform info but high ROI: API error accepted."""
         opp = {
             "type": "TriangularCross",
             "net_profit": 0.10,
@@ -1423,7 +1423,20 @@ class TestRevalidateTriangular:
             "_platform_b": "",
         }
         result = executor._revalidate(opp, None)
-        assert result is False
+        assert result is True  # ROI ~14% >= 2%, so API error is accepted
+
+    def test_revalidate_triangular_missing_platforms_low_roi(self, executor):
+        """TriangularCross with missing platform info and low ROI: rejected."""
+        opp = {
+            "type": "TriangularCross",
+            "net_profit": 0.005,
+            "total_cost": "$1.0000",
+            "prices": "polymarket_Y=0.500 kalshi_N=0.500",
+            "_platform_a": "",
+            "_platform_b": "",
+        }
+        result = executor._revalidate(opp, None)
+        assert result is False  # ROI 0.5% < 2%, so API error is rejected
 
     def test_revalidate_event_divergence_passes(self, executor):
         """EventDivergence should always pass revalidation (signal-based)."""
@@ -1469,8 +1482,8 @@ class TestRevalidateNegRisk:
         result = executor._revalidate(opp, None)
         assert result is False
 
-    def test_fails_when_order_book_empty(self, executor):
-        """NegRisk revalidation fails when fetch_order_book returns None."""
+    def test_api_error_accepted_when_high_roi(self, executor):
+        """NegRisk: API error accepted when ROI >= 2% (proceeds with scan prices)."""
         from unittest.mock import patch as mpatch
         opp = {
             "type": "NegRiskInternal",
@@ -1480,7 +1493,20 @@ class TestRevalidateNegRisk:
         }
         with mpatch("executor.fetch_order_book", return_value=None):
             result = executor._revalidate(opp, None)
-            assert result is False
+            assert result is True  # ROI ~11% >= 2%, API error accepted
+
+    def test_api_error_rejected_when_low_roi(self, executor):
+        """NegRisk: API error rejected when ROI < 2%."""
+        from unittest.mock import patch as mpatch
+        opp = {
+            "type": "NegRiskInternal",
+            "net_profit": 0.005,
+            "total_cost": "$1.0000",
+            "_token_ids": ["tok_y1"],
+        }
+        with mpatch("executor.fetch_order_book", return_value=None):
+            result = executor._revalidate(opp, None)
+            assert result is False  # ROI 0.5% < 2%, API error rejected
 
     def test_fails_when_profit_degrades(self, executor):
         """NegRisk revalidation fails when new profit < 90% of original."""
@@ -1570,8 +1596,8 @@ class TestRevalidateKalshiMulti:
         result = ex._revalidate(opp, None)
         assert result is False
 
-    def test_fails_when_order_book_missing(self, executor):
-        """KalshiMulti revalidation fails when order book returns None."""
+    def test_api_error_accepted_when_high_roi(self, executor):
+        """KalshiMulti: API error accepted when ROI >= 2%."""
         opp = {
             "type": "KalshiMultiOutcome",
             "net_profit": 0.10,
@@ -1580,7 +1606,19 @@ class TestRevalidateKalshiMulti:
         }
         executor.kalshi_client.fetch_order_book.return_value = None
         result = executor._revalidate(opp, None)
-        assert result is False
+        assert result is True  # ROI 12.5% >= 2%, API error accepted
+
+    def test_api_error_rejected_when_low_roi(self, executor):
+        """KalshiMulti: API error rejected when ROI < 2%."""
+        opp = {
+            "type": "KalshiMultiOutcome",
+            "net_profit": 0.005,
+            "total_cost": "$1.0000",
+            "_kalshi_tickers": ["TICKER-A", "TICKER-B"],
+        }
+        executor.kalshi_client.fetch_order_book.return_value = None
+        result = executor._revalidate(opp, None)
+        assert result is False  # ROI 0.5% < 2%, API error rejected
 
     def test_fails_when_profit_degrades(self, executor):
         """KalshiMulti revalidation fails when profit drops below threshold."""
