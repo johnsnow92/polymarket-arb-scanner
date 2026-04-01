@@ -147,9 +147,65 @@ PLATFORM_MIN_ORDER_SIZE: dict[str, float] = {
 # Polygon gas cost estimate (per transaction, in dollars)
 POLYGON_GAS_ESTIMATE = _env_float("POLYGON_GAS_ESTIMATE", "0.005")
 
+# Polymarket fee model (March 2026: dynamic taker, zero maker)
+POLYMARKET_DEFAULT_TAKER_RATE = _env_float("POLYMARKET_TAKER_FEE_RATE", "0.04")
+POLYMARKET_MAKER_FEE_RATE = _env_float("POLYMARKET_MAKER_FEE_RATE", "0.0")
+
+# Gemini fee model (March 18, 2026: P*(1-P)*rate)
+GEMINI_TAKER_RATE = _env_float("GEMINI_TAKER_FEE_RATE", "0.07")
+GEMINI_MAKER_RATE = _env_float("GEMINI_MAKER_FEE_RATE", "0.0175")
+
+# Kalshi maker fee multiplier (per D-07, env-var override for hotfixing)
+KALSHI_MAKER_MULTIPLIER = _env_float("KALSHI_MAKER_FEE_MULTIPLIER", "1.75")
+
+# Matchbook prediction market commission (per Pitfall 4, promo may expire)
+MATCHBOOK_PREDICTION_COMMISSION = _env_float("MATCHBOOK_PREDICTION_COMMISSION", "0.0")
+
 # Revalidation
 REVALIDATION_MIN_FLOOR = _env_float("REVALIDATION_MIN_FLOOR", "0.001")
 REVALIDATION_ADAPTIVE = _env_bool("REVALIDATION_ADAPTIVE", "true")
+
+# ---------------------------------------------------------------------------
+# Strategy layers and layer-specific revalidation floors (per D-02, D-03)
+# ---------------------------------------------------------------------------
+STRATEGY_LAYERS: dict[str, int] = {
+    "Binary": 1, "KalshiBinary": 1, "Cross": 1, "NegRisk": 1,
+    "MultiCross": 1, "TriangularCross": 1,
+    "BetfairBackAll": 1, "BetfairBackLay": 1,
+    "SmarketsBackAll": 1, "SmarketsBackLay": 1,
+    "SXBetBackAll": 1, "SXBetBackLay": 1,
+    "MatchbookBackAll": 1, "MatchbookBackLay": 1,
+    "GeminiBinary": 1, "GeminiMulti": 1,
+    "IBKRBinary": 1,
+    "Spread": 1,
+    "StalePriceOpp": 2, "ResolutionSnipeOpp": 2,
+    "MarketMake": 3,
+    "EventDivergence": 4, "ConvergenceOpp": 4,
+}
+
+REVAL_FLOOR_L1 = _env_float("REVAL_FLOOR_L1", "0.02")   # 2% pure arb
+REVAL_FLOOR_L2 = _env_float("REVAL_FLOOR_L2", "0.05")   # 5% near-arb
+REVAL_FLOOR_L3 = _env_float("REVAL_FLOOR_L3", "0.03")   # 3% market making
+REVAL_FLOOR_L4 = _env_float("REVAL_FLOOR_L4", "0.10")   # 10% informed
+REVAL_FLOORS: dict[int, float] = {
+    1: REVAL_FLOOR_L1, 2: REVAL_FLOOR_L2,
+    3: REVAL_FLOOR_L3, 4: REVAL_FLOOR_L4,
+}
+
+
+def get_layer(opp_type: str) -> int:
+    """Look up strategy layer for an opportunity type string.
+
+    Checks exact match first, then prefix match for parameterized types
+    like 'NegRisk(5)' or 'Cross(PM_YES + K_NO)'.
+    Returns 0 for unknown types.
+    """
+    if opp_type in STRATEGY_LAYERS:
+        return STRATEGY_LAYERS[opp_type]
+    for prefix, layer in STRATEGY_LAYERS.items():
+        if opp_type.startswith(prefix):
+            return layer
+    return 0
 
 # API rate limits (seconds between requests)
 PM_RATE_LIMIT = _env_float("PM_RATE_LIMIT", "0.01")
@@ -375,18 +431,28 @@ def reload_fee_rates() -> dict[str, tuple[float, float]]:
     EXECUTION_MODE, API keys, or any non-fee configuration.
     """
     global BETFAIR_COMMISSION_RATE, SMARKETS_COMMISSION_RATE, GEMINI_FEE_RATE
+    global POLYMARKET_DEFAULT_TAKER_RATE, POLYMARKET_MAKER_FEE_RATE
+    global GEMINI_TAKER_RATE, GEMINI_MAKER_RATE
+    global KALSHI_MAKER_MULTIPLIER, MATCHBOOK_PREDICTION_COMMISSION
+    # (env_var_name, global_var_name, default_str)
     _fee_vars = [
-        ("BETFAIR_COMMISSION_RATE", "0.03"),
-        ("SMARKETS_COMMISSION_RATE", "0.02"),
-        ("GEMINI_FEE_RATE", "0.05"),
+        ("BETFAIR_COMMISSION_RATE", "BETFAIR_COMMISSION_RATE", "0.03"),
+        ("SMARKETS_COMMISSION_RATE", "SMARKETS_COMMISSION_RATE", "0.02"),
+        ("GEMINI_FEE_RATE", "GEMINI_FEE_RATE", "0.05"),
+        ("POLYMARKET_TAKER_FEE_RATE", "POLYMARKET_DEFAULT_TAKER_RATE", "0.04"),
+        ("POLYMARKET_MAKER_FEE_RATE", "POLYMARKET_MAKER_FEE_RATE", "0.0"),
+        ("GEMINI_TAKER_FEE_RATE", "GEMINI_TAKER_RATE", "0.07"),
+        ("GEMINI_MAKER_FEE_RATE", "GEMINI_MAKER_RATE", "0.0175"),
+        ("KALSHI_MAKER_FEE_MULTIPLIER", "KALSHI_MAKER_MULTIPLIER", "1.75"),
+        ("MATCHBOOK_PREDICTION_COMMISSION", "MATCHBOOK_PREDICTION_COMMISSION", "0.0"),
     ]
     changes: dict[str, tuple[float, float]] = {}
-    for name, default in _fee_vars:
-        old_val = globals()[name]
-        new_val = _env_float(name, default)
+    for env_name, global_name, default in _fee_vars:
+        old_val = globals()[global_name]
+        new_val = _env_float(env_name, default)
         if abs(new_val - old_val) > 1e-9:
-            changes[name] = (old_val, new_val)
-            globals()[name] = new_val
+            changes[global_name] = (old_val, new_val)
+            globals()[global_name] = new_val
     return changes
 
 
