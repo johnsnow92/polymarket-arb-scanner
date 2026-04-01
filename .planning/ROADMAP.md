@@ -41,7 +41,11 @@
   3. Revalidation applies layer-specific floors: 2% Layer 1, 5% Layer 2, 3% Layer 3, 10% Layer 4
   4. All 8 platform fee rates verified and corrected against current 2026 schedules
   5. At least one autonomous round-trip trade completes with net positive P&L recorded in trades.db
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 05-01-PLAN.md — Fee model overhaul + layer/revalidation config infrastructure
+- [ ] 05-02-PLAN.md — Layer tagging, layer-aware revalidation, calibration logging, maker routing
+- [ ] 05-03-PLAN.md — Deploy to Railway, 72h calibration dry-run, enable first live trade
 
 ### Phase 6: Monitor & Harden
 **Goal**: Every strategy has observable P&L attribution, disconnects are detected, and the system is reliable enough to leave running unattended
@@ -94,7 +98,7 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 5. Deploy & Execute | v2.0 | 0/TBD | Not started | - |
+| 5. Deploy & Execute | v2.0 | 0/3 | Planning complete | - |
 | 6. Monitor & Harden | v2.0 | 0/TBD | Not started | - |
 | 7. Liquidity Rewards | v2.0 | 0/TBD | Not started | - |
 | 8. Market Signal Strategies | v2.0 | 0/TBD | Not started | - |
