@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Profitable Trading & Strategy Expansion
-status: defining-requirements
-last_updated: "2026-04-01T02:45:00Z"
+status: ready-to-plan
+last_updated: "2026-04-01T03:00:00Z"
 progress:
-  total_phases: 0
+  total_phases: 5
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -15,26 +15,57 @@ progress:
 
 ## Current Phase
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-04-01 — Milestone v2.0 started
+Phase: 5 of 9 — Deploy & Execute (first v2.0 phase)
+Plan: — (not yet planned)
+Status: Ready to plan
+Last activity: 2026-04-01 — v2.0 roadmap created (Phases 5-9)
+
+Progress: [░░░░░░░░░░] 0%
 
 ## Project Reference
 
 See: .planning/PROJECT.md (updated 2026-04-01)
 
 **Core value:** Automated profit extraction from prediction market inefficiencies
-**Current focus:** Get profitable trades flowing + expand strategy set
+**Current focus:** Phase 5 — Deploy & Execute (unblock production trades)
 
-## Session Log
+## Performance Metrics
 
-- **2026-04-01**: Milestone v2.0 started — Profitable Trading & Strategy Expansion
-- **2026-04-01**: Milestone v1.0 archived. Revalidation fix committed (API error tolerance, widened WS cache, lowered floor). OPTIMIZE-01 re-verified as working (scan modules use attribute access). Audit report created.
-- **2026-03-21**: All 4 phases code-complete. 1588+ tests passing. Bot running 24/7 on Railway.
-- **2026-03-21**: Phase 03 complete (3/3 plans). Phase 04 context gathered and plans executed.
-- **2026-03-19**: Phase 01 complete (3/3 plans). Phase 02 complete (3/3 plans).
+**Velocity:**
+- Total plans completed: 0 (v2.0)
+- Average duration: —
+- Total execution time: —
 
-## Resume
+**By Phase:**
 
-Milestone v2.0 started. Research phase next — investigating new prediction market strategies. Then requirements → roadmap → execution.
+| Phase | Plans | Total | Avg/Plan |
+|-------|-------|-------|----------|
+| — | — | — | — |
+
+*Updated after each plan completion*
+
+## Accumulated Context
+
+### Decisions
+
+Decisions are logged in PROJECT.md Key Decisions table.
+Recent decisions affecting current work:
+
+- [v1.0 → v2.0]: Revalidation fix committed locally (API error tolerance, widened WS cache, lowered floor) — deploy is Phase 5's first action
+- [v1.0]: Minute-bucket idempotency keys confirmed good
+
+### Pending Todos
+
+None yet.
+
+### Blockers/Concerns
+
+- Production execution: 100% revalidation rejection — fix committed, pending Railway deployment (resolved in Phase 5)
+- HARDEN-01: 18/19 integration tests skip without live credentials — accepted gap from v1.0
+- Polymarket taker fees up to 1.8% at 50% probability (March 2026) — maker routing (Phase 5) is the fix
+
+## Session Continuity
+
+Last session: 2026-04-01
+Stopped at: Roadmap created for v2.0 (Phases 5-9). Ready to plan Phase 5.
+Resume file: None

@@ -76,32 +76,32 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EXEC-01 | TBD | Pending |
-| EXEC-02 | TBD | Pending |
-| EXEC-03 | TBD | Pending |
-| EXEC-04 | TBD | Pending |
-| EXEC-05 | TBD | Pending |
-| EXEC-06 | TBD | Pending |
-| EXEC-07 | TBD | Pending |
-| MON-01 | TBD | Pending |
-| MON-02 | TBD | Pending |
-| MON-03 | TBD | Pending |
-| HARD-01 | TBD | Pending |
-| HARD-02 | TBD | Pending |
-| HARD-03 | TBD | Pending |
-| STRAT-01 | TBD | Pending |
-| STRAT-02 | TBD | Pending |
-| STRAT-03 | TBD | Pending |
-| STRAT-04 | TBD | Pending |
-| STRAT-05 | TBD | Pending |
-| STRAT-06 | TBD | Pending |
-| STRAT-07 | TBD | Pending |
+| EXEC-01 | Phase 5 | Pending |
+| EXEC-02 | Phase 5 | Pending |
+| EXEC-03 | Phase 5 | Pending |
+| EXEC-04 | Phase 5 | Pending |
+| EXEC-07 | Phase 5 | Pending |
+| MON-01 | Phase 6 | Pending |
+| MON-02 | Phase 6 | Pending |
+| MON-03 | Phase 6 | Pending |
+| HARD-01 | Phase 6 | Pending |
+| HARD-02 | Phase 6 | Pending |
+| HARD-03 | Phase 6 | Pending |
+| EXEC-05 | Phase 7 | Pending |
+| EXEC-06 | Phase 7 | Pending |
+| STRAT-03 | Phase 7 | Pending |
+| STRAT-01 | Phase 8 | Pending |
+| STRAT-02 | Phase 8 | Pending |
+| STRAT-06 | Phase 8 | Pending |
+| STRAT-07 | Phase 8 | Pending |
+| STRAT-04 | Phase 9 | Pending |
+| STRAT-05 | Phase 9 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 20 total
-- Mapped to phases: 0
-- Unmapped: 20 ⚠️
+- Mapped to phases: 20
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-04-01*
-*Last updated: 2026-04-01 after initial definition*
+*Last updated: 2026-04-01 — traceability filled after roadmap creation*
