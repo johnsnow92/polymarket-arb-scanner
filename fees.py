@@ -7,6 +7,10 @@ from config import (
     FEE_MODEL,
     KALSHI_FEE_CAP_CENTS,
     POLYGON_GAS_ESTIMATE,
+    POLYMARKET_DEFAULT_TAKER_RATE,
+    GEMINI_TAKER_RATE,
+    GEMINI_MAKER_RATE,
+    KALSHI_MAKER_MULTIPLIER,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,11 +34,34 @@ def _select_fees(case_a_fees: float, case_b_fees: float, price_a: float) -> floa
     return max(case_a_fees, case_b_fees)
 
 
-def polymarket_fee(buy_price: float, sell_price: float = 1.0) -> float:
-    """Calculate Polymarket fee on a winning position.
+def polymarket_taker_fee(price: float, contracts: int = 1,
+                         fee_rate: float | None = None) -> float:
+    """Polymarket dynamic taker fee (March 2026 model).
 
-    Polymarket charges 0% trading fee + 2% on net winnings.
-    Net winnings = payout - cost = sell_price - buy_price.
+    Formula: fee_rate * C * P * (1 - P).
+    Makers pay 0%. Default rate 0.04 (politics/tech), overridable per market.
+    Fee is charged at trade entry, not at settlement.
+
+    Args:
+        price: Trade price in [0, 1].
+        contracts: Number of contracts (default 1).
+        fee_rate: Override fee rate; uses POLYMARKET_DEFAULT_TAKER_RATE if None.
+
+    Returns:
+        Total fee in dollars.
+    """
+    if price <= 0 or price >= 1:
+        return 0.0
+    rate = fee_rate if fee_rate is not None else POLYMARKET_DEFAULT_TAKER_RATE
+    return rate * contracts * price * (1.0 - price)
+
+
+def polymarket_fee(buy_price: float, sell_price: float = 1.0) -> float:
+    """DEPRECATED: Use polymarket_taker_fee() instead.
+
+    Legacy settlement-fee model (2% on net winnings). Kept as alias for
+    backward compatibility with cross-platform helpers that still use it.
+    New code should call polymarket_taker_fee() directly.
     """
     if sell_price <= buy_price:
         return 0.0
@@ -60,11 +87,34 @@ def kalshi_taker_fee(price: float, contracts: int = 1) -> float:
     return (fee_cents * contracts) / 100.0
 
 
+def kalshi_maker_fee(price: float, contracts: int = 1) -> float:
+    """Kalshi maker fee — lower than taker. Returns total in dollars.
+
+    Formula: ceil(KALSHI_MAKER_MULTIPLIER * P * (1 - P)) per contract in cents.
+    Minimum 1 cent per contract. Capped at KALSHI_FEE_CAP_CENTS per contract.
+
+    Args:
+        price: Trade price in [0, 1].
+        contracts: Number of contracts (default 1).
+
+    Returns:
+        Total fee in dollars.
+    """
+    if price <= 0 or price >= 1:
+        return 0.0
+    fee_cents = max(1, math.ceil(KALSHI_MAKER_MULTIPLIER * price * (1 - price)))
+    fee_cents = min(fee_cents, KALSHI_FEE_CAP_CENTS)
+    return (fee_cents * contracts) / 100.0
+
+
 def net_profit_binary_internal(yes_price: float, no_price: float) -> dict:
     """Calculate net profit for a Polymarket binary arbitrage.
 
     Buy YES + NO. One always pays $1.00.
     Profit = $1.00 - (yes_price + no_price) - fees.
+
+    March 2026 model: fee is charged at entry (rate * P * (1-P)), not on winnings.
+    Both legs pay the taker entry fee.
     """
     total_cost = yes_price + no_price
     gross_spread = 1.0 - total_cost
@@ -72,10 +122,8 @@ def net_profit_binary_internal(yes_price: float, no_price: float) -> dict:
     if gross_spread <= 0:
         return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
 
-    # The winning side pays $1.00. Fee is 2% of net winnings on that side.
-    # Worst case: the cheaper side wins -> higher net winnings -> higher fee.
-    cheaper = min(yes_price, no_price)
-    fee = polymarket_fee(cheaper, 1.0)
+    # Entry fees: both YES and NO legs pay taker fee at trade time
+    fee = polymarket_taker_fee(yes_price) + polymarket_taker_fee(no_price)
 
     # Gas cost: two Polygon transactions (buy YES + buy NO)
     gas = POLYGON_GAS_ESTIMATE * 2
@@ -91,7 +139,9 @@ def net_profit_negrisk_internal(yes_prices: list[float]) -> dict:
     """Calculate net profit for a NegRisk (multi-outcome) arbitrage.
 
     Buy one YES share of every outcome. Exactly one pays $1.00.
-    Profit = $1.00 - sum(prices) - fee_on_winner.
+    Profit = $1.00 - sum(prices) - fees.
+
+    March 2026 model: all legs pay taker entry fee at trade time.
     """
     total_cost = sum(yes_prices)
     gross_spread = 1.0 - total_cost
@@ -99,9 +149,8 @@ def net_profit_negrisk_internal(yes_prices: list[float]) -> dict:
     if gross_spread <= 0:
         return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
 
-    # Winner fee: 2% of (1.0 - winning_price). Worst case = cheapest outcome wins.
-    cheapest = min(yes_prices)
-    fee = polymarket_fee(cheapest, 1.0)
+    # Entry fees: each outcome leg pays taker fee at trade time
+    fee = sum(polymarket_taker_fee(p) for p in yes_prices)
 
     # Gas cost: one Polygon transaction per outcome
     gas = POLYGON_GAS_ESTIMATE * len(yes_prices)
@@ -173,17 +222,12 @@ def net_profit_cross_platform(
 
     gross_spread = 1.0 - total_cost
 
-    # Kalshi taker fee is paid on entry regardless of outcome
+    # Both legs pay entry fees at trade time (March 2026 model)
+    pm_entry_fee = polymarket_taker_fee(poly_price)
     kalshi_entry_fee = kalshi_taker_fee(kalshi_price, 1)
 
-    # Fees depend on which side wins:
-    # Case 1 (Poly wins): PM 2% winner fee + Kalshi entry fee
-    case1_fees = polymarket_fee(poly_price, 1.0) + kalshi_entry_fee
-    # Case 2 (Kalshi wins): only Kalshi entry fee (PM side loses, no fee)
-    case2_fees = kalshi_entry_fee
-
-    # Fee estimate + Polygon gas for the PM leg
-    fees = _select_fees(case1_fees, case2_fees, poly_price)
+    # Both fees are charged at entry regardless of outcome — no case distinction needed
+    fees = pm_entry_fee + kalshi_entry_fee
     gas = POLYGON_GAS_ESTIMATE
 
     return {
@@ -227,12 +271,15 @@ def net_profit_cross_betfair(
 
     gross_spread = 1.0 - total_cost
 
-    # Case 1 (Poly wins): PM 2% winner fee + no Betfair commission (BF side lost)
-    case1_fees = polymarket_fee(poly_price, 1.0)
+    # Polymarket leg pays entry fee at trade time (March 2026 model)
+    pm_entry_fee = polymarket_taker_fee(poly_price)
 
-    # Case 2 (Betfair wins): Betfair commission on net winnings + no PM fee
+    # Case 1 (Poly wins): PM entry fee + no Betfair commission (BF side lost)
+    case1_fees = pm_entry_fee
+
+    # Case 2 (Betfair wins): PM entry fee + Betfair commission on net winnings
     bf_win_profit = 1.0 - bf_price
-    case2_fees = betfair_commission(bf_win_profit, commission_rate)
+    case2_fees = pm_entry_fee + betfair_commission(bf_win_profit, commission_rate)
 
     # Fee estimate + Polygon gas for the PM leg
     fees = _select_fees(case1_fees, case2_fees, poly_price)
@@ -392,12 +439,15 @@ def net_profit_cross_smarkets(
 
     gross_spread = 1.0 - total_cost
 
-    # Case 1 (Poly wins): PM 2% winner fee + no Smarkets commission (SM side lost)
-    case1_fees = polymarket_fee(poly_price, 1.0)
+    # Polymarket leg pays entry fee at trade time (March 2026 model)
+    pm_entry_fee = polymarket_taker_fee(poly_price)
 
-    # Case 2 (Smarkets wins): Smarkets commission on net winnings + no PM fee
+    # Case 1 (Poly wins): PM entry fee + no Smarkets commission (SM side lost)
+    case1_fees = pm_entry_fee
+
+    # Case 2 (Smarkets wins): PM entry fee + Smarkets commission on net winnings
     sm_win_profit = 1.0 - sm_price
-    case2_fees = smarkets_commission(sm_win_profit, commission_rate)
+    case2_fees = pm_entry_fee + smarkets_commission(sm_win_profit, commission_rate)
 
     # Fee estimate + Polygon gas for the PM leg
     fees = _select_fees(case1_fees, case2_fees, poly_price)
@@ -499,12 +549,8 @@ def net_profit_cross_matchbook(
 
     gross_spread = 1.0 - total_cost
 
-    # Case 1 (Poly wins): PM 2% winner fee
-    case1_fees = polymarket_fee(poly_price, 1.0)
-    # Case 2 (Matchbook wins): no fees on either side
-    case2_fees = 0.0
-
-    fees = _select_fees(case1_fees, case2_fees, poly_price)
+    # Polymarket leg pays entry fee at trade time (March 2026 model); Matchbook 0% commission
+    fees = polymarket_taker_fee(poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
@@ -520,22 +566,34 @@ def net_profit_cross_matchbook(
 # Default: 5% taker (IOC), 1% maker (GTC)
 # ---------------------------------------------------------------------------
 
-def gemini_fee(price: float, fee_rate: float = 0.05) -> float:
+def gemini_fee(price: float, fee_rate: float | None = None, contracts: int = 1) -> float:
     """Calculate Gemini fee for a single contract.
 
-    Formula: min(P, 1-P) * fee_rate.
-    Default 5% is the taker rate (IOC orders).
+    Formula (March 18, 2026): fee_rate * C * P * (1 - P). Rounded up to next cent.
+    Default taker rate 0.07 (7%).
+    Old formula was min(P, 1-P) * fee_rate — replaced by P*(1-P)*rate.
+
+    Args:
+        price: Trade price in [0, 1].
+        fee_rate: Override fee rate; uses GEMINI_TAKER_RATE if None.
+        contracts: Number of contracts (default 1).
+
+    Returns:
+        Total fee in dollars, rounded up to next cent.
     """
     if price <= 0 or price >= 1:
         return 0.0
-    return min(price, 1.0 - price) * fee_rate
+    rate = fee_rate if fee_rate is not None else GEMINI_TAKER_RATE
+    raw = rate * contracts * price * (1.0 - price)
+    return math.ceil(raw * 100) / 100
 
 
-def net_profit_gemini_binary(yes_price: float, no_price: float, fee_rate: float = 0.05) -> dict:
+def net_profit_gemini_binary(yes_price: float, no_price: float,
+                             fee_rate: float | None = None) -> dict:
     """Calculate net profit for a Gemini binary arbitrage.
 
     Buy YES + NO. One always pays $1.00.
-    Each leg pays Gemini fee at entry: min(P, 1-P) * fee_rate.
+    Each leg pays Gemini fee at entry using the 2026 formula: rate * P * (1-P).
     """
     total_cost = yes_price + no_price
     gross_spread = 1.0 - total_cost
@@ -552,11 +610,11 @@ def net_profit_gemini_binary(yes_price: float, no_price: float, fee_rate: float 
     }
 
 
-def net_profit_gemini_multi(yes_prices: list[float], fee_rate: float = 0.05) -> dict:
+def net_profit_gemini_multi(yes_prices: list[float], fee_rate: float | None = None) -> dict:
     """Calculate net profit for a Gemini categorical (multi-outcome) arbitrage.
 
     Buy YES on each outcome. Exactly one pays $1.00.
-    Each leg pays Gemini fee at entry.
+    Each leg pays Gemini fee at entry using the 2026 formula: rate * P * (1-P).
     """
     total_cost = sum(yes_prices)
     gross_spread = 1.0 - total_cost
@@ -578,13 +636,13 @@ def net_profit_cross_gemini(
     gm_price: float,
     poly_side: str,
     gm_side: str,
-    fee_rate: float = 0.05,
+    fee_rate: float | None = None,
 ) -> dict:
     """Calculate net profit for cross-platform arbitrage: Polymarket vs Gemini.
 
     poly_side/gm_side: 'yes' or 'no' -- what we're buying on each platform.
     One of the two positions will win $1.00, the other $0.00.
-    Gemini charges min(P, 1-P) * fee_rate per contract at entry.
+    Both legs pay entry-time fees using the 2026 formula.
     """
     total_cost = poly_price + gm_price
 
@@ -593,15 +651,12 @@ def net_profit_cross_gemini(
 
     gross_spread = 1.0 - total_cost
 
-    # Gemini entry fee (always paid)
+    # Both legs pay entry fees at trade time (March 2026 model)
+    pm_entry_fee = polymarket_taker_fee(poly_price)
     gm_entry_fee = gemini_fee(gm_price, fee_rate)
 
-    # Case 1 (Poly wins): PM 2% winner fee + Gemini entry fee
-    case1_fees = polymarket_fee(poly_price, 1.0) + gm_entry_fee
-    # Case 2 (Gemini wins): Gemini entry fee only (PM side lost, no fee)
-    case2_fees = gm_entry_fee
-
-    fees = _select_fees(case1_fees, case2_fees, poly_price)
+    # Both fees are charged at entry regardless of outcome
+    fees = pm_entry_fee + gm_entry_fee
     gas = POLYGON_GAS_ESTIMATE
 
     return {
@@ -653,12 +708,8 @@ def net_profit_cross_ibkr(
 
     gross_spread = 1.0 - total_cost
 
-    # Case 1 (Poly wins): PM 2% winner fee
-    case1_fees = polymarket_fee(poly_price, 1.0)
-    # Case 2 (IBKR wins): no fees on either side
-    case2_fees = 0.0
-
-    fees = _select_fees(case1_fees, case2_fees, poly_price)
+    # Polymarket leg pays entry fee at trade time; IBKR has $0.00 commission
+    fees = polymarket_taker_fee(poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
@@ -725,9 +776,13 @@ def net_profit_triangular(
 
 
 def _platform_win_fee(price: float, platform: str) -> float:
-    """Calculate the winner fee for a platform (fee charged when position pays out $1)."""
+    """Calculate the winner fee for a platform (fee charged when position pays out $1).
+
+    March 2026: Polymarket no longer charges on winnings — fee is at entry.
+    """
     if platform == "polymarket":
-        return polymarket_fee(price, 1.0)
+        # Polymarket switched to entry-time fee in March 2026; no settlement fee
+        return 0.0
     elif platform == "kalshi":
         # Kalshi taker fee is an entry fee, not a win fee
         return 0.0
@@ -741,11 +796,14 @@ def _platform_win_fee(price: float, platform: str) -> float:
 
 def _platform_entry_fee(price: float, platform: str) -> float:
     """Calculate the entry fee for a platform (fee charged when placing the trade)."""
-    if platform == "kalshi":
+    if platform == "polymarket":
+        return polymarket_taker_fee(price)
+    elif platform == "kalshi":
         return kalshi_taker_fee(price)
     elif platform == "gemini":
         return gemini_fee(price)
-    # Other platforms charge on winnings, not at entry
+    # betfair, smarkets: charge on winnings (win fee), not at entry
+    # sxbet, matchbook, ibkr: 0% fees
     return 0.0
 
 
@@ -823,12 +881,8 @@ def net_profit_cross_sxbet(
 
     gross_spread = 1.0 - total_cost
 
-    # Case 1 (Poly wins): PM 2% winner fee
-    case1_fees = polymarket_fee(poly_price, 1.0)
-    # Case 2 (SX Bet wins): no fees on either side
-    case2_fees = 0.0
-
-    fees = _select_fees(case1_fees, case2_fees, poly_price)
+    # Polymarket leg pays entry fee at trade time; SX Bet has 0% fees
+    fees = polymarket_taker_fee(poly_price)
     gas = POLYGON_GAS_ESTIMATE
 
     return {
@@ -905,14 +959,17 @@ def net_profit_multi_cross(
 # ---------------------------------------------------------------------------
 
 # Real-time fee schedule per platform (can be updated at runtime for promos)
+# Real-time fee schedule per platform (2026 rates; can be updated at runtime for promos).
+# taker/maker values are fee RATES used by estimate_total_fee() for routing decisions.
+# Actual fee amounts use the dedicated fee functions (polymarket_taker_fee, etc.).
 PLATFORM_FEE_SCHEDULE: dict[str, dict[str, float]] = {
-    "polymarket": {"taker": 0.02, "maker": 0.00, "gas": POLYGON_GAS_ESTIMATE},
-    "kalshi": {"taker": 0.07, "maker": 0.00, "gas": 0.0},
+    "polymarket": {"taker": 0.04, "maker": 0.00, "gas": POLYGON_GAS_ESTIMATE},
+    "kalshi": {"taker": 0.07, "maker": 0.0175, "gas": 0.0},
     "betfair": {"taker": 0.05, "maker": 0.05, "gas": 0.0},
     "smarkets": {"taker": 0.02, "maker": 0.02, "gas": 0.0},
     "sxbet": {"taker": 0.00, "maker": 0.00, "gas": 0.0},
     "matchbook": {"taker": 0.00, "maker": 0.00, "gas": 0.0},
-    "gemini": {"taker": 0.05, "maker": 0.01, "gas": 0.0},
+    "gemini": {"taker": 0.07, "maker": 0.0175, "gas": 0.0},
     "ibkr": {"taker": 0.00, "maker": 0.00, "gas": 0.0},
 }
 
@@ -933,11 +990,21 @@ def estimate_total_fee(platform: str, price: float, order_type: str = "taker") -
     gas = schedule.get("gas", 0.0)
 
     if platform == "polymarket":
-        return polymarket_fee(price, 1.0) + gas
+        # March 2026: entry fee only (no settlement fee)
+        if order_type == "taker":
+            return polymarket_taker_fee(price) + gas
+        else:
+            return gas  # Maker pays 0%
     elif platform == "kalshi":
-        return kalshi_taker_fee(price) if order_type == "taker" else 0.0
+        if order_type == "taker":
+            return kalshi_taker_fee(price)
+        else:
+            return kalshi_maker_fee(price)
     elif platform == "gemini":
-        return gemini_fee(price, fee_rate) + gas
+        if order_type == "taker":
+            return gemini_fee(price, GEMINI_TAKER_RATE) + gas
+        else:
+            return gemini_fee(price, GEMINI_MAKER_RATE) + gas
     elif platform in ("betfair", "smarkets"):
         # Commission on winnings
         return (1.0 - price) * fee_rate

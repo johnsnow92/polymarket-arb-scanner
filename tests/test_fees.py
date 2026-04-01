@@ -125,29 +125,33 @@ class TestNetProfitBinaryInternal:
     def test_positive_profit(self):
         from config import POLYGON_GAS_ESTIMATE
         # yes=0.40, no=0.40 -> total=0.80, gross=0.20
-        # cheaper=0.40, pm_fee=0.02*(1.0-0.40)=0.012, gas=GAS*2
+        # March 2026: entry fees on both legs
+        # pm_fee_yes = 0.04*0.40*0.60 = 0.0096, pm_fee_no = 0.04*0.40*0.60 = 0.0096
+        # total fees = 0.0192 + gas*2
         result = net_profit_binary_internal(0.40, 0.40)
         gas = POLYGON_GAS_ESTIMATE * 2
+        expected_fees = polymarket_taker_fee(0.40) + polymarket_taker_fee(0.40)
         assert result["gross_spread"] == pytest.approx(0.20)
-        assert result["fees"] == pytest.approx(0.012 + gas)
-        assert result["net_profit"] == pytest.approx(0.20 - 0.012 - gas)
+        assert result["fees"] == pytest.approx(expected_fees + gas)
+        assert result["net_profit"] == pytest.approx(0.20 - expected_fees - gas)
 
-    def test_worst_case_fee_uses_cheaper_side(self):
+    def test_entry_fees_on_both_legs(self):
         from config import POLYGON_GAS_ESTIMATE
         # yes=0.30, no=0.45 -> total=0.75, gross=0.25
-        # cheaper=0.30, pm_fee=0.02*(1.0-0.30)=0.014, gas=GAS*2
+        # March 2026: both legs pay entry fee
         result = net_profit_binary_internal(0.30, 0.45)
         gas = POLYGON_GAS_ESTIMATE * 2
-        assert result["fees"] == pytest.approx(0.014 + gas)
+        expected_fees = polymarket_taker_fee(0.30) + polymarket_taker_fee(0.45)
+        assert result["fees"] == pytest.approx(expected_fees + gas)
 
     def test_asymmetric_prices(self):
         from config import POLYGON_GAS_ESTIMATE
         result = net_profit_binary_internal(0.10, 0.80)
         gas = POLYGON_GAS_ESTIMATE * 2
         assert result["gross_spread"] == pytest.approx(0.10)
-        # cheaper=0.10, pm_fee=0.02*(1.0-0.10)=0.018, gas=GAS*2
-        assert result["fees"] == pytest.approx(0.018 + gas)
-        assert result["net_profit"] == pytest.approx(0.10 - 0.018 - gas)
+        expected_fees = polymarket_taker_fee(0.10) + polymarket_taker_fee(0.80)
+        assert result["fees"] == pytest.approx(expected_fees + gas)
+        assert result["net_profit"] == pytest.approx(0.10 - expected_fees - gas)
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +166,10 @@ class TestNetProfitNegriskInternal:
         result = net_profit_negrisk_internal(prices)
         gas = POLYGON_GAS_ESTIMATE * 4
         assert result["gross_spread"] == pytest.approx(0.20)
-        # cheapest=0.20, pm_fee=0.02*(1.0-0.20)=0.016, gas=GAS*4
-        assert result["fees"] == pytest.approx(0.016 + gas)
-        assert result["net_profit"] == pytest.approx(0.20 - 0.016 - gas)
+        # March 2026: each leg pays entry fee
+        expected_fees = sum(polymarket_taker_fee(p) for p in prices)
+        assert result["fees"] == pytest.approx(expected_fees + gas)
+        assert result["net_profit"] == pytest.approx(0.20 - expected_fees - gas)
 
     def test_no_spread(self):
         prices = [0.25, 0.25, 0.25, 0.25]
@@ -178,13 +183,14 @@ class TestNetProfitNegriskInternal:
         assert result["gross_spread"] == pytest.approx(-0.20)
         assert result["fees"] == 0
 
-    def test_worst_case_fee_uses_cheapest_outcome(self):
+    def test_entry_fees_on_all_legs(self):
         from config import POLYGON_GAS_ESTIMATE
         prices = [0.10, 0.25, 0.30, 0.15]
         result = net_profit_negrisk_internal(prices)
         gas = POLYGON_GAS_ESTIMATE * 4
-        # cheapest=0.10, pm_fee=0.02*(1.0-0.10)=0.018, gas=GAS*4
-        assert result["fees"] == pytest.approx(0.018 + gas)
+        # March 2026: sum of entry fees for all legs
+        expected_fees = sum(polymarket_taker_fee(p) for p in prices)
+        assert result["fees"] == pytest.approx(expected_fees + gas)
 
 
 # ---------------------------------------------------------------------------
@@ -253,18 +259,15 @@ class TestNetProfitCrossPlatform:
         assert result["gross_spread"] == pytest.approx(-0.10)
         assert result["net_profit"] == pytest.approx(-0.10)
 
-    @patch("fees.FEE_MODEL", "worst_case")
-    def test_worst_case_fees_used(self):
+    def test_fees_are_both_entry_fees(self):
         from config import POLYGON_GAS_ESTIMATE
-        # Verify worst-case (max) fees + gas are applied
+        # March 2026: both PM and Kalshi pay entry fees (no case distinction)
         poly_price, kalshi_price = 0.30, 0.30
-        kalshi_entry_fee = kalshi_taker_fee(kalshi_price, 1)
-        case1_fees = polymarket_fee(poly_price, 1.0) + kalshi_entry_fee
-        case2_fees = kalshi_entry_fee
-        expected_worst = max(case1_fees, case2_fees) + POLYGON_GAS_ESTIMATE
-
+        pm_entry = polymarket_taker_fee(poly_price)
+        kalshi_entry = kalshi_taker_fee(kalshi_price, 1)
+        expected_fees = pm_entry + kalshi_entry + POLYGON_GAS_ESTIMATE
         result = net_profit_cross_platform(poly_price, kalshi_price, "yes", "no")
-        assert result["fees"] == pytest.approx(expected_worst)
+        assert result["fees"] == pytest.approx(expected_fees)
 
     def test_ev_fees_lower_than_worst_case(self):
         """EV fee model should produce lower or equal fees vs worst-case."""
@@ -312,9 +315,12 @@ class TestNetProfitCrossBetfair:
     def test_worst_case_fees(self):
         from config import POLYGON_GAS_ESTIMATE
         poly_price, bf_price = 0.30, 0.30
-        poly_win_fee = polymarket_fee(poly_price, 1.0)
+        pm_entry_fee = polymarket_taker_fee(poly_price)
         bf_win_fee = betfair_commission(1.0 - bf_price, 0.05)
-        expected_worst = max(poly_win_fee, bf_win_fee) + POLYGON_GAS_ESTIMATE
+        # case1 (PM wins): pm_entry only; case2 (BF wins): pm_entry + bf_win_fee
+        case1 = pm_entry_fee
+        case2 = pm_entry_fee + bf_win_fee
+        expected_worst = max(case1, case2) + POLYGON_GAS_ESTIMATE
         result = net_profit_cross_betfair(poly_price, bf_price, "yes", "no")
         assert result["fees"] == pytest.approx(expected_worst)
 
@@ -336,11 +342,11 @@ class TestGasFeeDeduction:
         """Binary internal should subtract 2x gas (two PM orders)."""
         from config import POLYGON_GAS_ESTIMATE
         result = net_profit_binary_internal(0.40, 0.40)
-        # gross=0.20, pm_fee=0.02*(1.0-0.40)=0.012, gas=0.03*2=0.06
+        # March 2026: entry fees on both legs
         expected_gas = POLYGON_GAS_ESTIMATE * 2
-        expected_pm_fee = polymarket_fee(0.40, 1.0)
-        assert result["fees"] == pytest.approx(expected_pm_fee + expected_gas)
-        assert result["net_profit"] == pytest.approx(0.20 - expected_pm_fee - expected_gas)
+        expected_pm_fees = polymarket_taker_fee(0.40) + polymarket_taker_fee(0.40)
+        assert result["fees"] == pytest.approx(expected_pm_fees + expected_gas)
+        assert result["net_profit"] == pytest.approx(0.20 - expected_pm_fees - expected_gas)
 
     def test_negrisk_internal_includes_gas(self):
         """NegRisk should subtract gas * len(outcomes)."""
@@ -348,9 +354,9 @@ class TestGasFeeDeduction:
         prices = [0.20, 0.20, 0.20, 0.20]
         result = net_profit_negrisk_internal(prices)
         expected_gas = POLYGON_GAS_ESTIMATE * 4
-        expected_pm_fee = polymarket_fee(0.20, 1.0)
-        assert result["fees"] == pytest.approx(expected_pm_fee + expected_gas)
-        assert result["net_profit"] == pytest.approx(0.20 - expected_pm_fee - expected_gas)
+        expected_pm_fees = sum(polymarket_taker_fee(p) for p in prices)
+        assert result["fees"] == pytest.approx(expected_pm_fees + expected_gas)
+        assert result["net_profit"] == pytest.approx(0.20 - expected_pm_fees - expected_gas)
 
     def test_cross_platform_includes_gas(self):
         """Cross-platform (PM vs Kalshi) should subtract 1x gas."""
@@ -365,19 +371,22 @@ class TestGasFeeDeduction:
         result = net_profit_cross_betfair(0.30, 0.30, "yes", "no")
         assert result["fees"] >= POLYGON_GAS_ESTIMATE
 
-    def test_zero_gas_preserves_old_behavior(self):
-        """When POLYGON_GAS_ESTIMATE=0, profit matches pre-gas behavior."""
+    def test_zero_gas_no_gas_component(self):
+        """When POLYGON_GAS_ESTIMATE=0, gas does not inflate fees."""
         with patch("fees.POLYGON_GAS_ESTIMATE", 0.0):
             result = net_profit_binary_internal(0.40, 0.40)
-            # Without gas: gross=0.20, fee=0.012, net=0.188
-            assert result["net_profit"] == pytest.approx(0.188)
+            # Only taker entry fees remain
+            expected_fees = polymarket_taker_fee(0.40) + polymarket_taker_fee(0.40)
+            assert result["fees"] == pytest.approx(expected_fees)
+            assert result["net_profit"] == pytest.approx(0.20 - expected_fees)
 
     def test_custom_gas_via_env(self):
         """Gas fee should use the configured value."""
         with patch("fees.POLYGON_GAS_ESTIMATE", 0.05):
             result = net_profit_binary_internal(0.40, 0.40)
-            # gas=0.05*2=0.10, pm_fee=0.012, gross=0.20
-            assert result["net_profit"] == pytest.approx(0.20 - 0.012 - 0.10)
+            pm_fees = polymarket_taker_fee(0.40) + polymarket_taker_fee(0.40)
+            # gas=0.05*2=0.10
+            assert result["net_profit"] == pytest.approx(0.20 - pm_fees - 0.10)
 
     def test_kalshi_binary_no_gas(self):
         """Kalshi-only trades should NOT include Polygon gas fees."""
@@ -393,20 +402,24 @@ class TestGasFeeDeduction:
 
 class TestGeminiFee:
     def test_symmetric_at_half(self):
-        # min(0.5, 0.5) * 0.05 = 0.025
-        assert gemini_fee(0.50) == pytest.approx(0.025)
+        # March 2026: 0.07 * 0.50 * 0.50 = 0.0175 -> ceil(1.75) / 100 = 0.02
+        assert gemini_fee(0.50) == pytest.approx(0.02)
 
     def test_low_price(self):
-        # min(0.10, 0.90) * 0.05 = 0.005
-        assert gemini_fee(0.10) == pytest.approx(0.005)
+        # 0.07 * 0.10 * 0.90 = 0.0063 -> ceil(0.63) / 100 = 0.01
+        assert gemini_fee(0.10) == pytest.approx(0.01)
 
     def test_high_price(self):
-        # min(0.90, 0.10) * 0.05 = 0.005
-        assert gemini_fee(0.90) == pytest.approx(0.005)
+        # 0.07 * 0.90 * 0.10 = 0.0063 -> ceil(0.63) / 100 = 0.01
+        assert gemini_fee(0.90) == pytest.approx(0.01)
 
     def test_custom_rate(self):
-        # min(0.40, 0.60) * 0.01 = 0.004
-        assert gemini_fee(0.40, fee_rate=0.01) == pytest.approx(0.004)
+        # 0.40 price with 0.07 rate: 0.07 * 0.40 * 0.60 = 0.0168 -> ceil(1.68) / 100 = 0.02
+        assert gemini_fee(0.40) == pytest.approx(0.02)
+
+    def test_custom_rate_maker(self):
+        # 0.0175 maker rate, 0.50 price: 0.0175 * 0.25 = 0.004375 -> ceil(0.4375) / 100 = 0.01
+        assert gemini_fee(0.50, fee_rate=0.0175) == pytest.approx(0.01)
 
     def test_boundary_zero(self):
         assert gemini_fee(0.0) == 0.0
@@ -416,13 +429,13 @@ class TestGeminiFee:
 class TestNetProfitGeminiBinary:
     def test_positive_spread_with_fees(self):
         # 0.40 + 0.40 = 0.80, gross = 0.20
-        # fee_yes = min(0.40, 0.60) * 0.05 = 0.02
-        # fee_no  = min(0.40, 0.60) * 0.05 = 0.02
+        # March 2026: each leg: 0.07 * 0.40 * 0.60 = 0.0168 -> ceil = 0.02
         # total fees = 0.04
         result = net_profit_gemini_binary(0.40, 0.40)
+        expected_fees = gemini_fee(0.40) + gemini_fee(0.40)
         assert result["gross_spread"] == pytest.approx(0.20)
-        assert result["fees"] == pytest.approx(0.04)
-        assert result["net_profit"] == pytest.approx(0.16)
+        assert result["fees"] == pytest.approx(expected_fees)
+        assert result["net_profit"] == pytest.approx(0.20 - expected_fees)
 
     def test_negative_spread(self):
         result = net_profit_gemini_binary(0.55, 0.50)
@@ -431,11 +444,11 @@ class TestNetProfitGeminiBinary:
         assert result["net_profit"] == pytest.approx(-0.05)
 
     def test_configurable_fee_rate(self):
-        # With 1% maker fee
-        result = net_profit_gemini_binary(0.40, 0.40, fee_rate=0.01)
-        # fee per leg = min(0.40, 0.60) * 0.01 = 0.004, total = 0.008
-        assert result["fees"] == pytest.approx(0.008)
-        assert result["net_profit"] == pytest.approx(0.20 - 0.008)
+        # With maker fee 0.0175: 0.0175 * 0.40 * 0.60 = 0.0042 -> ceil(0.42) = 0.01
+        result = net_profit_gemini_binary(0.40, 0.40, fee_rate=0.0175)
+        expected_fees = gemini_fee(0.40, fee_rate=0.0175) + gemini_fee(0.40, fee_rate=0.0175)
+        assert result["fees"] == pytest.approx(expected_fees)
+        assert result["net_profit"] == pytest.approx(0.20 - expected_fees)
 
     def test_zero_spread(self):
         result = net_profit_gemini_binary(0.50, 0.50)
@@ -451,10 +464,11 @@ class TestNetProfitGeminiMulti:
     def test_positive_spread_4_outcomes(self):
         prices = [0.20, 0.20, 0.20, 0.20]
         result = net_profit_gemini_multi(prices)
-        # Each leg: min(0.20, 0.80) * 0.05 = 0.01, total = 0.04
+        # Each leg: 0.07 * 0.20 * 0.80 = 0.0112 -> ceil(1.12) / 100 = 0.02
+        expected_fees = sum(gemini_fee(p) for p in prices)
         assert result["gross_spread"] == pytest.approx(0.20)
-        assert result["fees"] == pytest.approx(0.04)
-        assert result["net_profit"] == pytest.approx(0.16)
+        assert result["fees"] == pytest.approx(expected_fees)
+        assert result["net_profit"] == pytest.approx(0.20 - expected_fees)
 
     def test_negative_spread(self):
         prices = [0.30, 0.30, 0.30, 0.30]
@@ -464,10 +478,11 @@ class TestNetProfitGeminiMulti:
 
     def test_configurable_fee_rate(self):
         prices = [0.20, 0.20, 0.20, 0.20]
-        result = net_profit_gemini_multi(prices, fee_rate=0.01)
-        # Each leg: min(0.20, 0.80) * 0.01 = 0.002, total = 0.008
-        assert result["fees"] == pytest.approx(0.008)
-        assert result["net_profit"] == pytest.approx(0.20 - 0.008)
+        # With maker rate 0.0175: 0.0175 * 0.20 * 0.80 = 0.0028 -> ceil(0.28) = 0.01
+        result = net_profit_gemini_multi(prices, fee_rate=0.0175)
+        expected_fees = sum(gemini_fee(p, fee_rate=0.0175) for p in prices)
+        assert result["fees"] == pytest.approx(expected_fees)
+        assert result["net_profit"] == pytest.approx(0.20 - expected_fees)
 
 
 # ---------------------------------------------------------------------------
@@ -485,17 +500,14 @@ class TestNetProfitCrossGemini:
         assert result["gross_spread"] == pytest.approx(-0.10)
         assert result["net_profit"] == pytest.approx(-0.10)
 
-    @patch("fees.FEE_MODEL", "worst_case")
-    def test_includes_gemini_entry_fee(self):
+    def test_includes_both_entry_fees(self):
         from config import POLYGON_GAS_ESTIMATE
-        # Gemini entry fee = min(0.30, 0.70) * 0.05 = 0.015
-        # PM win fee = 0.02 * (1.0 - 0.30) = 0.014
-        # worst_fees = max(0.014 + 0.015, 0.015) = 0.029
+        # March 2026: PM and Gemini both pay entry fees
         result = net_profit_cross_gemini(0.30, 0.30, "yes", "no")
-        gm_entry = gemini_fee(0.30, 0.05)
-        pm_fee = polymarket_fee(0.30, 1.0)
-        expected_worst = max(pm_fee + gm_entry, gm_entry) + POLYGON_GAS_ESTIMATE
-        assert result["fees"] == pytest.approx(expected_worst)
+        pm_entry = polymarket_taker_fee(0.30)
+        gm_entry = gemini_fee(0.30)
+        expected_fees = pm_entry + gm_entry + POLYGON_GAS_ESTIMATE
+        assert result["fees"] == pytest.approx(expected_fees)
 
 
 # ---------------------------------------------------------------------------
