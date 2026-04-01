@@ -9,7 +9,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fees import (
     polymarket_fee,
+    polymarket_taker_fee,
     kalshi_taker_fee,
+    kalshi_maker_fee,
     net_profit_binary_internal,
     net_profit_negrisk_internal,
     net_profit_kalshi_binary,
@@ -27,6 +29,7 @@ from fees import (
     net_profit_cross_generic,
     _platform_win_fee,
     _platform_entry_fee,
+    PLATFORM_FEE_SCHEDULE,
 )
 
 
@@ -638,6 +641,132 @@ class TestNetProfitCrossGeneric:
             0.60, 0.50, "yes", "no", platform_a="smarkets", platform_b="betfair"
         )
         assert result["net_profit"] < 0
+
+
+# ---------------------------------------------------------------------------
+# polymarket_taker_fee (2026 dynamic taker model)
+# ---------------------------------------------------------------------------
+
+class TestPolymarketTakerFee:
+    """Tests for the 2026 Polymarket dynamic taker fee: rate * C * P * (1-P)."""
+
+    def test_symmetric_at_half(self):
+        # 0.04 * 1 * 0.50 * 0.50 = 0.01
+        assert polymarket_taker_fee(0.50) == pytest.approx(0.01)
+
+    def test_asymmetric_price(self):
+        # 0.04 * 0.45 * 0.55 = 0.0099
+        assert polymarket_taker_fee(0.45) == pytest.approx(0.0099)
+
+    def test_boundary_zero_price(self):
+        # price at 0 -> returns 0.0
+        assert polymarket_taker_fee(0.0) == 0.0
+
+    def test_boundary_one_price(self):
+        # price at 1 -> returns 0.0
+        assert polymarket_taker_fee(1.0) == 0.0
+
+    def test_crypto_category_rate(self):
+        # Crypto markets use 0.072 rate
+        assert polymarket_taker_fee(0.50, 1, 0.072) == pytest.approx(0.072 * 0.25)
+
+    def test_zero_rate_fee_free(self):
+        # Geopolitical markets: fee-free
+        assert polymarket_taker_fee(0.50, 1, 0.0) == 0.0
+
+    def test_multiple_contracts(self):
+        # 0.04 * 10 * 0.50 * 0.50 = 0.10
+        assert polymarket_taker_fee(0.50, 10) == pytest.approx(0.10)
+
+    def test_default_rate_is_004(self):
+        # Default rate should be 0.04 (4%)
+        from config import POLYMARKET_DEFAULT_TAKER_RATE
+        assert POLYMARKET_DEFAULT_TAKER_RATE == 0.04
+        assert polymarket_taker_fee(0.50) == pytest.approx(POLYMARKET_DEFAULT_TAKER_RATE * 0.25)
+
+
+# ---------------------------------------------------------------------------
+# kalshi_maker_fee
+# ---------------------------------------------------------------------------
+
+class TestKalshiMakerFee:
+    """Tests for the Kalshi maker fee: ceil(KALSHI_MAKER_MULTIPLIER * P * (1-P)) per contract."""
+
+    def test_symmetric_at_half(self):
+        # ceil(1.75 * 0.50 * 0.50) = ceil(0.4375) = 1 -> max(1, 1) = 1 cent
+        assert kalshi_maker_fee(0.50) == pytest.approx(0.01)
+
+    def test_multiple_contracts(self):
+        # 1 cent * 10 = 10 cents = 0.10
+        assert kalshi_maker_fee(0.50, 10) == pytest.approx(0.10)
+
+    def test_zero_price_returns_zero(self):
+        assert kalshi_maker_fee(0.0) == 0.0
+
+    def test_one_price_returns_zero(self):
+        assert kalshi_maker_fee(1.0) == 0.0
+
+    def test_minimum_one_cent(self):
+        # At a very low probability, formula yields < 1 cent, so min(1, ...) kicks in
+        # price=0.01: 1.75 * 0.01 * 0.99 = 0.017325 -> ceil = 1 cent
+        fee = kalshi_maker_fee(0.01, 1)
+        assert fee == pytest.approx(0.01)
+
+    def test_cap_enforced(self):
+        # Verify cap is applied (KALSHI_FEE_CAP_CENTS = 175)
+        from config import KALSHI_FEE_CAP_CENTS, KALSHI_MAKER_MULTIPLIER
+        import math as _math
+        fee_cents = max(1, _math.ceil(KALSHI_MAKER_MULTIPLIER * 0.50 * 0.50))
+        fee_cents = min(fee_cents, KALSHI_FEE_CAP_CENTS)
+        assert kalshi_maker_fee(0.50, 1) == pytest.approx(fee_cents / 100.0)
+
+
+# ---------------------------------------------------------------------------
+# PLATFORM_FEE_SCHEDULE — all 8 platforms (per D-06, CI enforcement)
+# ---------------------------------------------------------------------------
+
+class TestPlatformFeeSchedule:
+    """Codify correct 2026 fee rates for all 8 platforms (per D-06).
+
+    CI enforcement: if any platform changes fees, these tests break and force
+    an explicit update to both PLATFORM_FEE_SCHEDULE and these tests.
+    """
+
+    def test_polymarket_fees(self):
+        assert PLATFORM_FEE_SCHEDULE["polymarket"]["taker"] == 0.04
+        assert PLATFORM_FEE_SCHEDULE["polymarket"]["maker"] == 0.00
+
+    def test_kalshi_fees(self):
+        assert PLATFORM_FEE_SCHEDULE["kalshi"]["taker"] == 0.07
+        assert PLATFORM_FEE_SCHEDULE["kalshi"]["maker"] == 0.0175
+
+    def test_betfair_fees(self):
+        assert PLATFORM_FEE_SCHEDULE["betfair"]["taker"] == 0.05
+        assert PLATFORM_FEE_SCHEDULE["betfair"]["maker"] == 0.05
+
+    def test_smarkets_fees(self):
+        assert PLATFORM_FEE_SCHEDULE["smarkets"]["taker"] == 0.02
+        assert PLATFORM_FEE_SCHEDULE["smarkets"]["maker"] == 0.02
+
+    def test_sxbet_fees(self):
+        assert PLATFORM_FEE_SCHEDULE["sxbet"]["taker"] == 0.00
+        assert PLATFORM_FEE_SCHEDULE["sxbet"]["maker"] == 0.00
+
+    def test_matchbook_fees(self):
+        assert PLATFORM_FEE_SCHEDULE["matchbook"]["taker"] == 0.00
+        assert PLATFORM_FEE_SCHEDULE["matchbook"]["maker"] == 0.00
+
+    def test_gemini_fees(self):
+        assert PLATFORM_FEE_SCHEDULE["gemini"]["taker"] == 0.07
+        assert PLATFORM_FEE_SCHEDULE["gemini"]["maker"] == 0.0175
+
+    def test_ibkr_fees(self):
+        assert PLATFORM_FEE_SCHEDULE["ibkr"]["taker"] == 0.00
+        assert PLATFORM_FEE_SCHEDULE["ibkr"]["maker"] == 0.00
+
+    def test_all_eight_platforms_present(self):
+        expected = {"polymarket", "kalshi", "betfair", "smarkets", "sxbet", "matchbook", "gemini", "ibkr"}
+        assert set(PLATFORM_FEE_SCHEDULE.keys()) == expected
 
 
 # ---------------------------------------------------------------------------
