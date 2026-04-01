@@ -8,6 +8,17 @@ A 24/7 automated prediction market arbitrage bot deployed on Railway. Scans 8 tr
 
 Automated profit extraction from prediction market inefficiencies across platforms.
 
+## Current Milestone: v2.0 Profitable Trading & Strategy Expansion
+
+**Goal:** Get the bot actually making money while simultaneously expanding and hardening the strategy set.
+
+**Target features:**
+- Deploy revalidation fix and tune thresholds until trades execute
+- Fund platform accounts and get capital flowing
+- Monitor, iterate, and validate all 20 existing strategies work in production
+- Research and implement new prediction market strategies
+- End-to-end profitability: net positive P&L over sustained period
+
 ## Current State
 
 **Shipped:** v1.0 — Production-Ready Automated Trading (2026-04-01)
@@ -78,5 +89,22 @@ Three layers + orchestration shell:
 - **Platform APIs**: 10 `*_api.py` modules with auth, retries, circuit breakers, proxy support
 - **Monitoring**: `dashboard.py` + `dashboard_ui.py`, `metrics.py`, `alerting.py`, `notifier.py`
 
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `/gsd:transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `/gsd:complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
+
 ---
-*Last updated: 2026-04-01 after v1.0 milestone*
+*Last updated: 2026-04-01 after v2.0 milestone start*
