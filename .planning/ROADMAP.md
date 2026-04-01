@@ -43,7 +43,7 @@
   5. At least one autonomous round-trip trade completes with net positive P&L recorded in trades.db
 **Plans:** 3 plans
 Plans:
-- [ ] 05-01-PLAN.md — Fee model overhaul + layer/revalidation config infrastructure
+- [x] 05-01-PLAN.md — Fee model overhaul + layer/revalidation config infrastructure
 - [ ] 05-02-PLAN.md — Layer tagging, layer-aware revalidation, calibration logging, maker routing
 - [ ] 05-03-PLAN.md — Deploy to Railway, 72h calibration dry-run, enable first live trade
 

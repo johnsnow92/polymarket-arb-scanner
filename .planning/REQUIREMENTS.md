@@ -11,8 +11,8 @@ Requirements for Profitable Trading & Strategy Expansion milestone. Each maps to
 
 - [ ] **EXEC-01**: Bot deploys revalidation fix and validates with 24h dry-run showing 5-30% pass rate
 - [ ] **EXEC-02**: Executor routes orders as maker (limit) instead of taker (market) on Polymarket and Kalshi
-- [ ] **EXEC-03**: Revalidation thresholds are strategy-layer-aware (2% Layer 1, 5% Layer 2, 3% Layer 3, 10% Layer 4)
-- [ ] **EXEC-04**: Fee calculations verified against current 2026 platform fee structures for all 8 platforms
+- [x] **EXEC-03**: Revalidation thresholds are strategy-layer-aware (2% Layer 1, 5% Layer 2, 3% Layer 3, 10% Layer 4)
+- [x] **EXEC-04**: Fee calculations verified against current 2026 platform fee structures for all 8 platforms
 - [ ] **EXEC-05**: Bot captures Polymarket liquidity rewards via resting limit orders with reward score tracking
 - [ ] **EXEC-06**: Bot captures Kalshi liquidity incentive program via qualifying limit orders
 - [ ] **EXEC-07**: Bot executes at least one profitable autonomous round-trip trade
@@ -78,8 +78,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | EXEC-01 | Phase 5 | Pending |
 | EXEC-02 | Phase 5 | Pending |
-| EXEC-03 | Phase 5 | Pending |
-| EXEC-04 | Phase 5 | Pending |
+| EXEC-03 | Phase 5 | Complete |
+| EXEC-04 | Phase 5 | Complete |
 | EXEC-07 | Phase 5 | Pending |
 | MON-01 | Phase 6 | Pending |
 | MON-02 | Phase 6 | Pending |

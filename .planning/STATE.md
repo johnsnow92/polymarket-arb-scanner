@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Profitable Trading & Strategy Expansion
-status: planning
-stopped_at: Phase 5 context gathered
-last_updated: "2026-04-01T08:25:17.191Z"
-last_activity: 2026-04-01 — v2.0 roadmap created (Phases 5-9)
+status: executing
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-04-01T10:27:27.290Z"
+last_activity: 2026-04-01
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 3
+  completed_plans: 1
+  percent: 10
 ---
 
 # STATE.md — Polymarket Arb Scanner
@@ -19,18 +19,18 @@ progress:
 ## Current Phase
 
 Phase: 5 of 9 — Deploy & Execute (first v2.0 phase)
-Plan: — (not yet planned)
-Status: Ready to plan
-Last activity: 2026-04-01 — v2.0 roadmap created (Phases 5-9)
+Plan: 2 of 3
+Status: In progress
+Last activity: 2026-04-01
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 10%
 
 ## Project Reference
 
 See: .planning/PROJECT.md (updated 2026-04-01)
 
 **Core value:** Automated profit extraction from prediction market inefficiencies
-**Current focus:** Phase 5 — Deploy & Execute (unblock production trades)
+**Current focus:** Phase 05 — deploy-execute
 
 ## Performance Metrics
 
@@ -47,6 +47,7 @@ See: .planning/PROJECT.md (updated 2026-04-01)
 | — | — | — | — |
 
 *Updated after each plan completion*
+| Phase 05-deploy-execute P01 | 16 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -57,6 +58,9 @@ Recent decisions affecting current work:
 
 - [v1.0 → v2.0]: Revalidation fix committed locally (API error tolerance, widened WS cache, lowered floor) — deploy is Phase 5's first action
 - [v1.0]: Minute-bucket idempotency keys confirmed good
+- [Phase 05-deploy-execute]: Polymarket fee model updated to rate*P*(1-P) entry-time (0.04 default), removing old 2% settlement fee
+- [Phase 05-deploy-execute]: STRATEGY_LAYERS moved to config.py as single source of truth; backtest.py imports from config
+- [Phase 05-deploy-execute]: REVAL_FLOORS and get_layer() added to config.py as infrastructure for Plan 02 revalidation
 
 ### Pending Todos
 
@@ -70,6 +74,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T08:25:17.180Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-deploy-execute/05-CONTEXT.md
+Last session: 2026-04-01T10:27:27.285Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: None
