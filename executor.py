@@ -15,6 +15,7 @@ from config import (
     ORDER_TIME_IN_FORCE, GTC_ORDER_TIMEOUT,
     FAILED_TRADE_COOLDOWN, WS_CACHE_MAX_AGE_REVALIDATION,
     REVALIDATION_MIN_FLOOR as CONFIG_REVALIDATION_MIN_FLOOR,
+    REVAL_FLOORS, get_layer,
 )
 
 
@@ -316,69 +317,116 @@ class ArbitrageExecutor:
         the opportunity is accepted despite the failed re-fetch (the CLOB prices
         from scan time are still recent enough to act on). This prevents transient
         API errors from causing 100% rejection rates.
+
+        Emits a structured REVAL| calibration log line for every decision (per D-01).
         """
+        start_ms = int(time.time() * 1000)
         opp_type = opportunity.get("type", "")
         original_profit = opportunity.get("net_profit", 0)
         if original_profit <= 0:
             return False
 
+        # Compute scan-time ROI for the calibration log
+        total_cost_raw = opportunity.get("total_cost", "$0")
+        total_cost = (
+            float(total_cost_raw.replace("$", ""))
+            if isinstance(total_cost_raw, str)
+            else float(total_cost_raw)
+        )
+        scan_roi = original_profit / total_cost if total_cost > 0 else 0
+
+        # Determine layer — prefer explicit _layer tag, fall back to config lookup
+        layer = opportunity.get("_layer")
+        if layer is None:
+            layer = get_layer(opp_type)
+            if layer == 0:
+                layer = 1  # Default to L1 for unknown types
+        floor = REVAL_FLOORS.get(layer, REVAL_FLOORS.get(1, 0.02))
+
+        passed = True
+        reval_profit = original_profit
+        reason = "live_orderbook"
+
         try:
             if opp_type == "Binary":
-                return self._revalidate_binary(opportunity, original_profit, price_cache)
+                passed, reval_profit, reason = self._revalidate_binary(
+                    opportunity, original_profit, price_cache)
             elif opp_type.startswith("NegRisk"):
-                return self._revalidate_negrisk(opportunity, original_profit, price_cache)
+                passed, reval_profit, reason = self._revalidate_negrisk(
+                    opportunity, original_profit, price_cache)
             elif opp_type.startswith("Cross"):
-                return self._revalidate_cross(opportunity, original_profit, price_cache)
+                passed, reval_profit, reason = self._revalidate_cross(
+                    opportunity, original_profit, price_cache)
             elif opp_type == "KalshiBinary":
-                return self._revalidate_kalshi_binary(opportunity, original_profit)
+                passed, reval_profit, reason = self._revalidate_kalshi_binary(
+                    opportunity, original_profit)
             elif opp_type.startswith("KalshiMulti"):
-                return self._revalidate_kalshi_multi(opportunity, original_profit)
+                passed, reval_profit, reason = self._revalidate_kalshi_multi(
+                    opportunity, original_profit)
             elif opp_type.startswith("Spread"):
-                return True  # Spread prices are live order book — no mid-price staleness
+                reason = "live_orderbook"  # Spread prices are live — no mid-price staleness
             elif opp_type in ("BetfairBackAll", "BetfairBackLay"):
-                return True  # Betfair prices are live order book
+                reason = "live_orderbook"  # Betfair prices are live order book
             elif opp_type in ("SmarketsBackAll", "SmarketsBackLay"):
-                return True  # Smarkets prices are live order book
+                reason = "live_orderbook"  # Smarkets prices are live order book
             elif opp_type in ("SXBetBackAll", "SXBetBackLay"):
-                return True  # SX Bet prices are live order book
+                reason = "live_orderbook"  # SX Bet prices are live order book
             elif opp_type in ("MatchbookBackAll", "MatchbookBackLay"):
-                return True  # Matchbook prices are live order book
+                reason = "live_orderbook"  # Matchbook prices are live order book
             elif opp_type in ("GeminiBinary", "GeminiMulti"):
-                return True  # Gemini prices are from order book
+                reason = "live_orderbook"  # Gemini prices are from order book
             elif opp_type == "IBKRBinary":
-                return True  # IBKR prices are from snapshot
+                reason = "live_snapshot"  # IBKR prices are from snapshot
             elif opp_type.startswith("MultiCross"):
-                return self._revalidate_multi_cross(opportunity, original_profit, price_cache)
+                passed, reval_profit, reason = self._revalidate_multi_cross(
+                    opportunity, original_profit, price_cache)
             elif opp_type == "TriangularCross":
-                return self._revalidate_triangular(opportunity, original_profit, price_cache)
+                passed, reval_profit, reason = self._revalidate_triangular(
+                    opportunity, original_profit, price_cache)
             elif opp_type == "EventDivergence":
-                return True  # Signal-based — no stale mid-price to revalidate
+                reason = "signal_based"  # Signal-based — no stale mid-price to revalidate
             elif opp_type in ("StalePriceOpp", "ResolutionSnipeOpp", "ConvergenceOpp"):
-                return True  # Signal/time-based — directional, no mid-price revalidation
+                reason = "signal_based"  # Signal/time-based — directional, no mid-price revalidation
             elif opp_type == "MarketMake":
-                return True  # MM quotes are continuously refreshed by the MM engine
-            # Unknown type — proceed cautiously
-            return True
+                reason = "mm_refreshed"  # MM quotes are continuously refreshed by the MM engine
+            # Unknown type — proceed cautiously (passed=True from init)
+
         except _RevalidationAPIError as e:
             # API/network failure — not a price degradation.
             # Accept if original ROI was strong enough (prices were CLOB-verified at scan).
-            total_cost_str = opportunity.get("total_cost", "$0")
-            total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
-            roi = original_profit / total_cost if total_cost > 0 else 0
-            if roi >= 0.02:
+            if scan_roi >= 0.02:
                 logger.info(
                     "Revalidation API error for %s (ROI=%.1f%%), proceeding with scan prices: %s",
-                    opp_type, roi * 100, e,
+                    opp_type, scan_roi * 100, e,
                 )
-                return True
-            logger.info(
-                "Revalidation API error for %s (ROI=%.1f%% < 2%%), rejecting: %s",
-                opp_type, roi * 100, e,
-            )
-            return False
+                passed = True
+                reval_profit = original_profit
+                reason = "api_error_accepted"
+            else:
+                logger.info(
+                    "Revalidation API error for %s (ROI=%.1f%% < 2%%), rejecting: %s",
+                    opp_type, scan_roi * 100, e,
+                )
+                passed = False
+                reval_profit = 0.0
+                reason = "api_error_rejected"
         except Exception as e:
-            logger.warning(f"Revalidation unexpected error: {e}")
-            return False
+            logger.warning("Revalidation unexpected error: %s", e)
+            passed = False
+            reval_profit = 0.0
+            reason = "unexpected_error"
+
+        # Emit structured calibration log line (per D-01)
+        reval_roi = reval_profit / total_cost if total_cost > 0 else 0
+        elapsed_ms = int(time.time() * 1000) - start_ms
+        logger.info(
+            "REVAL|layer=%d|type=%s|scan_roi=%.4f|reval_roi=%.4f|delta=%.4f|"
+            "passed=%s|reason=%s|elapsed_ms=%d|floor=%.4f",
+            layer, opp_type, scan_roi, reval_roi, scan_roi - reval_roi,
+            passed, reason, elapsed_ms, floor,
+        )
+
+        return passed
 
     def _check_ws_cache(self, price_cache: dict | None, platform: str, key: str) -> dict | None:
         """Check WebSocket price cache for fresh data (< WS_CACHE_MAX_AGE_REVALIDATION seconds)."""
@@ -430,10 +478,26 @@ class ArbitrageExecutor:
             base = 0.7 if is_partial else 0.8
             return original_profit * max(0.4, base - multi_bonus)
         else:
-            return self.revalidation_min_floor
+            # Low-ROI: use layer-specific floor instead of global minimum
+            layer = opp.get("_layer")
+            if layer is None:
+                opp_type_str = opp.get("type", "")
+                layer = get_layer(opp_type_str)
+                if layer == 0:
+                    logger.warning(
+                        "Revalidation: unknown layer for type=%s, using L1 floor", opp_type_str
+                    )
+                    layer = 1
+            return REVAL_FLOORS.get(layer, REVAL_FLOORS.get(1, 0.02))
 
-    def _revalidate_binary(self, opp: dict, original_profit: float, price_cache: dict | None) -> bool:
-        """Revalidate a Polymarket binary opportunity."""
+    def _revalidate_binary(
+        self, opp: dict, original_profit: float, price_cache: dict | None
+    ) -> tuple[bool, float, str]:
+        """Revalidate a Polymarket binary opportunity.
+
+        Returns:
+            (passed, reval_profit, reason)
+        """
         token_ids = opp.get("_token_ids", [])
         if len(token_ids) < 2:
             logger.warning("Revalidation: missing token IDs for binary")
@@ -461,17 +525,27 @@ class ArbitrageExecutor:
             raise _RevalidationAPIError("no ask price in order book for binary")
 
         result = net_profit_binary_internal(yes_ask, no_ask)
+        reval_profit = result["net_profit"]
         threshold = self._get_revalidation_threshold(original_profit, opp)
-        if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: binary profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
-            return False
+        if reval_profit < threshold:
+            logger.info(
+                "Revalidation: binary profit degraded %.4f -> %.4f (threshold=%.4f)",
+                original_profit, reval_profit, threshold,
+            )
+            return False, reval_profit, "profit_below_floor"
         # Update opportunity with fresh prices
         opp["prices"] = f"Y={yes_ask:.3f} N={no_ask:.3f}"
-        opp["net_profit"] = result["net_profit"]
-        return True
+        opp["net_profit"] = reval_profit
+        return True, reval_profit, "passed"
 
-    def _revalidate_negrisk(self, opp: dict, original_profit: float, price_cache: dict | None) -> bool:
-        """Revalidate a Polymarket NegRisk opportunity."""
+    def _revalidate_negrisk(
+        self, opp: dict, original_profit: float, price_cache: dict | None
+    ) -> tuple[bool, float, str]:
+        """Revalidate a Polymarket NegRisk opportunity.
+
+        Returns:
+            (passed, reval_profit, reason)
+        """
         token_ids = opp.get("_token_ids", [])
         if not token_ids:
             raise _RevalidationAPIError("no token IDs for negrisk")
@@ -493,15 +567,25 @@ class ArbitrageExecutor:
                 yes_asks.append(data["ask"])
 
         result = net_profit_negrisk_internal(yes_asks)
+        reval_profit = result["net_profit"]
         threshold = self._get_revalidation_threshold(original_profit, opp)
-        if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: negrisk profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
-            return False
-        opp["net_profit"] = result["net_profit"]
-        return True
+        if reval_profit < threshold:
+            logger.info(
+                "Revalidation: negrisk profit degraded %.4f -> %.4f (threshold=%.4f)",
+                original_profit, reval_profit, threshold,
+            )
+            return False, reval_profit, "profit_below_floor"
+        opp["net_profit"] = reval_profit
+        return True, reval_profit, "passed"
 
-    def _revalidate_cross(self, opp: dict, original_profit: float, price_cache: dict | None) -> bool:
-        """Revalidate a cross-platform opportunity."""
+    def _revalidate_cross(
+        self, opp: dict, original_profit: float, price_cache: dict | None
+    ) -> tuple[bool, float, str]:
+        """Revalidate a cross-platform opportunity.
+
+        Returns:
+            (passed, reval_profit, reason)
+        """
         token_ids = opp.get("_token_ids", [])
         kalshi_ticker = opp.get("_kalshi_ticker", "")
 
@@ -562,13 +646,22 @@ class ArbitrageExecutor:
 
         threshold = self._get_revalidation_threshold(original_profit, opp)
         if best < threshold:
-            logger.info(f"Revalidation: cross profit degraded {original_profit:.4f} -> {best:.4f} (threshold={threshold:.4f})")
-            return False
+            logger.info(
+                "Revalidation: cross profit degraded %.4f -> %.4f (threshold=%.4f)",
+                original_profit, best, threshold,
+            )
+            return False, best, "profit_below_floor"
         opp["net_profit"] = best
-        return True
+        return True, best, "passed"
 
-    def _revalidate_kalshi_binary(self, opp: dict, original_profit: float) -> bool:
-        """Revalidate a Kalshi binary opportunity."""
+    def _revalidate_kalshi_binary(
+        self, opp: dict, original_profit: float
+    ) -> tuple[bool, float, str]:
+        """Revalidate a Kalshi binary opportunity.
+
+        Returns:
+            (passed, reval_profit, reason)
+        """
         ticker = opp.get("_kalshi_ticker", "")
         if not ticker or not self.kalshi_client:
             raise _RevalidationAPIError("no ticker or no Kalshi client for kalshi_binary")
@@ -586,15 +679,25 @@ class ArbitrageExecutor:
         k_no = float(n_entry[0]) / 100 if isinstance(n_entry, list) else float(n_entry.get("price", 0)) / 100
 
         result = net_profit_kalshi_binary(k_yes, k_no)
+        reval_profit = result["net_profit"]
         threshold = self._get_revalidation_threshold(original_profit, opp)
-        if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: kalshi_binary profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
-            return False
-        opp["net_profit"] = result["net_profit"]
-        return True
+        if reval_profit < threshold:
+            logger.info(
+                "Revalidation: kalshi_binary profit degraded %.4f -> %.4f (threshold=%.4f)",
+                original_profit, reval_profit, threshold,
+            )
+            return False, reval_profit, "profit_below_floor"
+        opp["net_profit"] = reval_profit
+        return True, reval_profit, "passed"
 
-    def _revalidate_kalshi_multi(self, opp: dict, original_profit: float) -> bool:
-        """Revalidate a Kalshi multi-outcome opportunity."""
+    def _revalidate_kalshi_multi(
+        self, opp: dict, original_profit: float
+    ) -> tuple[bool, float, str]:
+        """Revalidate a Kalshi multi-outcome opportunity.
+
+        Returns:
+            (passed, reval_profit, reason)
+        """
         tickers = opp.get("_kalshi_tickers", [])
         if not tickers or not self.kalshi_client:
             raise _RevalidationAPIError("no tickers or no Kalshi client for kalshi_multi")
@@ -611,15 +714,25 @@ class ArbitrageExecutor:
             price = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
             yes_prices.append(price)
         result = net_profit_kalshi_multi(yes_prices)
+        reval_profit = result["net_profit"]
         threshold = self._get_revalidation_threshold(original_profit, opp)
-        if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: kalshi_multi profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
-            return False
-        opp["net_profit"] = result["net_profit"]
-        return True
+        if reval_profit < threshold:
+            logger.info(
+                "Revalidation: kalshi_multi profit degraded %.4f -> %.4f (threshold=%.4f)",
+                original_profit, reval_profit, threshold,
+            )
+            return False, reval_profit, "profit_below_floor"
+        opp["net_profit"] = reval_profit
+        return True, reval_profit, "passed"
 
-    def _revalidate_triangular(self, opp: dict, original_profit: float, price_cache: dict | None) -> bool:
-        """Revalidate a TriangularCross opportunity by re-fetching prices from both platforms."""
+    def _revalidate_triangular(
+        self, opp: dict, original_profit: float, price_cache: dict | None
+    ) -> tuple[bool, float, str]:
+        """Revalidate a TriangularCross opportunity by re-fetching prices from both platforms.
+
+        Returns:
+            (passed, reval_profit, reason)
+        """
         platform_a = opp.get("_platform_a", "")
         platform_b = opp.get("_platform_b", "")
         prices_str = opp.get("prices", "")
@@ -662,19 +775,29 @@ class ArbitrageExecutor:
 
         # Recalculate profit with fresh prices
         result = net_profit_triangular(yes_price, no_price, platform_a, platform_b)
+        reval_profit = result["net_profit"]
         threshold = self._get_revalidation_threshold(original_profit, opp)
 
-        if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: triangular profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
-            return False
+        if reval_profit < threshold:
+            logger.info(
+                "Revalidation: triangular profit degraded %.4f -> %.4f (threshold=%.4f)",
+                original_profit, reval_profit, threshold,
+            )
+            return False, reval_profit, "profit_below_floor"
 
         # Update opportunity with fresh prices
         opp["prices"] = f"{platform_a}_Y={yes_price:.3f} {platform_b}_N={no_price:.3f}"
-        opp["net_profit"] = result["net_profit"]
-        return True
+        opp["net_profit"] = reval_profit
+        return True, reval_profit, "passed"
 
-    def _revalidate_multi_cross(self, opp: dict, original_profit: float, price_cache: dict | None) -> bool:
-        """Revalidate a MultiCross opportunity by re-checking each leg's price."""
+    def _revalidate_multi_cross(
+        self, opp: dict, original_profit: float, price_cache: dict | None
+    ) -> tuple[bool, float, str]:
+        """Revalidate a MultiCross opportunity by re-checking each leg's price.
+
+        Returns:
+            (passed, reval_profit, reason)
+        """
         outcome_legs = opp.get("_outcome_legs", [])
         if not outcome_legs:
             raise _RevalidationAPIError("no outcome legs for multi_cross")
@@ -696,14 +819,18 @@ class ArbitrageExecutor:
             platforms.append(platform)
 
         result = net_profit_multi_cross(prices, platforms)
+        reval_profit = result["net_profit"]
         threshold = self._get_revalidation_threshold(original_profit, opp)
 
-        if result["net_profit"] < threshold:
-            logger.info(f"Revalidation: multi-cross profit degraded {original_profit:.4f} -> {result['net_profit']:.4f} (threshold={threshold:.4f})")
-            return False
+        if reval_profit < threshold:
+            logger.info(
+                "Revalidation: multi-cross profit degraded %.4f -> %.4f (threshold=%.4f)",
+                original_profit, reval_profit, threshold,
+            )
+            return False, reval_profit, "profit_below_floor"
 
-        opp["net_profit"] = result["net_profit"]
-        return True
+        opp["net_profit"] = reval_profit
+        return True, reval_profit, "passed"
 
     def _refetch_platform_price(
         self, platform: str, opp: dict, price_cache: dict | None, side: str,
@@ -1914,19 +2041,42 @@ class ArbitrageExecutor:
                 return False, None, None
             side = leg.get("side", "BUY")
             neg_risk = "NegRisk" in opportunity.get("type", "")
+
+            # Maker routing (per D-05): use GTC limit orders when ORDER_TIME_IN_FORCE != "FOK"
+            use_gtc = ORDER_TIME_IN_FORCE not in ("FOK", "fill_or_kill")
             resp = self.pm_trader.place_order(
                 token_id=token_id,
                 side=side,
                 price=price,
                 size=size,
                 neg_risk=neg_risk,
+                order_type="GTC" if use_gtc else "FOK",
             )
             if resp and resp.get("success"):
                 order_id = resp.get("orderID", resp.get("order_id", ""))
                 leg["_order_id"] = order_id
-                # Poll for fill confirmation
-                fill_price = self._confirm_fill_pm(order_id, price)
-                return True, order_id, fill_price
+                if use_gtc:
+                    # Poll for fill; cancel and skip on timeout (no taker fallback per D-05)
+                    fill_price = self._confirm_fill_pm(order_id, price)
+                    if fill_price is None:
+                        logger.info(
+                            "Polymarket GTC order %s timed out after %.1fs, "
+                            "cancelling — no taker fallback per D-05",
+                            order_id, GTC_ORDER_TIMEOUT,
+                        )
+                        try:
+                            self.pm_trader.cancel_order(order_id)
+                        except Exception as cancel_err:
+                            logger.warning(
+                                "Failed to cancel Polymarket GTC order %s: %s",
+                                order_id, cancel_err,
+                            )
+                        return False, order_id, None
+                    return True, order_id, fill_price
+                else:
+                    # FOK: poll for fill confirmation
+                    fill_price = self._confirm_fill_pm(order_id, price)
+                    return True, order_id, fill_price
             return False, None, None
 
         elif platform == "kalshi":

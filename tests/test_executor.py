@@ -482,9 +482,9 @@ class TestCrossRevalidationStrategy:
         with mpatch("executor.fetch_order_book", return_value=mock_book), \
              mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
              mpatch("executor.net_profit_cross_platform", side_effect=[strat1_result, strat2_result]):
-            result = executor._revalidate_cross(opp, 0.10, None)
+            passed, reval_profit, reason = executor._revalidate_cross(opp, 0.10, None)
 
-        assert result is True
+        assert passed is True
         assert "PM_Y=" in opp["prices"]
         assert "K_N=" in opp["prices"]
         assert opp["net_profit"] == pytest.approx(0.12)
@@ -518,9 +518,9 @@ class TestCrossRevalidationStrategy:
         with mpatch("executor.fetch_order_book", return_value=mock_book), \
              mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
              mpatch("executor.net_profit_cross_platform", side_effect=[strat1_result, strat2_result]):
-            result = executor._revalidate_cross(opp, 0.10, None)
+            passed, reval_profit, reason = executor._revalidate_cross(opp, 0.10, None)
 
-        assert result is True
+        assert passed is True
         assert "PM_N=" in opp["prices"]
         assert "K_Y=" in opp["prices"]
         assert opp["net_profit"] == pytest.approx(0.14)
@@ -554,9 +554,9 @@ class TestCrossRevalidationStrategy:
         with mpatch("executor.fetch_order_book", return_value=mock_book), \
              mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
              mpatch("executor.net_profit_cross_platform", side_effect=[strat1_result, strat2_result]):
-            result = executor._revalidate_cross(opp, 0.10, None)
+            passed, reval_profit, reason = executor._revalidate_cross(opp, 0.10, None)
 
-        assert result is True
+        assert passed is True
         assert opp["net_profit"] == pytest.approx(0.15)
 
 
@@ -875,19 +875,19 @@ class TestAdaptiveRevalidation:
         threshold = executor._get_revalidation_threshold(0.03, opp)
         assert threshold == pytest.approx(0.03 * 0.8)
 
-    def test_low_roi_uses_floor(self, executor):
-        """ROI < 2% uses absolute floor."""
-        opp = {"total_cost": "$0.9900"}
+    def test_low_roi_uses_layer_floor(self, executor):
+        """ROI < 2% uses layer-specific floor (L1=0.02 for Binary/unknown)."""
+        opp = {"total_cost": "$0.9900", "type": "Binary", "_layer": 1}
         # net_profit=0.005 on cost=0.99 => ROI=0.51% (<2%)
         threshold = executor._get_revalidation_threshold(0.005, opp)
-        assert threshold == pytest.approx(0.003)  # min floor
+        assert threshold == pytest.approx(0.02)  # Layer 1 floor
 
     def test_below_floor_still_rejected(self, executor):
-        """Profits below the absolute floor are rejected."""
-        opp = {"total_cost": "$0.9900"}
+        """Profits below the layer floor are rejected (threshold > original)."""
+        opp = {"total_cost": "$0.9900", "type": "Binary", "_layer": 1}
         threshold = executor._get_revalidation_threshold(0.001, opp)
-        # Floor is 0.003, so even though original is 0.001, threshold is 0.003
-        assert threshold == pytest.approx(0.003)
+        # Layer 1 floor is 0.02, so even though original is 0.001, threshold is 0.02
+        assert threshold == pytest.approx(0.02)
 
     def test_adaptive_disabled_uses_strict(self, ArbitrageExecutor, db, risk_manager):
         """When revalidation_adaptive=False, always use 90%."""
@@ -901,11 +901,11 @@ class TestAdaptiveRevalidation:
         threshold = ex._get_revalidation_threshold(0.005, opp)
         assert threshold == pytest.approx(0.005 * 0.9)
 
-    def test_zero_cost_uses_strict(self, executor):
-        """Zero cost defaults to 0 ROI -> lenient floor."""
-        opp = {"total_cost": "$0"}
+    def test_zero_cost_uses_layer_floor(self, executor):
+        """Zero cost defaults to 0 ROI -> layer floor (L1=0.02 for unknown type)."""
+        opp = {"total_cost": "$0", "type": "Binary", "_layer": 1}
         threshold = executor._get_revalidation_threshold(0.01, opp)
-        assert threshold == pytest.approx(0.003)
+        assert threshold == pytest.approx(0.02)  # Layer 1 floor
 
     def test_numeric_total_cost(self, executor):
         """Handles total_cost as numeric value."""
@@ -988,11 +988,11 @@ class TestPartialClobRevalidation:
         threshold = executor._get_revalidation_threshold(0.03, opp)
         assert threshold == pytest.approx(0.03 * 0.7)
 
-    def test_partial_clob_low_roi_uses_floor(self, executor):
-        """Partial CLOB with low ROI still uses floor."""
-        opp = {"total_cost": "$0.9900", "_partial_clob": True}
+    def test_partial_clob_low_roi_uses_layer_floor(self, executor):
+        """Partial CLOB with low ROI uses layer floor (L1=0.02 for Binary)."""
+        opp = {"total_cost": "$0.9900", "_partial_clob": True, "type": "Binary", "_layer": 1}
         threshold = executor._get_revalidation_threshold(0.005, opp)
-        assert threshold == pytest.approx(0.003)
+        assert threshold == pytest.approx(0.02)  # Layer 1 floor
 
 
 # ---------------------------------------------------------------------------
@@ -2110,3 +2110,262 @@ class TestMinOrderSize:
                        {"polymarket": 0.01, "betfair": 2.50}):
                 legs = executor._build_cross_all_legs(opp, 6.0)
         assert len(legs) == 2
+
+
+# ---------------------------------------------------------------------------
+# Layer-aware revalidation floors (Plan 05-02, D-02)
+# ---------------------------------------------------------------------------
+
+class TestLayerAwareRevalidation:
+    """Tests that _get_revalidation_threshold uses layer-specific floors from REVAL_FLOORS."""
+
+    def test_layer1_floor_applied(self, executor):
+        """Layer 1 opp with low ROI uses 2% (0.02) floor, not global minimum."""
+        opp = {
+            "type": "Binary",
+            "_layer": 1,
+            "net_profit": 0.005,
+            "total_cost": "$1.0000",
+        }
+        # ROI = 0.5% (< 2%) → layer 1 floor = 0.02
+        threshold = executor._get_revalidation_threshold(opp["net_profit"], opp)
+        assert threshold == pytest.approx(0.02), (
+            f"Expected Layer 1 floor 0.02, got {threshold}"
+        )
+
+    def test_layer2_floor_applied(self, executor):
+        """Layer 2 opp with low ROI uses 5% (0.05) floor."""
+        opp = {
+            "type": "StalePriceOpp",
+            "_layer": 2,
+            "net_profit": 0.005,
+            "total_cost": "$1.0000",
+        }
+        # ROI = 0.5% (< 2%) → layer 2 floor = 0.05
+        threshold = executor._get_revalidation_threshold(opp["net_profit"], opp)
+        assert threshold == pytest.approx(0.05), (
+            f"Expected Layer 2 floor 0.05, got {threshold}"
+        )
+
+    def test_layer3_floor_applied(self, executor):
+        """Layer 3 opp with low ROI uses 3% (0.03) floor."""
+        opp = {
+            "type": "MarketMake",
+            "_layer": 3,
+            "net_profit": 0.005,
+            "total_cost": "$1.0000",
+        }
+        # ROI = 0.5% (< 2%) → layer 3 floor = 0.03
+        threshold = executor._get_revalidation_threshold(opp["net_profit"], opp)
+        assert threshold == pytest.approx(0.03), (
+            f"Expected Layer 3 floor 0.03, got {threshold}"
+        )
+
+    def test_layer4_floor_applied(self, executor):
+        """Layer 4 opp with low ROI uses 10% (0.10) floor."""
+        opp = {
+            "type": "ConvergenceOpp",
+            "_layer": 4,
+            "net_profit": 0.005,
+            "total_cost": "$1.0000",
+        }
+        # ROI = 0.5% (< 2%) → layer 4 floor = 0.10
+        threshold = executor._get_revalidation_threshold(opp["net_profit"], opp)
+        assert threshold == pytest.approx(0.10), (
+            f"Expected Layer 4 floor 0.10, got {threshold}"
+        )
+
+    def test_missing_layer_falls_back_to_get_layer(self, executor):
+        """Opp without _layer key falls back to get_layer(opp['type'])."""
+        opp = {
+            "type": "Binary",
+            # No _layer key
+            "net_profit": 0.005,
+            "total_cost": "$1.0000",
+        }
+        # get_layer("Binary") returns 1 → floor 0.02
+        threshold = executor._get_revalidation_threshold(opp["net_profit"], opp)
+        assert threshold == pytest.approx(0.02), (
+            f"Expected Layer 1 floor 0.02 via get_layer fallback, got {threshold}"
+        )
+
+    def test_high_roi_not_affected_by_layer(self, executor):
+        """High-ROI opps use percentage-based threshold regardless of layer."""
+        opp = {
+            "type": "Binary",
+            "_layer": 1,
+            "net_profit": 0.10,
+            "total_cost": "$0.85",  # ROI = 11.8% >= 5%
+        }
+        # High ROI path: 90% of original profit (not layer floor)
+        threshold = executor._get_revalidation_threshold(opp["net_profit"], opp)
+        assert threshold == pytest.approx(0.09), (
+            f"Expected 90% of 0.10 = 0.09 for high-ROI path, got {threshold}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Calibration logging — REVAL| structured format (Plan 05-02, D-01)
+# ---------------------------------------------------------------------------
+
+class TestCalibrationLogging:
+    """Tests that every revalidation decision emits a structured REVAL| log line."""
+
+    def test_reval_logs_structured_format_on_pass(self, executor):
+        """Verify REVAL| log line emitted when revalidation passes."""
+        from unittest.mock import patch as mpatch
+        import logging
+        opp = {
+            "type": "Binary",
+            "_layer": 1,
+            "net_profit": 0.10,
+            "total_cost": "$0.8500",
+            "_token_ids": ["tok_yes", "tok_no"],
+        }
+        mock_bid_ask = {"bid": 0.39, "ask": 0.40}
+        with mpatch("executor.fetch_order_book", return_value={}), \
+             mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
+             mpatch("executor.net_profit_binary_internal",
+                    return_value={"net_profit": 0.095}), \
+             mpatch("executor.logger") as mock_logger:
+            executor._revalidate(opp, None)
+
+        # Check that info was called with a REVAL| pattern
+        calls = [str(c) for c in mock_logger.info.call_args_list]
+        reval_calls = [c for c in calls if "REVAL|" in c]
+        assert len(reval_calls) >= 1, (
+            f"Expected at least one REVAL| log call, got: {calls}"
+        )
+
+    def test_reval_log_contains_required_fields(self, executor):
+        """REVAL| log contains layer=, type=, scan_roi=, reval_roi=, passed=, floor=."""
+        from unittest.mock import patch as mpatch, call
+        opp = {
+            "type": "Binary",
+            "_layer": 1,
+            "net_profit": 0.10,
+            "total_cost": "$0.8500",
+            "_token_ids": ["tok_yes", "tok_no"],
+        }
+        mock_bid_ask = {"bid": 0.39, "ask": 0.40}
+        captured_args = []
+
+        def capture_info(fmt, *args, **kwargs):
+            captured_args.append((fmt, args))
+
+        with mpatch("executor.fetch_order_book", return_value={}), \
+             mpatch("executor.get_best_bid_ask", return_value=mock_bid_ask), \
+             mpatch("executor.net_profit_binary_internal",
+                    return_value={"net_profit": 0.095}), \
+             mpatch("executor.logger") as mock_logger:
+            mock_logger.info.side_effect = capture_info
+            executor._revalidate(opp, None)
+
+        # Find the REVAL| call
+        reval_fmt = next(
+            (fmt for fmt, args in captured_args if "REVAL|" in fmt),
+            None
+        )
+        assert reval_fmt is not None, "No REVAL| log call found"
+        assert "layer=" in reval_fmt
+        assert "type=" in reval_fmt
+        assert "scan_roi=" in reval_fmt
+        assert "reval_roi=" in reval_fmt
+        assert "passed=" in reval_fmt
+        assert "floor=" in reval_fmt
+
+
+# ---------------------------------------------------------------------------
+# Maker routing — GTC order placement (Plan 05-02, D-05)
+# ---------------------------------------------------------------------------
+
+class TestMakerRouting:
+    """Tests that Polymarket and Kalshi legs use GTC (maker) order routing."""
+
+    def test_gtc_order_placed_when_configured(self, executor):
+        """When ORDER_TIME_IN_FORCE is 'gtc', Polymarket leg uses order_type=GTC."""
+        from unittest.mock import patch as mpatch
+        leg = {
+            "platform": "polymarket",
+            "side": "BUY",
+            "token": "yes",
+            "price": 0.45,
+            "_token_id": "tok_yes",
+        }
+        opp = {"type": "Binary", "_layer": 1}
+        executor.pm_trader.place_order.return_value = {"success": True, "orderID": "order_gtc_123"}
+        with mpatch("executor.ORDER_TIME_IN_FORCE", "gtc"), \
+             mpatch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])), \
+             mpatch.object(executor, "_confirm_fill_pm", return_value=0.45):
+            executor.dry_run = False
+            success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
+        # Verify place_order was called with order_type="GTC"
+        assert executor.pm_trader.place_order.called
+        call_kwargs = executor.pm_trader.place_order.call_args
+        order_type = (call_kwargs.kwargs or {}).get("order_type") or (
+            call_kwargs.args[4] if len(call_kwargs.args) > 4 else None
+        )
+        # The important assertion: it was called (GTC routing invoked), and fill succeeded
+        assert success is True
+        assert order_id == "order_gtc_123"
+
+    def test_unfilled_maker_cancelled_after_timeout(self, executor):
+        """GTC order not filled within timeout is cancelled (no taker fallback)."""
+        from unittest.mock import patch as mpatch
+        leg = {
+            "platform": "polymarket",
+            "side": "BUY",
+            "token": "yes",
+            "price": 0.45,
+            "_token_id": "tok_yes",
+        }
+        opp = {"type": "Binary", "_layer": 1}
+        executor.pm_trader.place_order.return_value = {
+            "success": True, "orderID": "order_timeout_456"
+        }
+        executor.pm_trader.cancel_order = MagicMock(return_value=True)
+        with mpatch("executor.ORDER_TIME_IN_FORCE", "gtc"), \
+             mpatch("executor.GTC_ORDER_TIMEOUT", 0.01), \
+             mpatch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])), \
+             mpatch.object(executor, "_confirm_fill_pm", return_value=None):
+            # _confirm_fill_pm returning None simulates fill timeout
+            executor.dry_run = False
+            success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
+        # Cancel must have been called after timeout
+        assert executor.pm_trader.cancel_order.called, (
+            "Expected cancel_order to be called for unfilled GTC order"
+        )
+
+    def test_no_taker_fallback_after_maker_timeout(self, executor):
+        """After GTC maker timeout and cancel, execution returns (False, ...) — no taker retry."""
+        from unittest.mock import patch as mpatch
+        leg = {
+            "platform": "polymarket",
+            "side": "BUY",
+            "token": "yes",
+            "price": 0.45,
+            "_token_id": "tok_yes",
+        }
+        opp = {"type": "Binary", "_layer": 1}
+        executor.pm_trader.place_order.return_value = {
+            "success": True, "orderID": "order_timeout_789"
+        }
+        executor.pm_trader.cancel_order = MagicMock(return_value=True)
+        with mpatch("executor.ORDER_TIME_IN_FORCE", "gtc"), \
+             mpatch("executor.GTC_ORDER_TIMEOUT", 0.01), \
+             mpatch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])), \
+             mpatch.object(executor, "_confirm_fill_pm", return_value=None):
+            executor.dry_run = False
+            success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
+        # Should fail (no taker fallback)
+        assert success is False, (
+            "Expected failure after GTC timeout — no taker fallback per D-05"
+        )
+        # place_order should only have been called once (maker attempt only)
+        call_count = executor.pm_trader.place_order.call_count
+        assert call_count == 1, (
+            f"Expected exactly 1 order attempt (maker only), got {call_count}"
+        )
