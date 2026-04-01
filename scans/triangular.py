@@ -310,6 +310,7 @@ def scan_triangular(
 
         opp = {
             "type": "TriangularCross",
+            "_layer": 1,  # Layer 1: pure arbitrage
             "market": market_title[:50],
             "prices": f"{best_yes_platform}_Y={best_yes:.3f} {best_no_platform}_N={best_no:.3f}",
             "total_cost": f"${total_cost:.4f}",

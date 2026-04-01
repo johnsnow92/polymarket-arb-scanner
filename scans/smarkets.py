@@ -87,6 +87,7 @@ def scan_smarkets_backall(smarkets_client: SmarketsClient, min_profit: float) ->
 
             opportunities.append({
                 "type": "SmarketsBackAll",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": title[:60],
                 "prices": price_summary,
                 "total_cost": f"${total:.4f}",
@@ -162,6 +163,7 @@ def scan_smarkets_backlay(smarkets_client: SmarketsClient, min_profit: float) ->
 
                 opportunities.append({
                     "type": "SmarketsBackLay",
+                    "_layer": 1,  # Layer 1: pure arbitrage
                     "market": title[:60],
                     "prices": f"back={back_prob:.3f} lay={lay_prob:.3f}",
                     "total_cost": f"${back_prob:.4f}",

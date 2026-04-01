@@ -92,6 +92,7 @@ def scan_matchbook_backall(matchbook_client: MatchbookClient, min_profit: float)
 
             opportunities.append({
                 "type": "MatchbookBackAll",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": title[:60],
                 "prices": price_summary,
                 "total_cost": f"${total:.4f}",
@@ -182,6 +183,7 @@ def scan_matchbook_backlay(matchbook_client: MatchbookClient, min_profit: float)
 
                 opportunities.append({
                     "type": "MatchbookBackLay",
+                    "_layer": 1,  # Layer 1: pure arbitrage
                     "market": title[:60],
                     "prices": f"back={back_prob:.3f} lay={lay_prob:.3f}",
                     "total_cost": f"${back_prob:.4f}",

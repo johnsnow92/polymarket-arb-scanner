@@ -178,6 +178,7 @@ def scan_negrisk_internal(events: list[dict], min_profit: float,
                 negrisk_token_ids.append(tids[0] if tids else "")
             opportunities.append({
                 "type": f"NegRisk({len(yes_prices)})",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": event.get("title", "Unknown")[:60],
                 "prices": price_summary,
                 "total_cost": f"${total:.4f}",

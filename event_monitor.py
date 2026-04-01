@@ -353,6 +353,7 @@ class EventMonitor:
 
             opp = {
                 "type": "EventDivergence",
+                "_layer": 4,  # Layer 4: informed trading
                 "market": market_title[:50],
                 "prices": prices_str,
                 "total_cost": f"${platform_price:.4f}",

@@ -115,6 +115,7 @@ def scan_betfair_backall(betfair_client: BetfairClient, min_profit: float) -> li
 
             opportunities.append({
                 "type": "BetfairBackAll",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": title[:60],
                 "prices": price_summary,
                 "total_cost": f"${total:.4f}",
@@ -216,6 +217,7 @@ def scan_betfair_backlay(betfair_client: BetfairClient, min_profit: float) -> li
 
                 opportunities.append({
                     "type": "BetfairBackLay",
+                    "_layer": 1,  # Layer 1: pure arbitrage
                     "market": title[:60],
                     "prices": f"back={back_prob:.3f} lay={lay_prob:.3f}",
                     "total_cost": f"${back_prob:.4f}",

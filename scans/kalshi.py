@@ -71,6 +71,7 @@ def scan_kalshi_binary(
                 total_cost = yes_price + no_price
                 opportunities.append({
                     "type": "KalshiBinary",
+                    "_layer": 1,  # Layer 1: pure arbitrage
                     "market": km.get("title", "")[:60],
                     "prices": f"Y={yes_price:.3f} N={no_price:.3f}",
                     "total_cost": f"${total_cost:.4f}",
@@ -175,6 +176,7 @@ def scan_kalshi_multi(
             event_title = event_titles.get(event_ticker, "Unknown")
             opportunities.append({
                 "type": f"KalshiMulti({n})",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": event_title[:60],
                 "prices": price_summary,
                 "total_cost": f"${total:.4f}",

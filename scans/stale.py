@@ -63,6 +63,7 @@ def scan_stale_prices(
 
             opportunity = {
                 "type": "StalePriceOpp",
+                "_layer": 2,  # Layer 2: near-arbitrage
                 "market": market_key,
                 "prices": (
                     f"stale_{opp['stale_platform']}={opp['stale_price']:.4f} "

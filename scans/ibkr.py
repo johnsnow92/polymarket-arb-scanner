@@ -62,6 +62,7 @@ def scan_ibkr_binary(ibkr_client: IBKRClient, min_profit: float) -> list[dict]:
 
             opportunities.append({
                 "type": "IBKRBinary",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": event.get("title", "")[:60],
                 "prices": f"Y={yes_price:.3f} N={no_price:.3f}",
                 "total_cost": f"${total:.4f}",

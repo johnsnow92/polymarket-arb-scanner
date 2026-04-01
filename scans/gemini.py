@@ -70,6 +70,7 @@ def scan_gemini_binary(gemini_client: GeminiClient, min_profit: float) -> list[d
 
             opportunities.append({
                 "type": "GeminiBinary",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": event.get("title", "")[:60],
                 "prices": f"Y={yes_price:.3f} N={no_price:.3f}",
                 "total_cost": f"${total:.4f}",
@@ -155,6 +156,7 @@ def scan_gemini_multi(gemini_client: GeminiClient, min_profit: float) -> list[di
 
             opportunities.append({
                 "type": "GeminiMulti",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": event.get("title", "")[:60],
                 "prices": price_summary,
                 "total_cost": f"${total:.4f}",

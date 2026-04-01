@@ -91,6 +91,7 @@ def scan_sxbet_backall(sxbet_client: SXBetClient, min_profit: float) -> list[dic
 
             opportunities.append({
                 "type": "SXBetBackAll",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": title[:60],
                 "prices": price_summary,
                 "total_cost": f"${total:.4f}",
@@ -167,6 +168,7 @@ def scan_sxbet_backlay(sxbet_client: SXBetClient, min_profit: float) -> list[dic
 
             opportunities.append({
                 "type": "SXBetBackLay",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": title[:60],
                 "prices": f"back={back_prob:.3f} lay={lay_prob:.3f}",
                 "total_cost": f"${back_prob:.4f}",

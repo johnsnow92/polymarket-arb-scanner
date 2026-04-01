@@ -112,6 +112,7 @@ def scan_binary_internal(markets: list[dict], min_profit: float,
             token_ids = _extract_token_ids(m)
             opportunities.append({
                 "type": "Binary",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": m.get("question", m.get("title", "Unknown"))[:60],
                 "prices": f"Y={yes_price:.3f} N={no_price:.3f}",
                 "total_cost": f"${yes_price + no_price:.4f}",

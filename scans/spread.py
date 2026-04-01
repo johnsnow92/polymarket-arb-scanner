@@ -63,6 +63,7 @@ def scan_spread_polymarket(markets: list[dict], min_profit: float) -> list[dict]
             min_size = min(ba.get("bid_size", 0) or 0, ba.get("ask_size", 0) or 0)
             return {
                 "type": "SpreadPM",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": market.get("question", market.get("title", "Unknown"))[:60],
                 "prices": f"ask={ask:.3f} bid={bid:.3f}",
                 "total_cost": f"${ask:.4f}",

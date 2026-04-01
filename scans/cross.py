@@ -269,6 +269,7 @@ def scan_cross_platform(
                     pm_token_ids = _extract_token_ids(pm)
                     best_opp = {
                         "type": f"Cross({strategy})",
+                        "_layer": 1,  # Layer 1: pure arbitrage
                         "market": pm_title[:50],
                         "kalshi": k_title[:50],
                         "match": f"{sim}%",
@@ -482,6 +483,7 @@ def scan_cross_all(
 
                     opp_entry = {
                         "type": f"Cross({pa[:2].upper()}-{pb[:2].upper()})",
+                        "_layer": 1,  # Layer 1: pure arbitrage
                         "market": m["title_a"][:50],
                         "kalshi": m["title_b"][:50],
                         "match": f"{m['similarity']}%",

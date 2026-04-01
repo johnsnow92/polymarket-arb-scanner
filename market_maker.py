@@ -489,6 +489,7 @@ class MarketMaker:
 
             opportunities.append({
                 "type": "MarketMake",
+                "_layer": 3,  # Layer 3: market making
                 "market": mkey,
                 "prices": f"bid={quotes['bid']:.4f} ask={quotes['ask']:.4f} mid={mid:.4f}",
                 "total_cost": f"${self.quote_size:.2f}",

@@ -81,6 +81,7 @@ def scan_resolution_snipes(
 
             opportunity = {
                 "type": "ResolutionSnipeOpp",
+                "_layer": 2,  # Layer 2: near-arbitrage
                 "market": title[:60] if title else market_key,
                 "prices": f"{platform}_{outcome_name}={price:.4f} settle=1.00",
                 "total_cost": f"${price:.4f}",

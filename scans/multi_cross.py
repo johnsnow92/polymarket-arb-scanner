@@ -361,6 +361,7 @@ def scan_multi_cross(
             event_title = pm_event.get("title", "Unknown")
             opportunities.append({
                 "type": f"MultiCross({n})",
+                "_layer": 1,  # Layer 1: pure arbitrage
                 "market": event_title[:60],
                 "prices": price_summary,
                 "total_cost": f"${total_cost:.4f}",

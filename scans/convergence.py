@@ -102,6 +102,7 @@ def scan_convergence(
 
             opportunity = {
                 "type": "ConvergenceOpp",
+                "_layer": 4,  # Layer 4: informed trading
                 "market": title[:60],
                 "prices": (
                     f"{platform}={price:.4f} "
