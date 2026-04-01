@@ -276,33 +276,33 @@ class TestFeeRouting:
 
 class TestBacktestNewTypes:
     def test_get_layer_pure_arb(self):
-        from backtest import _get_layer
-        assert _get_layer("Binary") == 1
-        assert _get_layer("KalshiBinary") == 1
-        assert _get_layer("Cross(PM_YES + K_NO)") == 1
-        assert _get_layer("NegRisk(5)") == 1
-        assert _get_layer("MultiCross(3)") == 1
+        from config import get_layer
+        assert get_layer("Binary") == 1
+        assert get_layer("KalshiBinary") == 1
+        assert get_layer("Cross(PM_YES + K_NO)") == 1
+        assert get_layer("NegRisk(5)") == 1
+        assert get_layer("MultiCross(3)") == 1
 
     def test_get_layer_near_arb(self):
-        from backtest import _get_layer
-        assert _get_layer("StalePriceOpp") == 2
-        assert _get_layer("ResolutionSnipeOpp") == 2
+        from config import get_layer
+        assert get_layer("StalePriceOpp") == 2
+        assert get_layer("ResolutionSnipeOpp") == 2
 
     def test_get_layer_mm(self):
-        from backtest import _get_layer
-        assert _get_layer("MarketMake") == 3
+        from config import get_layer
+        assert get_layer("MarketMake") == 3
 
     def test_get_layer_informed(self):
-        from backtest import _get_layer
-        assert _get_layer("EventDivergence") == 4
-        assert _get_layer("ConvergenceOpp") == 4
+        from config import get_layer
+        assert get_layer("EventDivergence") == 4
+        assert get_layer("ConvergenceOpp") == 4
 
     def test_get_layer_unknown(self):
-        from backtest import _get_layer
-        assert _get_layer("UnknownType") == 0
+        from config import get_layer
+        assert get_layer("UnknownType") == 0
 
     def test_strategy_layers_dict(self):
-        from backtest import STRATEGY_LAYERS
+        from config import STRATEGY_LAYERS
         assert len(STRATEGY_LAYERS) > 15  # Should cover all known types
 
     def test_layer_names_dict(self):

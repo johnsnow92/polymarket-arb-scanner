@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 # Ensure parent directory is importable
 sys.path.insert(0, os.path.dirname(__file__))
 
-from config import BACKTEST_INITIAL_BALANCE
+from config import BACKTEST_INITIAL_BALANCE, STRATEGY_LAYERS, get_layer
 from snapshot import SnapshotRecorder
 
 try:
@@ -40,19 +40,7 @@ except ImportError:
     # Graceful fallback if fee functions are unavailable
     pass
 
-# Strategy layer classification for filtering and reporting
-STRATEGY_LAYERS = {
-    "Binary": 1, "NegRisk": 1, "KalshiBinary": 1, "KalshiMulti": 1,
-    "Cross": 1, "BetfairBackAll": 1, "BetfairBackLay": 1,
-    "SmarketsBackAll": 1, "SmarketsBackLay": 1,
-    "SXBetBackAll": 1, "SXBetBackLay": 1,
-    "MatchbookBackAll": 1, "MatchbookBackLay": 1,
-    "GeminiBinary": 1, "GeminiMulti": 1, "IBKRBinary": 1,
-    "MultiCross": 1, "TriangularCross": 1,
-    "StalePriceOpp": 2, "ResolutionSnipeOpp": 2,
-    "MarketMake": 3,
-    "EventDivergence": 4, "ConvergenceOpp": 4,
-}
+# STRATEGY_LAYERS and get_layer() are imported from config (single source of truth)
 
 LAYER_NAMES = {
     1: "Pure Arbitrage",
@@ -99,7 +87,7 @@ class BacktestResult:
         # Group by strategy layer
         layer_stats: dict[int, dict] = {}
         for opp_type, stats in self.trades_by_type.items():
-            layer = _get_layer(opp_type)
+            layer = get_layer(opp_type)
             if layer not in layer_stats:
                 layer_stats[layer] = {"count": 0, "pnl": 0.0, "wins": 0}
             layer_stats[layer]["count"] += stats["count"]
@@ -200,7 +188,7 @@ class BacktestEngine:
                 continue
 
             # Layer filter: skip snapshots from the wrong layer
-            if layer_filter is not None and _get_layer(opp_t) != layer_filter:
+            if layer_filter is not None and get_layer(opp_t) != layer_filter:
                 continue
 
             # Calculate total cost from prices
@@ -485,17 +473,6 @@ def write_recommendations(result: BacktestResult, data_dir: str) -> str:
         json.dump(rec, fh, indent=2)
     logger.info("Backtest recommendations written to %s", path)
     return path
-
-
-def _get_layer(opp_type: str) -> int:
-    """Determine the strategy layer for an opportunity type."""
-    if opp_type in STRATEGY_LAYERS:
-        return STRATEGY_LAYERS[opp_type]
-    # Prefix match for parameterized types like "NegRisk(3)", "Cross(PM_YES + K_NO)"
-    for prefix, layer in STRATEGY_LAYERS.items():
-        if opp_type.startswith(prefix):
-            return layer
-    return 0  # Unknown
 
 
 def main():
