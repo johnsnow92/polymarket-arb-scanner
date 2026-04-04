@@ -74,7 +74,10 @@ Plans:
   1. Bot places resting limit orders on Polymarket qualifying markets and reward score is tracked in the dashboard
   2. Bot participates in Kalshi liquidity incentive program and qualifying order metrics are logged
   3. Dedicated liquidity rewards farming strategy optimizes quote placement to maximize USDC reward yield
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 07-01-PLAN.md — Reward tracking infrastructure (config, database, RewardTracker, unit tests)
+- [ ] 07-02-PLAN.md — Rewards scan integration, executor wiring, continuous mode, dashboard metrics
 
 ### Phase 8: Market Signal Strategies
 **Goal**: Four new signal-driven strategies are live in production — order book imbalance, news-driven sniping, correlated pairs, and time decay convergence
@@ -107,6 +110,6 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9
 |-------|-----------|----------------|--------|-----------|
 | 5. Deploy & Execute | v2.0 | 3/3 | Planning complete | ✓ |
 | 6. Monitor & Harden | v2.0 | 0/6 | Planning complete | - |
-| 7. Liquidity Rewards | v2.0 | 0/TBD | Not started | - |
+| 7. Liquidity Rewards | v2.0 | 2/2 | Planning complete | - |
 | 8. Market Signal Strategies | v2.0 | 0/TBD | Not started | - |
 | 9. Structural Alpha Strategies | v2.0 | 0/TBD | Not started | - |
