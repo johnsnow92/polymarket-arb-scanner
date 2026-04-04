@@ -401,6 +401,10 @@ class ArbitrageExecutor:
                 reason = "signal_based"  # Signal/time-based — directional, no mid-price revalidation
             elif opp_type == "MarketMake":
                 reason = "mm_refreshed"  # MM quotes are continuously refreshed by the MM engine
+            elif opp_type == "PolymarketRewards":
+                reason = "reward_refreshed"  # Reward quotes are refreshed during reward scan
+            elif opp_type == "KalshiRewards":
+                reason = "reward_refreshed"  # Reward quotes are refreshed during reward scan
             # Unknown type — proceed cautiously (passed=True from init)
 
         except _RevalidationAPIError as e:
@@ -1311,6 +1315,54 @@ class ArbitrageExecutor:
         elif opp_type in ("StalePriceOpp", "ResolutionSnipeOpp", "ConvergenceOpp"):
             # Layer 2-4: single-leg directional trades
             legs = self._build_directional_legs(opportunity, size)
+        elif opp_type == "PolymarketRewards":
+            # Layer 3: Polymarket liquidity rewards — resting limit orders
+            optimal_bid = opportunity.get("optimal_bid", 0)
+            optimal_ask = opportunity.get("optimal_ask", 0)
+            reward_size = opportunity.get("size", size)
+
+            if not optimal_bid or not optimal_ask:
+                return []
+
+            # Determine sides based on midpoint range (Polymarket reward rule)
+            mid = (optimal_bid + optimal_ask) / 2
+            sides = []
+            if 0.10 <= mid <= 0.90:
+                # Single-sided OK; post both for better reward score
+                sides = [
+                    {"platform": "polymarket", "side": "BUY", "price": optimal_bid,
+                     "token": "yes", "_market_key": opportunity.get("_market_key", "")},
+                    {"platform": "polymarket", "side": "SELL", "price": optimal_ask,
+                     "token": "yes", "_market_key": opportunity.get("_market_key", "")},
+                ]
+            else:
+                # Outside range: must post both sides anyway for reward eligibility
+                sides = [
+                    {"platform": "polymarket", "side": "BUY", "price": optimal_bid,
+                     "token": "yes", "_market_key": opportunity.get("_market_key", "")},
+                    {"platform": "polymarket", "side": "SELL", "price": optimal_ask,
+                     "token": "yes", "_market_key": opportunity.get("_market_key", "")},
+                ]
+
+            legs = sides
+        elif opp_type == "KalshiRewards":
+            # Layer 3: Kalshi liquidity incentive program — resting limit orders
+            optimal_bid = opportunity.get("optimal_bid", 0)
+            optimal_ask = opportunity.get("optimal_ask", 0)
+            reward_size = opportunity.get("size", size)
+            market_ticker = opportunity.get("market_ticker", "")
+
+            if not optimal_bid or not optimal_ask or not market_ticker:
+                return []
+
+            sides = [
+                {"platform": "kalshi", "side": "yes", "action": "buy",
+                 "price": optimal_bid, "_ticker": market_ticker},
+                {"platform": "kalshi", "side": "yes", "action": "sell",
+                 "price": optimal_ask, "_ticker": market_ticker},
+            ]
+
+            legs = sides
         elif opp_type == "MarketMake":
             # Layer 3: market making — bid+ask pair
             legs = self._build_mm_legs(opportunity, size)
