@@ -511,7 +511,30 @@ a:hover { text-decoration: underline; }
             </tr>
           </thead>
           <tbody id="leaderboard-body">
-            <!-- Populated by JavaScript -->
+            <!-- Strategy rows populated by JavaScript -->
+          </tbody>
+        </table>
+        <!-- Rewards strategy row (separate table for visual distinction) -->
+        <table class="tbl" style="margin-top:12px;">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th class="right">Trading P&L</th>
+              <th class="right">Daily Yield</th>
+              <th class="right">Total P&L</th>
+              <th class="right">Resting Orders</th>
+              <th class="right">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="rewards-row" data-strategy="Rewards" style="background-color:var(--blue-dim);">
+              <td>Liquidity Rewards</td>
+              <td id="rewards-trading-pnl" class="mono right">$0.00</td>
+              <td id="rewards-yield-daily" class="mono right">$0.00/day</td>
+              <td id="rewards-total-pnl" class="mono right">$0.00</td>
+              <td id="rewards-resting-count" class="right">0</td>
+              <td id="rewards-status" class="right">—</td>
+            </tr>
           </tbody>
         </table>
         <p id="leaderboard-empty" style="display:none;" class="empty">No strategy data available</p>
@@ -1154,6 +1177,20 @@ function renderLeaderboard(data) {
 }
 
 // ---------------------------------------------------------------------------
+// Rewards row update
+// ---------------------------------------------------------------------------
+function updateRewardsRow(status) {
+  if (!status || !status.rewards) return;
+
+  const rewards = status.rewards;
+  $('rewards-trading-pnl').textContent = fmtUSD(rewards.trading_pnl || 0);
+  $('rewards-yield-daily').textContent = fmtUSD(rewards.estimated_daily_yield_usdc || 0) + '/day';
+  $('rewards-total-pnl').textContent = fmtUSD((rewards.trading_pnl || 0) + (rewards.estimated_daily_yield_usdc || 0));
+  $('rewards-resting-count').textContent = rewards.resting_order_count || 0;
+  $('rewards-status').textContent = (rewards.resting_order_count || 0) > 0 ? 'Active' : '—';
+}
+
+// ---------------------------------------------------------------------------
 // Main refresh loop
 // ---------------------------------------------------------------------------
 async function refresh() {
@@ -1182,6 +1219,7 @@ async function refresh() {
   ]);
 
   renderStatus(status);
+  updateRewardsRow(status);
   renderHealth(health);
   renderSlippage(slippage);
   renderCumulative(health);
