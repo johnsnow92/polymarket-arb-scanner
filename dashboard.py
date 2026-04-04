@@ -45,6 +45,8 @@ class _DashboardState:
         self.resolution_snipes = 0
         self.convergence_signals = 0
         self.signal_sources_active = 0
+        # Analytics (MON-01): per-strategy P&L metrics
+        self.strategy_metrics: list[dict] = []
 
     def to_dict(self) -> dict:
         return {
@@ -62,6 +64,7 @@ class _DashboardState:
             "resolution_snipes": self.resolution_snipes,
             "convergence_signals": self.convergence_signals,
             "signal_sources_active": self.signal_sources_active,
+            "strategy_metrics": self.strategy_metrics,
         }
 
 

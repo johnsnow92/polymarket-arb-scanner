@@ -138,9 +138,21 @@ def get_strategy_metrics(
 
 
 def main():
-    """CLI entry point for analytics script."""
+    """CLI entry point for analytics script.
+
+    Supports multiple output formats and configurable lookback period.
+    Returns 0 on success, 1 on error.
+    """
     parser = argparse.ArgumentParser(
-        description="Per-strategy P&L analytics from trades.db using DuckDB"
+        description="Per-strategy P&L analytics from trades.db using DuckDB",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python scripts/analytics.py
+  python scripts/analytics.py --output-format csv
+  python scripts/analytics.py --lookback-days 30 --output-format table
+  python scripts/analytics.py --db-path /var/data/trades.db
+        """
     )
     parser.add_argument(
         "--db-path",
@@ -157,7 +169,7 @@ def main():
         "--output-format",
         choices=["json", "csv", "table"],
         default="json",
-        help="Output format (default: json)"
+        help="Output format: json, csv, or table (default: json)"
     )
 
     args = parser.parse_args()
