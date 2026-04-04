@@ -1253,11 +1253,13 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     dashboard_state.mm_total_exposure = mm_status["total_exposure"]
 
                 # Update strategy metrics (MON-01: per-strategy P&L analytics)
+                # Also update leaderboard (MON-02: strategy leaderboard endpoint)
                 try:
                     data_dir = config.DATA_DIR if hasattr(config, 'DATA_DIR') else "."
                     db_path = f"{data_dir}/trades.db"
                     metrics = get_strategy_metrics(db_path=db_path, lookback_days=7)
                     dashboard_state.strategy_metrics = metrics
+                    dashboard_state.update_strategy_metrics(metrics)
                     if metrics:
                         logger.info("Updated strategy metrics: %d strategies", len(metrics))
                 except Exception as e:
