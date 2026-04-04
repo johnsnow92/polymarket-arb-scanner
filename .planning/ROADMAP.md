@@ -62,9 +62,9 @@ Plans:
 - [x] 06-01-PLAN.md — DuckDB analytics infrastructure, per-strategy P&L queries, CLI script
 - [x] 06-02-PLAN.md — Dashboard leaderboard endpoint and HTML UI with strategy metrics table
 - [x] 06-03-PLAN.md — Per-strategy loss streak alerts and zero-opportunity period detection
-- [ ] 06-04-PLAN.md — WS heartbeat monitoring, stale feed detection, executor integration
-- [ ] 06-05-PLAN.md — Hedger validation tests across all 8 trading platforms
-- [ ] 06-06-PLAN.md — Credential health checker, per-platform probes, pre-expiry alerts
+- [x] 06-04-PLAN.md — WS heartbeat monitoring, stale feed detection, executor integration
+- [x] 06-05-PLAN.md — Hedger validation tests across all 8 trading platforms
+- [x] 06-06-PLAN.md — Credential health checker, per-platform probes, pre-expiry alerts
 
 ### Phase 7: Liquidity Rewards
 **Goal**: Bot earns exchange liquidity rewards by resting limit orders on Polymarket and Kalshi
