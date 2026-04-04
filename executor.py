@@ -216,13 +216,18 @@ class ArbitrageExecutor:
 
         _exec_start = time.time()
 
-        # 1. Re-validate prices
-        _reval_result = True if self.dry_run else self._revalidate(opportunity, self.price_cache)
-        if not _reval_result:
+        # 1. Re-validate prices (always run for REVAL| calibration logging)
+        _reval_result = self._revalidate(opportunity, self.price_cache)
+        if not _reval_result and not self.dry_run:
             self._log_skipped(opportunity, "stale_prices")
             if _metrics:
                 _metrics.inc("revalidation_failures", {"type": opp_type, "reason": "price_degraded"})
             return False
+        if not _reval_result and self.dry_run:
+            logger.info("%sRevalidation would reject (calibration only)", prefix)
+            if _metrics:
+                _metrics.inc("revalidation_failures", {"type": opp_type, "reason": "price_degraded_dryrun"})
+            # Continue in dry-run — log the rejection but don't skip
 
         # 2. Risk gate (uses cached balances to avoid redundant API calls)
         balances = self._get_cached_balances(opp_type)
