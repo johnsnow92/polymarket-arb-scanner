@@ -1,0 +1,79 @@
+{
+  "markets": [
+    {
+      "conditionId": "0x123abc456def789",
+      "question": "Will ETH price exceed $3500 by June 30, 2026?",
+      "outcomes": ["Yes", "No"],
+      "incentives": {
+        "min_incentive_size": 5.0,
+        "max_incentive_spread": 0.05,
+        "pool_size_usdc": 500.0,
+        "status": "active"
+      },
+      "prices": {
+        "bid": 0.72,
+        "ask": 0.73,
+        "last": 0.725
+      }
+    },
+    {
+      "conditionId": "0x456def789ghi012",
+      "question": "Will Bitcoin hit $100k by EOY 2026?",
+      "outcomes": ["Yes", "No"],
+      "incentives": {
+        "min_incentive_size": 10.0,
+        "max_incentive_spread": 0.08,
+        "pool_size_usdc": 1000.0,
+        "status": "active"
+      },
+      "prices": {
+        "bid": 0.65,
+        "ask": 0.66,
+        "last": 0.655
+      }
+    },
+    {
+      "conditionId": "0x789ghi012jkl345",
+      "question": "Will US Fed cut rates in Q3 2026?",
+      "outcomes": ["Yes", "No"],
+      "incentives": {
+        "min_incentive_size": 2.0,
+        "max_incentive_spread": 0.03,
+        "pool_size_usdc": 250.0,
+        "status": "active"
+      },
+      "prices": {
+        "bid": 0.42,
+        "ask": 0.43,
+        "last": 0.425
+      }
+    },
+    {
+      "conditionId": "0xabc012jkl345mno",
+      "question": "Will Apple stock split in 2026?",
+      "outcomes": ["Yes", "No"],
+      "incentives": null,
+      "prices": {
+        "bid": 0.35,
+        "ask": 0.37,
+        "last": 0.36
+      }
+    },
+    {
+      "conditionId": "0ndef345mno678pqr",
+      "question": "Will Tesla revenue exceed $100B in 2026?",
+      "outcomes": ["Yes", "No"],
+      "incentives": {
+        "min_incentive_size": 8.0,
+        "max_incentive_spread": 0.06,
+        "pool_size_usdc": 750.0,
+        "status": "active"
+      },
+      "prices": {
+        "bid": 0.58,
+        "ask": 0.59,
+        "last": 0.585
+      }
+    }
+  ]
+}
