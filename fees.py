@@ -1120,3 +1120,67 @@ def net_profit_rewards(bid_price: float, ask_price: float, size: float = 1.0,
         "ask": ask_price,
     }
 
+
+# ---------------------------------------------------------------------------
+# Order book imbalance fee calculations (Layer 4 - Informed Trading)
+# ---------------------------------------------------------------------------
+
+def net_profit_imbalance(
+    entry_price: float,
+    exit_price: float,
+    size: float,
+    platform: str = "polymarket",
+) -> float:
+    """Calculate net profit for an order book imbalance signal execution.
+
+    Imbalance trades are Layer 4 (informed trading) based on directional signals
+    from bid/ask volume ratios. Execution uses taker orders (time-sensitive) because
+    the signal may decay quickly. Entry and exit both incur taker fees.
+
+    Args:
+        entry_price: Entry price in [0, 1] (where we buy the predicted direction).
+        exit_price: Exit price in [0, 1] (where we sell to lock in profit).
+        size: Trade size in dollars.
+        platform: Platform for fee calculation ("polymarket", "kalshi", "gemini", etc.).
+
+    Returns:
+        Net profit in USD after fees. May be negative if signal was wrong.
+    """
+    if size <= 0:
+        return 0.0
+
+    if platform == "polymarket":
+        # Polymarket: both entry and exit pay taker fee at trade time
+        # Fee formula: POLYMARKET_DEFAULT_TAKER_RATE * size * price * (1 - price)
+        entry_fee = polymarket_taker_fee(entry_price, contracts=1) * size
+        exit_fee = polymarket_taker_fee(exit_price, contracts=1) * size
+        gas = POLYGON_GAS_ESTIMATE * 2  # Two Polygon transactions
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee - gas
+
+    elif platform == "kalshi":
+        # Kalshi: both entry and exit pay taker fee
+        # Fee formula: ceil(0.07 * price * (1 - price)) per contract in cents
+        entry_fee = kalshi_taker_fee(entry_price, contracts=1) * size
+        exit_fee = kalshi_taker_fee(exit_price, contracts=1) * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    elif platform == "gemini":
+        # Gemini: 5% taker fee (or GEMINI_TAKER_RATE if defined)
+        # Fee = min(price, 1 - price) * fee_rate
+        entry_fee = min(entry_price, 1.0 - entry_price) * GEMINI_TAKER_RATE * size
+        exit_fee = min(exit_price, 1.0 - exit_price) * GEMINI_TAKER_RATE * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    else:
+        # Default: use conservative taker fee estimate (1%)
+        fee_rate = 0.01
+        entry_fee = entry_price * fee_rate * size
+        exit_fee = exit_price * fee_rate * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    return net_profit
+
