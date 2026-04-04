@@ -819,14 +819,34 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             except Exception as exc:
                 logger.debug("Priority consumer error: %s", exc)
 
+    async def _monitor_feed_staleness():
+        """Background task: mark stale feeds every 5 seconds.
+
+        Checks if WebSocket feeds have gone silent for 30+ seconds and marks
+        all cached prices from stale feeds with _stale: true. When feeds
+        recover, clears the stale flag.
+        """
+        while not shutdown_event.is_set():
+            try:
+                feed_manager.mark_stale_feeds(stale_threshold_seconds=30.0)
+                await asyncio.sleep(5)  # Check every 5 seconds
+            except Exception as e:
+                logger.warning("Feed staleness check failed: %s", e)
+                await asyncio.sleep(5)  # Retry after 5 seconds
+
     async def _continuous_loop():
         ws_task = None
         priority_consumer_task = None
+        stale_monitor_task = None
         scan_count = 0
 
         # Start priority consumer coroutine as a background task
         priority_consumer_task = asyncio.create_task(_priority_consumer())
         logger.info("Priority execution consumer started.")
+
+        # Start feed staleness monitor as a background task
+        stale_monitor_task = asyncio.create_task(_monitor_feed_staleness())
+        logger.info("Feed staleness monitor started.")
 
         while not shutdown_event.is_set():
             scan_count += 1
@@ -1555,6 +1575,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             priority_consumer_task.cancel()
             try:
                 await priority_consumer_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if stale_monitor_task:
+            stale_monitor_task.cancel()
+            try:
+                await stale_monitor_task
             except (asyncio.CancelledError, Exception):
                 pass
         logger.info("Shutdown complete.")
