@@ -23,6 +23,7 @@ class AlertType(str, Enum):
     BALANCE_LOW = "BALANCE_LOW"
     LOSS_SPIKE = "LOSS_SPIKE"
     ZERO_OPP_PERIOD = "ZERO_OPP_PERIOD"
+    ZERO_OPP = "ZERO_OPP"
 
 
 class Severity(str, Enum):
@@ -67,6 +68,12 @@ class AlertManager:
 
         # Loss streak tracking
         self._trade_results: deque[bool] = deque(maxlen=100)
+
+        # MON-03: Per-strategy loss streak tracking
+        # strategy_type -> deque of trade results (True=win, False=loss)
+        self._strategy_losses: dict[str, deque] = {}
+        # strategy_type -> timestamp of last opportunity found
+        self._strategy_last_opp_time: dict[str, float] = {}
 
         # Recent alerts ring buffer
         self._recent_alerts: deque[dict] = deque(maxlen=200)
@@ -285,6 +292,90 @@ class AlertManager:
                 {"consecutive_empty_scans": self._zero_opp_count},
             )
         return False
+
+    def check_strategy_loss_streak(self, strategy_type: str, trade_won: bool) -> bool:
+        """Record a per-strategy trade result and fire alert after 3 consecutive losses.
+
+        Args:
+            strategy_type: Strategy name (e.g., "binary", "cross", "kalshi").
+            trade_won: True if trade was profitable, False if it lost.
+
+        Returns:
+            True if a LOSS_STREAK alert was fired, False otherwise.
+        """
+        try:
+            # Initialize per-strategy deque if first time seeing this strategy
+            if strategy_type not in self._strategy_losses:
+                self._strategy_losses[strategy_type] = deque(maxlen=100)
+
+            # Append trade result
+            self._strategy_losses[strategy_type].append(trade_won)
+
+            # Count consecutive trailing losses (from end backwards)
+            losses = 0
+            for result in reversed(self._strategy_losses[strategy_type]):
+                if not result:  # False = loss
+                    losses += 1
+                else:
+                    break
+
+            # Fire alert only on exact 3 losses (first time hitting threshold)
+            if losses == 3:
+                return self.alert(
+                    AlertType.LOSS_STREAK,
+                    Severity.WARNING,
+                    f"Strategy {strategy_type}: 3 consecutive losses",
+                    {
+                        "strategy": strategy_type,
+                        "loss_count": losses,
+                        "lookback_trades": len(self._strategy_losses[strategy_type]),
+                    },
+                )
+        except Exception as e:
+            logger.warning("Error in check_strategy_loss_streak: %s", str(e))
+
+        return False
+
+    def check_zero_opp_period_per_strategy(self, strategy_opportunities: dict[str, int]) -> None:
+        """Check per-strategy zero-opportunity periods (30-minute windows).
+
+        Args:
+            strategy_opportunities: Dict mapping strategy_type -> count of opportunities found in this scan.
+        """
+        try:
+            now = time.time()
+            for strategy_type, count in strategy_opportunities.items():
+                if count > 0:
+                    # Update last opportunity time for this strategy
+                    self._strategy_last_opp_time[strategy_type] = now
+                else:
+                    # Check if this strategy has been idle for 30+ minutes (1800 seconds)
+                    last_opp = self._strategy_last_opp_time.get(strategy_type, now)
+                    if now - last_opp >= 1800:
+                        # Fire alert (rate limiting handled by AlertManager.alert)
+                        self.alert(
+                            AlertType.ZERO_OPP_PERIOD,
+                            Severity.INFO,
+                            f"Strategy {strategy_type}: no opportunities for 30+ minutes",
+                            {"strategy": strategy_type, "idle_seconds": int(now - last_opp)},
+                        )
+        except Exception as e:
+            logger.warning("Error in check_zero_opp_period_per_strategy: %s", str(e))
+
+    def record_strategy_opportunity(self, strategy_type: str) -> None:
+        """Record that an opportunity was found for a strategy.
+
+        Helper called from continuous.py to ensure tracking is initialized.
+
+        Args:
+            strategy_type: Strategy name to record.
+        """
+        try:
+            now = time.time()
+            if strategy_type not in self._strategy_last_opp_time:
+                self._strategy_last_opp_time[strategy_type] = now
+        except Exception as e:
+            logger.warning("Error in record_strategy_opportunity: %s", str(e))
 
     def get_recent_alerts(self, count: int = 20) -> list[dict]:
         """Return the most recent alerts.
