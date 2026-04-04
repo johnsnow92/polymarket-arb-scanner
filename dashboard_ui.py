@@ -491,6 +491,35 @@ a:hover { text-decoration: underline; }
     </div>
   </div>
 
+  <!-- Strategy Leaderboard (MON-02) -->
+  <div class="section">
+    <div class="section-header">Strategy Leaderboard (7-Day Rolling)</div>
+    <div class="section-body">
+      <div id="leaderboard-container">
+        <p id="leaderboard-loading">Loading strategy metrics...</p>
+        <table id="leaderboard-table" class="tbl" style="display:none;">
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th class="right">Trades</th>
+              <th class="right">Wins</th>
+              <th class="right">Win Rate</th>
+              <th class="right">Total P&L</th>
+              <th class="right">Avg P&L</th>
+              <th class="right">Annual Sharpe</th>
+              <th class="right">Max Drawdown</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboard-body">
+            <!-- Populated by JavaScript -->
+          </tbody>
+        </table>
+        <p id="leaderboard-empty" style="display:none;" class="empty">No strategy data available</p>
+      </div>
+      <p id="leaderboard-timestamp" style="font-size:0.85rem; color:var(--text-muted); margin-top:8px;">—</p>
+    </div>
+  </div>
+
 </div>
 
 <div class="footer">
@@ -1053,6 +1082,78 @@ async function toggleKillSwitch() {
 }
 
 // ---------------------------------------------------------------------------
+// Strategy Leaderboard (MON-02)
+// ---------------------------------------------------------------------------
+function formatPercent(val) {
+  return val === null || val === undefined || val === 'N/A' ? 'N/A' : (parseFloat(val) * 100).toFixed(1) + '%';
+}
+
+function formatCurrency(val) {
+  return val === null || val === undefined || val === 'N/A' ? 'N/A' : '$' + parseFloat(val).toFixed(4);
+}
+
+function formatSharpe(val) {
+  return val === null || val === undefined || val === 'N/A' ? 'N/A' : parseFloat(val).toFixed(3);
+}
+
+function renderLeaderboard(data) {
+  const tbody = $('leaderboard-body');
+  const table = $('leaderboard-table');
+  const loading = $('leaderboard-loading');
+  const empty = $('leaderboard-empty');
+  const timestamp = $('leaderboard-timestamp');
+
+  // Clear tbody safely
+  while (tbody.firstChild) {
+    tbody.removeChild(tbody.firstChild);
+  }
+
+  if (!data || !data.strategies || data.strategies.length === 0) {
+    empty.style.display = 'block';
+    table.style.display = 'none';
+    loading.style.display = 'none';
+    timestamp.textContent = '—';
+    return;
+  }
+
+  data.strategies.forEach(strategy => {
+    const row = document.createElement('tr');
+
+    const cells = [
+      strategy.strategy || 'unknown',
+      String(strategy.trade_count || 0),
+      String(strategy.wins || 0),
+      formatPercent(strategy.win_rate),
+      formatCurrency(strategy.total_pnl),
+      formatCurrency(strategy.avg_pnl),
+      formatSharpe(strategy.annual_sharpe),
+      formatCurrency(strategy.max_drawdown)
+    ];
+
+    cells.forEach(cellText => {
+      const cell = document.createElement('td');
+      cell.textContent = cellText;
+      if (cellText.startsWith('$') || cellText.endsWith('%')) {
+        cell.className = 'mono right';
+      }
+      row.appendChild(cell);
+    });
+
+    tbody.appendChild(row);
+  });
+
+  table.style.display = 'table';
+  loading.style.display = 'none';
+  empty.style.display = 'none';
+
+  // Update timestamp
+  if (data.timestamp) {
+    const lastUpdated = new Date(data.timestamp * 1000).toLocaleTimeString();
+    timestamp.textContent = 'Last updated: ' + lastUpdated;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main refresh loop
 // ---------------------------------------------------------------------------
 async function refresh() {
@@ -1061,7 +1162,7 @@ async function refresh() {
 
   const [status, health, slippage, history, strategies, positions,
          platforms, trades, opportunities, alerts, pauseState, failures,
-         strategyPnl, balancesData, rebalanceData] = await Promise.all([
+         strategyPnl, balancesData, rebalanceData, leaderboardData] = await Promise.all([
     api('/status'),
     api('/api/health'),
     api('/api/slippage'),
@@ -1077,6 +1178,7 @@ async function refresh() {
     api('/api/strategy-pnl'),
     api('/api/balances'),
     api('/api/rebalance'),
+    api('/api/strategy-leaderboard'),
   ]);
 
   renderStatus(status);
@@ -1096,6 +1198,7 @@ async function refresh() {
   renderStrategyPnlTable(strategyPnl);
   updateBalancesChart(balancesData);
   renderBalancesTable(balancesData, rebalanceData);
+  renderLeaderboard(leaderboardData);
 
   // Positions subtitle
   if (platforms && platforms.length > 0) {
