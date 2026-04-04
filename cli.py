@@ -64,6 +64,8 @@ from scans import (
     scan_stale_prices,
     scan_resolution_snipes,
     scan_convergence,
+    scan_polymarket_rewards,
+    scan_kalshi_rewards,
 )
 from config import (
     DEFAULT_MIN_PROFIT,
@@ -90,6 +92,7 @@ from config import (
     EVENT_DIVERGENCE_THRESHOLD as CONFIG_EVENT_DIVERGENCE,
     EVENT_MONITOR_ENABLED as CONFIG_EVENT_MONITOR,
     CONCURRENT_EXECUTION as CONFIG_CONCURRENT_EXECUTION,
+    REWARDS_ENABLED as CONFIG_REWARDS_ENABLED,
 )
 
 # Load .env from project dir first, then ~/.claude/.env as fallback
@@ -503,6 +506,35 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         except Exception as exc:
             logger.warning("Market making scan failed: %s", exc)
 
+    # Rewards scanning (Layer 3: liquidity rewards)
+    if args.mode in ("all", "rewards") and CONFIG_REWARDS_ENABLED:
+        logger.info("--- Rewards Scan ---")
+        try:
+            # Polymarket rewards scan
+            if poly_markets:
+                from market_maker import RewardTracker
+                reward_tracker = RewardTracker()
+                pm_reward_opps = scan_polymarket_rewards(
+                    poly_markets, reward_tracker, min_pool_usdc=10.0
+                )
+                all_opportunities.extend(pm_reward_opps)
+                logger.info("Found %d Polymarket reward opportunities.", len(pm_reward_opps))
+        except Exception as e:
+            logger.error("Polymarket rewards scan failed: %s", e)
+
+        try:
+            # Kalshi rewards scan
+            if kalshi_client:
+                from market_maker import KalshiRewardTracker
+                kalshi_reward_tracker = KalshiRewardTracker()
+                k_reward_opps = scan_kalshi_rewards(
+                    kalshi_client, kalshi_reward_tracker, min_pool_usdc=10.0
+                )
+                all_opportunities.extend(k_reward_opps)
+                logger.info("Found %d Kalshi reward opportunities.", len(k_reward_opps))
+        except Exception as e:
+            logger.error("Kalshi rewards scan failed: %s", e)
+
     # Filter by minimum depth if specified
     if args.min_depth > 0:
         before = len(all_opportunities)
@@ -778,9 +810,9 @@ def main():
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
                  "spread", "betfair", "smarkets", "sxbet", "matchbook",
                  "gemini", "ibkr", "event", "triangular", "multi-cross",
-                 "stale", "resolution", "convergence", "mm"],
+                 "stale", "resolution", "convergence", "mm", "rewards"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards",
     )
     parser.add_argument(
         "--min-profit",
