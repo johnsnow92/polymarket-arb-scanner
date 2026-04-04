@@ -47,6 +47,21 @@ class _DashboardState:
         self.signal_sources_active = 0
         # Analytics (MON-01): per-strategy P&L metrics
         self.strategy_metrics: list[dict] = []
+        # Leaderboard (MON-02): strategy leaderboard state
+        self.strategy_leaderboard: list[dict] = []
+        self.leaderboard_updated_at: float = 0
+
+    def update_strategy_metrics(self, strategy_metrics: list[dict]) -> None:
+        """Update dashboard with strategy leaderboard metrics.
+
+        Args:
+            strategy_metrics: List of strategy dicts with per-strategy metrics.
+                Each dict should contain: strategy, trade_count, wins, win_rate,
+                total_pnl, avg_pnl, annual_sharpe, max_drawdown.
+        """
+        self.strategy_leaderboard = strategy_metrics
+        self.leaderboard_updated_at = time.time()
+        logger.debug("Updated strategy leaderboard: %d strategies", len(strategy_metrics))
 
     def to_dict(self) -> dict:
         return {
@@ -258,6 +273,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/pause": self._handle_pause_get,
             "/api/db-stats": self._handle_db_stats,
             "/api/strategy-pnl": self._handle_strategy_pnl,
+            "/api/strategy-leaderboard": self._handle_strategy_leaderboard,
             "/api/balances": self._handle_balances,
             "/api/rebalance": self._handle_rebalance,
             "/api/validation": self._handle_validation,
@@ -546,6 +562,22 @@ class _Handler(BaseHTTPRequestHandler):
             logger.debug("Dashboard strategy-pnl fetch failed: %s", e)
             strategies = []
         _send_json(self, {"strategies": strategies})
+
+    def _handle_strategy_leaderboard(self):
+        """GET /api/strategy-leaderboard — strategy leaderboard with 7-day rolling metrics.
+
+        Returns:
+            JSON with ``strategies`` list (sorted by total_pnl descending),
+            ``timestamp`` (last update), and ``lookback_days`` (7).
+            Each strategy dict has: strategy, trade_count, wins, win_rate,
+            total_pnl, avg_pnl, annual_sharpe, max_drawdown.
+        """
+        response = {
+            "strategies": state.strategy_leaderboard,
+            "timestamp": state.leaderboard_updated_at,
+            "lookback_days": 7,
+        }
+        _send_json(self, response)
 
     def _handle_balances(self):
         """GET /api/balances — cached platform balances with total and timestamp.
