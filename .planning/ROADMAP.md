@@ -23,7 +23,7 @@
 
 ## Phases
 
-- [ ] **Phase 5: Deploy & Execute** - Unblock production execution and get the first profitable trade
+- [x] **Phase 5: Deploy & Execute** - Unblock production execution and get the first profitable trade
 - [ ] **Phase 6: Monitor & Harden** - Full observability and reliability for all 20 strategies
 - [ ] **Phase 7: Liquidity Rewards** - Capture Polymarket and Kalshi liquidity incentive programs
 - [ ] **Phase 8: Market Signal Strategies** - Add four signal-driven strategies to expand edge sources
@@ -41,7 +41,7 @@
   3. Revalidation applies layer-specific floors: 2% Layer 1, 5% Layer 2, 3% Layer 3, 10% Layer 4
   4. All 8 platform fee rates verified and corrected against current 2026 schedules
   5. At least one autonomous round-trip trade completes with net positive P&L recorded in trades.db
-**Plans:** 3 plans
+**Plans:** 3 plans (completed)
 Plans:
 - [x] 05-01-PLAN.md — Fee model overhaul + layer/revalidation config infrastructure
 - [x] 05-02-PLAN.md — Layer tagging, layer-aware revalidation, calibration logging, maker routing
@@ -57,7 +57,14 @@ Plans:
   3. Webhook alert fires within 5 minutes when any strategy hits a loss streak or zero-opportunity period
   4. WS feed disconnects are detected within 30 seconds and stale price markers appear on affected markets
   5. API credential health check runs every 30 minutes and alerts before any credential expires
-**Plans**: TBD
+**Plans:** 6 plans
+Plans:
+- [ ] 06-01-PLAN.md — DuckDB analytics infrastructure, per-strategy P&L queries, CLI script
+- [ ] 06-02-PLAN.md — Dashboard leaderboard endpoint and HTML UI with strategy metrics table
+- [ ] 06-03-PLAN.md — Per-strategy loss streak alerts and zero-opportunity period detection
+- [ ] 06-04-PLAN.md — WS heartbeat monitoring, stale feed detection, executor integration
+- [ ] 06-05-PLAN.md — Hedger validation tests across all 8 trading platforms
+- [ ] 06-06-PLAN.md — Credential health checker, per-platform probes, pre-expiry alerts
 
 ### Phase 7: Liquidity Rewards
 **Goal**: Bot earns exchange liquidity rewards by resting limit orders on Polymarket and Kalshi
@@ -98,8 +105,8 @@ Phases execute in numeric order: 5 → 6 → 7 → 8 → 9
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 5. Deploy & Execute | v2.0 | 0/3 | Planning complete | - |
-| 6. Monitor & Harden | v2.0 | 0/TBD | Not started | - |
+| 5. Deploy & Execute | v2.0 | 3/3 | Planning complete | ✓ |
+| 6. Monitor & Harden | v2.0 | 0/6 | Planning complete | - |
 | 7. Liquidity Rewards | v2.0 | 0/TBD | Not started | - |
 | 8. Market Signal Strategies | v2.0 | 0/TBD | Not started | - |
 | 9. Structural Alpha Strategies | v2.0 | 0/TBD | Not started | - |
