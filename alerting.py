@@ -24,6 +24,7 @@ class AlertType(str, Enum):
     LOSS_SPIKE = "LOSS_SPIKE"
     ZERO_OPP_PERIOD = "ZERO_OPP_PERIOD"
     ZERO_OPP = "ZERO_OPP"
+    CREDENTIAL_FAILURE = "CREDENTIAL_FAILURE"
 
 
 class Severity(str, Enum):

@@ -408,6 +408,16 @@ ALERT_RATE_LIMIT_SECONDS = _env_float("ALERT_RATE_LIMIT_SECONDS", "300")
 ALERT_LOSS_STREAK_THRESHOLD = _env_int("ALERT_LOSS_STREAK_THRESHOLD", "5")
 ALERT_BALANCE_LOW_THRESHOLD = _env_float("ALERT_BALANCE_LOW_THRESHOLD", "10.0")
 
+# Credential health checks (HARD-03)
+CREDENTIAL_HEALTH_CHECK_INTERVAL = _env_int("CREDENTIAL_HEALTH_CHECK_INTERVAL", "1800")  # 30 min
+CREDENTIAL_HEALTH_CHECK_TIMEOUT = _env_int("CREDENTIAL_HEALTH_CHECK_TIMEOUT", "10")  # per-probe
+CREDENTIAL_FAILURE_THRESHOLD = _env_int("CREDENTIAL_FAILURE_THRESHOLD", "3")  # consecutive
+CREDENTIAL_EXPIRY_WINDOW = _env_int("CREDENTIAL_EXPIRY_WINDOW", "86400")  # 24 hours
+
+# Optional: time-limited token expiry timestamps (Unix time)
+BETFAIR_TOKEN_EXPIRY_TIMESTAMP = _env_int("BETFAIR_TOKEN_EXPIRY_TIMESTAMP", "0")
+SMARKETS_SESSION_EXPIRY_TIMESTAMP = _env_int("SMARKETS_SESSION_EXPIRY_TIMESTAMP", "0")
+
 # ---------------------------------------------------------------------------
 # Dynamic fee reload intervals and backtest scheduling
 # ---------------------------------------------------------------------------

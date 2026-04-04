@@ -15,6 +15,7 @@ from display import display_results
 from dashboard import state as dashboard_state
 from recovery import reconcile_orphaned_positions
 from scripts.analytics import get_strategy_metrics
+from credential_health import CredentialHealthChecker
 from fees import (
     net_profit_binary_internal,
     net_profit_negrisk_internal,
@@ -755,6 +756,30 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     except Exception:
         _alert_manager = None
 
+    # Initialize credential health checker
+    platform_clients = {
+        "polymarket": None,  # Will be set from polymarket_api module functions
+        "kalshi": kalshi_client,
+        "betfair": extra_clients.get("betfair"),
+        "smarkets": extra_clients.get("smarkets"),
+        "sxbet": extra_clients.get("sxbet"),
+        "matchbook": extra_clients.get("matchbook"),
+        "gemini": extra_clients.get("gemini"),
+        "ibkr": extra_clients.get("ibkr"),
+    }
+    # Remove None clients
+    platform_clients = {k: v for k, v in platform_clients.items() if v is not None}
+
+    health_checker = None
+    if _alert_manager and platform_clients:
+        from config import CREDENTIAL_HEALTH_CHECK_INTERVAL
+        health_checker = CredentialHealthChecker(
+            platform_clients=platform_clients,
+            alert_manager=_alert_manager,
+            interval_seconds=CREDENTIAL_HEALTH_CHECK_INTERVAL,
+        )
+        logger.info("Credential health checker initialized for %d platforms", len(platform_clients))
+
     # Initialize WebSocket feed manager
     feed_manager = FeedManager(
         on_price_update=on_price_update,
@@ -834,10 +859,27 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 logger.warning("Feed staleness check failed: %s", e)
                 await asyncio.sleep(5)  # Retry after 5 seconds
 
+    async def _monitor_credential_health():
+        """Background task: check API credential health every 30 minutes.
+
+        Probes each platform's auth status with a cheap endpoint, detects
+        invalid credentials or approaching token expiry, and fires alerts.
+        """
+        while not shutdown_event.is_set():
+            try:
+                if health_checker:
+                    results = await health_checker.check_all_platforms()
+                    logger.info("Credential health check complete: %s", results)
+                await asyncio.sleep(1800)  # 30 minutes
+            except Exception as e:
+                logger.warning("Credential health check failed: %s", e)
+                await asyncio.sleep(1800)  # Retry after 30 minutes
+
     async def _continuous_loop():
         ws_task = None
         priority_consumer_task = None
         stale_monitor_task = None
+        health_monitor_task = None
         scan_count = 0
 
         # Start priority consumer coroutine as a background task
@@ -846,6 +888,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
         # Start feed staleness monitor as a background task
         stale_monitor_task = asyncio.create_task(_monitor_feed_staleness())
+
+        # Start credential health monitor as a background task
+        if health_checker:
+            health_monitor_task = asyncio.create_task(_monitor_credential_health())
+            logger.info("Credential health monitor started.")
         logger.info("Feed staleness monitor started.")
 
         while not shutdown_event.is_set():
@@ -1581,6 +1628,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             stale_monitor_task.cancel()
             try:
                 await stale_monitor_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if health_monitor_task:
+            health_monitor_task.cancel()
+            try:
+                await health_monitor_task
             except (asyncio.CancelledError, Exception):
                 pass
         logger.info("Shutdown complete.")
