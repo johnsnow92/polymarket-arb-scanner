@@ -354,7 +354,7 @@ class AlertManager:
                     if now - last_opp >= 1800:
                         # Fire alert (rate limiting handled by AlertManager.alert)
                         self.alert(
-                            AlertType.ZERO_OPP_PERIOD,
+                            AlertType.ZERO_OPP,
                             Severity.INFO,
                             f"Strategy {strategy_type}: no opportunities for 30+ minutes",
                             {"strategy": strategy_type, "idle_seconds": int(now - last_opp)},
