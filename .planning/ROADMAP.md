@@ -45,7 +45,7 @@
 Plans:
 - [x] 05-01-PLAN.md — Fee model overhaul + layer/revalidation config infrastructure
 - [x] 05-02-PLAN.md — Layer tagging, layer-aware revalidation, calibration logging, maker routing
-- [ ] 05-03-PLAN.md — Deploy to Railway, 72h calibration dry-run, enable first live trade
+- [x] 05-03-PLAN.md — Deploy to Railway, 72h calibration dry-run, enable first live trade
 
 ### Phase 6: Monitor & Harden
 **Goal**: Every strategy has observable P&L attribution, disconnects are detected, and the system is reliable enough to leave running unattended
