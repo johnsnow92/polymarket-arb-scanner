@@ -1437,7 +1437,31 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         logger.debug("Rebalance digest failed: %s", exc)
                     _last_rebalance_digest = _now
 
-                # Zero-opportunity anomaly detection (MONITOR-03)
+                # MON-03: Per-strategy zero-opportunity period detection (30-minute windows)
+                if _alert_manager:
+                    try:
+                        # Count opportunities per strategy
+                        strategy_opp_counts: dict[str, int] = {}
+                        for opp in all_opportunities:
+                            strategy_type = opp.get("type", "unknown")
+                            strategy_opp_counts[strategy_type] = strategy_opp_counts.get(strategy_type, 0) + 1
+
+                        # Check per-strategy zero-opp periods (30-min idle detection)
+                        _alert_manager.check_zero_opp_period_per_strategy(strategy_opp_counts)
+
+                        # Record strategy opportunities for tracking
+                        for strategy_type in strategy_opp_counts:
+                            _alert_manager.record_strategy_opportunity(strategy_type)
+
+                        logger.debug(
+                            "Scan cycle: %d opportunities across %d strategies",
+                            len(all_opportunities),
+                            len(strategy_opp_counts),
+                        )
+                    except Exception as e:
+                        logger.warning("Error in strategy opportunity detection: %s", str(e))
+
+                # Zero-opportunity anomaly detection (MONITOR-03 - overall period)
                 if _alert_manager:
                     try:
                         _alert_manager.check_zero_opp_period(len(all_opportunities))
