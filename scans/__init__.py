@@ -23,6 +23,7 @@ from scans.multi_cross import scan_multi_cross
 from scans.stale import scan_stale_prices
 from scans.resolution import scan_resolution_snipes
 from scans.convergence import scan_convergence
+from scans.rewards import scan_polymarket_rewards, scan_kalshi_rewards
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, capital_efficiency_score
 
 __all__ = [
@@ -49,6 +50,8 @@ __all__ = [
     "scan_stale_prices",
     "scan_resolution_snipes",
     "scan_convergence",
+    "scan_polymarket_rewards",
+    "scan_kalshi_rewards",
     "_refine_binary_with_clob",
     "_refine_negrisk_with_clob",
     "_refine_cross_with_clob",

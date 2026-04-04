@@ -1070,3 +1070,53 @@ def find_lowest_fee_path(
 
     return best
 
+
+def net_profit_rewards(bid_price: float, ask_price: float, size: float = 1.0,
+                       platform: str = "polymarket") -> dict:
+    """Calculate net profit for reward resting orders.
+
+    For rewards strategy, profit comes from two sources:
+    1. Spread capture (bid/ask spread on fills)
+    2. Reward payout (tracked separately in database)
+
+    This function calculates the spread profit per fill. Actual reward yield
+    is tracked separately via RewardTracker/KalshiRewardTracker in database.
+
+    Args:
+        bid_price: Resting bid price (0-1).
+        ask_price: Resting ask price (0-1).
+        size: Order size in dollars.
+        platform: "polymarket" or "kalshi".
+
+    Returns:
+        Dict with net_profit, spread, fees, net_roi, bid, ask keys.
+    """
+    mid = (bid_price + ask_price) / 2
+    spread = ask_price - bid_price
+
+    # Platform fees for resting limit orders (makers)
+    if platform == "polymarket":
+        # Polymarket maker fee: 0% for most cases, but conservative estimate of 0.5%
+        # in case of fee structures we're not aware of
+        fee_rate = 0.005
+    elif platform == "kalshi":
+        # Kalshi maker fee: lower than taker; use conservative 0.5% estimate
+        # Actual: ceil(KALSHI_MAKER_MULTIPLIER * P * (1 - P)) in cents
+        fee_rate = 0.005
+    else:
+        # Default conservative fee rate
+        fee_rate = 0.01
+
+    fees = spread * size * fee_rate
+    net_profit = spread * size - fees
+    net_roi = (net_profit / size) * 100 if size > 0 else 0.0
+
+    return {
+        "net_profit": net_profit,
+        "spread": spread,
+        "fees": fees,
+        "net_roi": net_roi,
+        "bid": bid_price,
+        "ask": ask_price,
+    }
+
