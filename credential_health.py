@@ -136,74 +136,67 @@ class CredentialHealthChecker:
         Returns:
             True if auth succeeded, False otherwise
         """
-        try:
-            client = self.clients.get(platform)
-            if not client:
-                logger.warning("No client found for platform: %s", platform)
-                return False
+        client = self.clients.get(platform)
+        if not client:
+            logger.warning("No client found for platform: %s", platform)
+            return False
 
-            endpoint_info = HEALTH_ENDPOINTS.get(platform)
-            if not endpoint_info:
-                logger.warning("No health endpoint defined for platform: %s", platform)
-                return False
+        endpoint_info = HEALTH_ENDPOINTS.get(platform)
+        if not endpoint_info:
+            logger.warning("No health endpoint defined for platform: %s", platform)
+            return False
 
-            method_name = endpoint_info["method"]
-            method = getattr(client, method_name, None)
-            if not method:
-                logger.warning(
-                    "Client %s has no method %s",
-                    platform,
-                    method_name,
-                )
-                return False
-
-            # Call method with timeout
-            args = endpoint_info["args"]
-            try:
-                result = await asyncio.wait_for(
-                    self._async_call(method, **args),
-                    timeout=10.0,
-                )
-                return result is not None
-            except asyncio.TimeoutError:
-                self._fire_credential_alert(
-                    platform,
-                    "INFO",
-                    f"Credential health check timeout for {platform}",
-                )
-                return False
-            except Exception as e:
-                error_msg = str(e).lower()
-                if any(
-                    keyword in error_msg
-                    for keyword in ["unauthorized", "forbidden", "invalid", "auth"]
-                ):
-                    self._fire_credential_alert(
-                        platform,
-                        "WARNING",
-                        f"Credential health check auth failure for {platform}: {e}",
-                    )
-                else:
-                    logger.debug(
-                        "Platform %s health check error (not auth): %s",
-                        platform,
-                        e,
-                    )
-                return False
-
-        except Exception as e:
-            logger.error(
-                "Unexpected error in _check_platform_health for %s: %s",
+        method_name = endpoint_info["method"]
+        method = getattr(client, method_name, None)
+        if not method:
+            logger.warning(
+                "Client %s has no method %s",
                 platform,
-                e,
-                exc_info=False,
+                method_name,
             )
             return False
+
+        # Call method with timeout
+        args = endpoint_info["args"]
+        try:
+            result = await asyncio.wait_for(
+                self._async_call(method, **args),
+                timeout=10.0,
+            )
+            return result is not None
+        except asyncio.TimeoutError:
+            self._fire_credential_alert(
+                platform,
+                "INFO",
+                f"Credential health check timeout for {platform}",
+            )
+            raise  # Re-raise so retry decorator can retry on timeout
+        except Exception as e:
+            error_msg = str(e).lower()
+            if any(
+                keyword in error_msg
+                for keyword in ["unauthorized", "forbidden", "invalid", "auth"]
+            ):
+                self._fire_credential_alert(
+                    platform,
+                    "WARNING",
+                    f"Credential health check auth failure for {platform}: {e}",
+                )
+            else:
+                logger.debug(
+                    "Platform %s health check error (not auth): %s",
+                    platform,
+                    e,
+                )
+            raise  # Re-raise so retry decorator can retry
 
     async def _async_call(self, func, **kwargs):
         """Wrapper to call a sync function asynchronously."""
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, func, **kwargs)
+        # Use functools.partial to bind kwargs before passing to executor
+        import functools
+        partial_func = functools.partial(func, **kwargs)
+        return await loop.run_in_executor(None, partial_func)
 
     def _fire_credential_alert(self, platform: str, severity: str, message: str):
         """Fire a credential health alert with rate limiting.
