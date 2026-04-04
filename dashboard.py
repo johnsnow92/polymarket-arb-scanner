@@ -19,6 +19,83 @@ _start_time = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
+# Rewards metrics helpers
+# ---------------------------------------------------------------------------
+
+def _estimate_reward_yield(reward_tracker) -> float:
+    """Estimate daily reward yield from RewardTracker active markets.
+
+    Args:
+        reward_tracker: RewardTracker instance or None.
+
+    Returns:
+        Estimated daily yield in USDC.
+    """
+    if not reward_tracker:
+        return 0.0
+
+    total_yield = 0.0
+    try:
+        # Access reward cache safely if it exists
+        if hasattr(reward_tracker, '_reward_cache'):
+            for market_key, reward_data in reward_tracker._reward_cache.items():
+                if isinstance(reward_data, dict):
+                    pool = reward_data.get("pool_size_usdc", 0)
+                    # Rough estimate: daily yield = pool_size / 30 days
+                    if pool > 0:
+                        daily_estimate = pool / 30
+                        total_yield += daily_estimate
+    except Exception as e:
+        logger.debug("Error estimating reward yield: %s", e)
+
+    return total_yield
+
+
+def _calculate_total_exposure(reward_tracker) -> float:
+    """Sum total capital deployed in reward resting orders.
+
+    Args:
+        reward_tracker: RewardTracker instance or None.
+
+    Returns:
+        Total exposure in USDC (0 if not tracked).
+    """
+    if not reward_tracker:
+        return 0.0
+
+    # Would need to track active order sizes in reward_tracker
+    # For now, return 0; can be enhanced with order tracking
+    return 0.0
+
+
+def _build_rewards_metrics(reward_tracker) -> dict:
+    """Build rewards metrics dict for /status endpoint.
+
+    Args:
+        reward_tracker: RewardTracker instance or None.
+
+    Returns:
+        Dict with rewards metrics keys, all zero if no tracker.
+    """
+    if not reward_tracker:
+        return {
+            "strategy_name": "Liquidity Rewards",
+            "resting_order_count": 0,
+            "estimated_daily_yield_usdc": 0.0,
+            "trading_pnl": 0.0,
+            "total_reward_exposure": 0.0,
+        }
+
+    return {
+        "strategy_name": "Liquidity Rewards",
+        "resting_order_count": getattr(reward_tracker, 'resting_order_count', 0),
+        "estimated_daily_yield_usdc": round(_estimate_reward_yield(reward_tracker), 2),
+        "trading_pnl": 0.0,  # Filled positions' P&L tracked separately in strategy metrics
+        "total_reward_exposure": round(_calculate_total_exposure(reward_tracker), 2),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Shared scanner state (updated by cli.py / continuous.py)
 # ---------------------------------------------------------------------------
 
@@ -50,6 +127,8 @@ class _DashboardState:
         # Leaderboard (MON-02): strategy leaderboard state
         self.strategy_leaderboard: list[dict] = []
         self.leaderboard_updated_at: float = 0
+        # Rewards tracking (Layer 3)
+        self.reward_tracker = None
 
     def update_strategy_metrics(self, strategy_metrics: list[dict]) -> None:
         """Update dashboard with strategy leaderboard metrics.
@@ -64,6 +143,9 @@ class _DashboardState:
         logger.debug("Updated strategy leaderboard: %d strategies", len(strategy_metrics))
 
     def to_dict(self) -> dict:
+        # Build rewards metrics if tracker is available
+        rewards_metrics = _build_rewards_metrics(self.reward_tracker)
+
         return {
             "scan_count": self.scan_count,
             "last_scan_time": self.last_scan_time,
@@ -80,6 +162,7 @@ class _DashboardState:
             "convergence_signals": self.convergence_signals,
             "signal_sources_active": self.signal_sources_active,
             "strategy_metrics": self.strategy_metrics,
+            "rewards": rewards_metrics,
         }
 
 

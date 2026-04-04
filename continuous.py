@@ -37,6 +37,8 @@ from config import (
     MAX_CONCURRENT_WS_EXECUTIONS as CONFIG_MAX_CONCURRENT_WS_EXECUTIONS,
     PRICE_CACHE_EVICTION_AGE as CONFIG_PRICE_CACHE_EVICTION_AGE,
     WS_STALE_FEED_SECONDS as CONFIG_WS_STALE_FEED_SECONDS,
+    REWARDS_ENABLED as CONFIG_REWARDS_ENABLED,
+    REWARDS_POLL_INTERVAL as CONFIG_REWARDS_POLL_INTERVAL,
 )
 
 # Conditional metrics import — never breaks if metrics.py is missing
@@ -69,6 +71,8 @@ from scans import (
     scan_ibkr_binary,
     scan_triangular,
     scan_multi_cross,
+    scan_polymarket_rewards,
+    scan_kalshi_rewards,
     _fetch_kalshi_data,
     capital_efficiency_score,
 )
@@ -622,6 +626,18 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     except Exception as exc:
         logger.debug("MarketMaker not available: %s", exc)
 
+    # Initialize reward trackers for liquidity rewards (Layer 3)
+    _reward_tracker = None
+    _kalshi_reward_tracker = None
+    try:
+        if CONFIG_REWARDS_ENABLED:
+            from market_maker import RewardTracker, KalshiRewardTracker
+            _reward_tracker = RewardTracker()
+            _kalshi_reward_tracker = KalshiRewardTracker(db)
+            logger.info("Reward trackers enabled in continuous mode.")
+    except Exception as exc:
+        logger.debug("Reward trackers not available: %s", exc)
+
     def on_price_update(platform, ticker, data):
         data["_ts"] = time.time()
         with _price_cache_lock:
@@ -1117,6 +1133,32 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     )
                     all_opportunities.extend(mc_opps)
 
+                # Layer 3: Liquidity Rewards
+                if args.mode in ("all", "rewards") and CONFIG_REWARDS_ENABLED:
+                    try:
+                        if poly_markets and _reward_tracker:
+                            pm_reward_opps = scan_polymarket_rewards(
+                                markets=poly_markets,
+                                reward_tracker=_reward_tracker,
+                                price_cache=price_cache,
+                            )
+                            all_opportunities.extend(pm_reward_opps)
+
+                        if kalshi_client and _kalshi_reward_tracker:
+                            k_reward_opps = scan_kalshi_rewards(
+                                kalshi_client=kalshi_client,
+                                reward_tracker=_kalshi_reward_tracker,
+                            )
+                            all_opportunities.extend(k_reward_opps)
+
+                        logger.debug(
+                            "Rewards scan complete: %d Polymarket + %d Kalshi opps",
+                            len(pm_reward_opps) if poly_markets and _reward_tracker else 0,
+                            len(k_reward_opps) if kalshi_client and _kalshi_reward_tracker else 0,
+                        )
+                    except Exception as exc:
+                        logger.debug("Rewards scanning error: %s", exc)
+
                 # Seed PriceTracker from REST data (WS only covers subscribed markets)
                 if _price_tracker:
                     if poly_markets:
@@ -1318,6 +1360,10 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     dashboard_state.mm_active_markets = mm_status["active_markets"]
                     dashboard_state.mm_active_orders = mm_status["active_orders"]
                     dashboard_state.mm_total_exposure = mm_status["total_exposure"]
+
+                # Update reward tracker reference for dashboard metrics
+                if CONFIG_REWARDS_ENABLED and _reward_tracker:
+                    dashboard_state.reward_tracker = _reward_tracker
 
                 # Update strategy metrics (MON-01: per-strategy P&L analytics)
                 # Also update leaderboard (MON-02: strategy leaderboard endpoint)
