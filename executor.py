@@ -519,6 +519,15 @@ class ArbitrageExecutor:
         yes_ask = no_ask = None
         cached_yes = self._check_ws_cache(price_cache, "polymarket", token_ids[0])
         cached_no = self._check_ws_cache(price_cache, "polymarket", token_ids[1])
+
+        # Check for stale feeds (no message in 30s) — skip stale prices
+        if cached_yes and cached_yes.get("_stale", False):
+            logger.info("Skipping revalidation: polymarket YES stale for >30s")
+            return False, 0.0, "feed_stale"
+        if cached_no and cached_no.get("_stale", False):
+            logger.info("Skipping revalidation: polymarket NO stale for >30s")
+            return False, 0.0, "feed_stale"
+
         if cached_yes and cached_no:
             yes_ask = cached_yes.get("price")
             no_ask = cached_no.get("price")
@@ -567,6 +576,12 @@ class ArbitrageExecutor:
             if not tid:
                 raise _RevalidationAPIError("empty token ID in negrisk")
             cached = self._check_ws_cache(price_cache, "polymarket", tid)
+
+            # Check for stale feed
+            if cached and cached.get("_stale", False):
+                logger.info("Skipping revalidation: polymarket token %s stale for >30s", tid)
+                return False, 0.0, "feed_stale"
+
             if cached and cached.get("price") is not None:
                 yes_asks.append(cached["price"])
             else:
@@ -606,6 +621,12 @@ class ArbitrageExecutor:
         if len(token_ids) >= 2:
             for i, tid in enumerate(token_ids[:2]):
                 cached = self._check_ws_cache(price_cache, "polymarket", tid)
+
+                # Check for stale feed
+                if cached and cached.get("_stale", False):
+                    logger.info("Skipping revalidation: polymarket token %s stale for >30s", tid)
+                    return False, 0.0, "feed_stale"
+
                 if cached and cached.get("price") is not None:
                     if i == 0:
                         pm_yes = cached["price"]
@@ -625,6 +646,12 @@ class ArbitrageExecutor:
         k_yes = k_no = None
         if kalshi_ticker and self.kalshi_client:
             cached_k = self._check_ws_cache(price_cache, "kalshi", kalshi_ticker)
+
+            # Check for stale feed
+            if cached_k and cached_k.get("_stale", False):
+                logger.info("Skipping revalidation: kalshi %s stale for >30s", kalshi_ticker)
+                return False, 0.0, "feed_stale"
+
             if cached_k:
                 k_yes = cached_k.get("yes_price")
                 k_no = cached_k.get("no_price")
@@ -823,6 +850,12 @@ class ArbitrageExecutor:
             # Try to get a fresh price from WS cache
             cache_key = leg.get("_token_id") or leg.get("_kalshi_ticker", "")
             cached = self._check_ws_cache(price_cache, platform, cache_key) if cache_key else None
+
+            # Check for stale feed
+            if cached and cached.get("_stale", False):
+                logger.info("Skipping revalidation: %s %s stale for >30s", platform, cache_key)
+                return False, 0.0, "feed_stale"
+
             if cached:
                 fresh_price = cached.get("yes_ask") or cached.get("yes", price)
                 prices.append(fresh_price)
@@ -857,6 +890,12 @@ class ArbitrageExecutor:
             if idx < len(token_ids):
                 tid = token_ids[idx]
                 cached = self._check_ws_cache(price_cache, "polymarket", tid)
+
+                # Check for stale feed
+                if cached and cached.get("_stale", False):
+                    logger.info("Skipping price refetch: polymarket %s stale for >30s", tid)
+                    return None
+
                 if cached and cached.get("price") is not None:
                     return cached["price"]
                 book = fetch_order_book(tid)
@@ -867,6 +906,12 @@ class ArbitrageExecutor:
             ticker = opp.get("_kalshi_ticker", "")
             if ticker and self.kalshi_client:
                 cached = self._check_ws_cache(price_cache, "kalshi", ticker)
+
+                # Check for stale feed
+                if cached and cached.get("_stale", False):
+                    logger.info("Skipping price refetch: kalshi %s stale for >30s", ticker)
+                    return None
+
                 if cached and cached.get(f"{side}_price") is not None:
                     return cached[f"{side}_price"]
                 book = self.kalshi_client.fetch_order_book(ticker)

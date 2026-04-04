@@ -9,3 +9,4 @@ snapshots.db
 *.log
 *.code-workspace
 .opencode/
+.mcp.json

@@ -55,6 +55,7 @@ class FeedManager:
         kalshi_private_key_base64: str | None = None,
         betfair_app_key: str | None = None,
         betfair_session_token: str | None = None,
+        price_cache: dict | None = None,
     ):
         """
         Args:
@@ -64,8 +65,11 @@ class FeedManager:
             kalshi_private_key_base64: Base64-encoded RSA private key (alternative to path)
             betfair_app_key: Betfair API application key for stream auth
             betfair_session_token: Betfair SSO session token (ssoid)
+            price_cache: Optional shared dict for marking stale prices (keyed by (platform, ticker))
         """
         self.on_price_update = on_price_update
+        self._price_cache = price_cache or {}
+        self._price_cache_lock = threading.Lock()
         self.kalshi_api_key_id = kalshi_api_key_id
         self.kalshi_private_key = None
         if kalshi_private_key_base64:
@@ -217,6 +221,60 @@ class FeedManager:
             if now - last_ts > max_silent_seconds:
                 stale.append(platform)
         return stale
+
+    def mark_stale_feeds(self, stale_threshold_seconds: float = 30.0) -> None:
+        """Mark prices as stale when feeds haven't sent messages in threshold seconds.
+
+        When a feed goes silent for >= stale_threshold_seconds, all prices cached
+        from that platform are marked with _stale: true. When the feed recovers
+        (receives a new message), the stale flag is cleared.
+
+        Args:
+            stale_threshold_seconds: Seconds of silence before marking as stale (default 30s).
+        """
+        now = time.time()
+        with self._price_cache_lock:
+            for platform in ["polymarket", "kalshi", "betfair"]:
+                last_msg_time = self._last_message_time.get(platform, now)
+                is_stale = (now - last_msg_time) > stale_threshold_seconds
+
+                # Iterate through cache and mark/clear stale flag
+                stale_markets = []
+                recovered_markets = []
+                for (p, token), price_data in list(self._price_cache.items()):
+                    if p == platform:
+                        if is_stale:
+                            if not price_data.get("_stale", False):
+                                price_data["_stale"] = True
+                                stale_markets.append(token)
+                        else:
+                            if price_data.get("_stale", False):
+                                price_data["_stale"] = False
+                                recovered_markets.append(token)
+
+                # Log state changes
+                if stale_markets:
+                    logger.warning(
+                        "%s feed stale (%.0fs without message, %d markets marked)",
+                        platform, now - last_msg_time, len(stale_markets)
+                    )
+                if recovered_markets:
+                    logger.info(
+                        "%s feed recovered (%d markets unmarked)", platform, len(recovered_markets)
+                    )
+
+    def is_feed_healthy(self, platform: str, threshold_seconds: float = 30.0) -> bool:
+        """Check if a feed has received a message within the threshold.
+
+        Args:
+            platform: Platform name (e.g. "polymarket", "kalshi").
+            threshold_seconds: Healthy if message received within this many seconds.
+
+        Returns:
+            True if feed is healthy (recent message), False if stale.
+        """
+        last_msg_time = self._last_message_time.get(platform, 0)
+        return (time.time() - last_msg_time) <= threshold_seconds
 
     def stop(self):
         """Signal feeds to stop."""

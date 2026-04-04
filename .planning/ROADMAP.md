@@ -59,9 +59,9 @@ Plans:
   5. API credential health check runs every 30 minutes and alerts before any credential expires
 **Plans:** 6 plans
 Plans:
-- [ ] 06-01-PLAN.md — DuckDB analytics infrastructure, per-strategy P&L queries, CLI script
-- [ ] 06-02-PLAN.md — Dashboard leaderboard endpoint and HTML UI with strategy metrics table
-- [ ] 06-03-PLAN.md — Per-strategy loss streak alerts and zero-opportunity period detection
+- [x] 06-01-PLAN.md — DuckDB analytics infrastructure, per-strategy P&L queries, CLI script
+- [x] 06-02-PLAN.md — Dashboard leaderboard endpoint and HTML UI with strategy metrics table
+- [x] 06-03-PLAN.md — Per-strategy loss streak alerts and zero-opportunity period detection
 - [ ] 06-04-PLAN.md — WS heartbeat monitoring, stale feed detection, executor integration
 - [ ] 06-05-PLAN.md — Hedger validation tests across all 8 trading platforms
 - [ ] 06-06-PLAN.md — Credential health checker, per-platform probes, pre-expiry alerts
