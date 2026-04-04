@@ -32,6 +32,13 @@ try:
         _metrics = None
 except Exception:
     _metrics = None
+
+# Conditional alerting import — MON-03: per-strategy loss streak tracking
+try:
+    from alerting import alert_manager as _alert_manager
+except Exception:
+    _alert_manager = None
+
 from db import TradeDB
 from risk_manager import RiskManager
 from polymarket_api import get_clob_prices, fetch_order_book, get_best_bid_ask, PolymarketTrader
@@ -1834,7 +1841,31 @@ class ArbitrageExecutor:
             self.invalidate_balance_cache()
             # Notify on successful trade
             self._notify_trade(opportunity, legs, size, success=True)
+
+            # MON-03: Check per-strategy loss streak after logging successful trade
+            if _alert_manager:
+                try:
+                    strategy_type = opportunity.get("type", "unknown")
+                    trade_won = opportunity.get("net_profit", 0) > 0
+                    _alert_manager.check_strategy_loss_streak(strategy_type, trade_won)
+                    logger.debug(
+                        "Logged trade for strategy %s: %s",
+                        strategy_type,
+                        "win" if trade_won else "loss",
+                    )
+                except Exception as e:
+                    logger.warning("Error checking strategy loss streak: %s", str(e))
         else:
+            # MON-03: Check per-strategy loss streak for failed/partial trades
+            if _alert_manager:
+                try:
+                    strategy_type = opportunity.get("type", "unknown")
+                    trade_won = False  # Partial/failed trades are always losses
+                    _alert_manager.check_strategy_loss_streak(strategy_type, trade_won)
+                    logger.debug("Logged failed/partial trade for strategy %s: loss", strategy_type)
+                except Exception as e:
+                    logger.warning("Error checking strategy loss streak: %s", str(e))
+
             # Partial fill detected — attempt hedging on filled legs
             logger.warning("Partial fill detected. Attempting hedge...")
             if HEDGE_ENABLED:
