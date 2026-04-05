@@ -381,3 +381,93 @@ class TestPlatformWhitelistConfig:
         for plat in _VALID_PLATFORMS:
             assert plat in PLATFORM_MIN_ORDER_SIZE, f"Missing min order size for {plat}"
             assert PLATFORM_MIN_ORDER_SIZE[plat] >= 0
+
+
+# ---------------------------------------------------------------------------
+# STRAT-04: Logical Arbitrage (Phase 9)
+# ---------------------------------------------------------------------------
+
+class TestLogicalArbConfig:
+    def test_logical_arb_enabled_defaults_false(self):
+        from config import LOGICAL_ARB_ENABLED
+        assert LOGICAL_ARB_ENABLED is False
+
+    def test_logical_arb_price_threshold_defaults_to_0_05(self):
+        from config import LOGICAL_ARB_PRICE_THRESHOLD
+        assert LOGICAL_ARB_PRICE_THRESHOLD == 0.05
+
+    def test_logical_arb_max_trade_size_defaults_to_20(self):
+        from config import LOGICAL_ARB_MAX_TRADE_SIZE
+        assert LOGICAL_ARB_MAX_TRADE_SIZE == 20.0
+
+    def test_logical_arb_rules_defaults_to_empty_list(self):
+        from config import LOGICAL_ARB_RULES
+        assert isinstance(LOGICAL_ARB_RULES, list)
+        assert len(LOGICAL_ARB_RULES) == 0
+
+    def test_logical_arb_rules_from_env_json(self, monkeypatch):
+        rules_json = '[{"if_yes": "market_a", "then_yes": "market_b", "relationship": "implies"}]'
+        monkeypatch.setenv("LOGICAL_ARB_RULES", rules_json)
+        monkeypatch.setenv("LOGICAL_ARB_ENABLED", "true")
+        cfg = _reload_config()
+        assert len(cfg.LOGICAL_ARB_RULES) == 1
+        assert cfg.LOGICAL_ARB_RULES[0]["relationship"] == "implies"
+
+    def test_logical_arb_rules_invalid_json_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("LOGICAL_ARB_RULES", "not valid json")
+        monkeypatch.setenv("LOGICAL_ARB_ENABLED", "true")
+        with pytest.raises(ValueError, match="Invalid LOGICAL_ARB_RULES"):
+            _reload_config()
+
+
+# ---------------------------------------------------------------------------
+# STRAT-05: Whale Copy Trading (Phase 9)
+# ---------------------------------------------------------------------------
+
+class TestWhaleCopyConfig:
+    def test_whale_copy_enabled_defaults_false(self):
+        from config import WHALE_COPY_ENABLED
+        assert WHALE_COPY_ENABLED is False
+
+    def test_whale_copy_max_positions_defaults_to_5(self):
+        from config import WHALE_COPY_MAX_POSITIONS
+        assert WHALE_COPY_MAX_POSITIONS == 5
+
+    def test_whale_copy_max_trade_size_defaults_to_15(self):
+        from config import WHALE_COPY_MAX_TRADE_SIZE
+        assert WHALE_COPY_MAX_TRADE_SIZE == 15.0
+
+    def test_whale_copy_poll_interval_defaults_to_10(self):
+        from config import WHALE_COPY_POLL_INTERVAL
+        assert WHALE_COPY_POLL_INTERVAL == 10
+
+    def test_whale_wallets_defaults_to_empty_list(self):
+        from config import WHALE_WALLETS
+        assert isinstance(WHALE_WALLETS, list)
+        assert len(WHALE_WALLETS) == 0
+
+    def test_whale_wallets_from_env_comma_separated(self, monkeypatch):
+        wallets = "0x1234567890abcdef, 0xabcdef1234567890, 0xdeadbeef"
+        monkeypatch.setenv("WHALE_WALLETS", wallets)
+        cfg = _reload_config()
+        assert len(cfg.WHALE_WALLETS) == 3
+        assert "0x1234567890abcdef" in cfg.WHALE_WALLETS
+        assert "0xabcdef1234567890" in cfg.WHALE_WALLETS
+        assert "0xdeadbeef" in cfg.WHALE_WALLETS
+
+    def test_whale_wallets_trims_whitespace(self, monkeypatch):
+        wallets = "  0x1111  ,  0x2222  "
+        monkeypatch.setenv("WHALE_WALLETS", wallets)
+        cfg = _reload_config()
+        assert cfg.WHALE_WALLETS == ["0x1111", "0x2222"]
+
+    def test_whale_copy_disables_when_no_wallets(self, monkeypatch):
+        monkeypatch.setenv("WHALE_COPY_ENABLED", "true")
+        monkeypatch.setenv("WHALE_WALLETS", "")
+        cfg = _reload_config()
+        # Should disable itself gracefully
+        assert cfg.WHALE_COPY_ENABLED is False
+
+    def test_polygonscan_api_key_optional(self):
+        from config import POLYGONSCAN_API_KEY
+        assert isinstance(POLYGONSCAN_API_KEY, str)
