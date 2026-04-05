@@ -326,6 +326,35 @@ REWARDS_MAX_SPREAD = _env_float("REWARDS_MAX_SPREAD", "0.05")
 REWARDS_POLL_INTERVAL = _env_int("REWARDS_POLL_INTERVAL", "60")
 REWARDS_MIN_RESTING_TIME = _env_int("REWARDS_MIN_RESTING_TIME", "300")
 
+# STRAT-01: Order Book Imbalance
+IMBALANCE_ENABLED = _env_bool("IMBALANCE_ENABLED", "false")
+IMBALANCE_RATIO = _env_float("IMBALANCE_RATIO", "3.0")
+IMBALANCE_MAX_TRADE_SIZE = _env_float("IMBALANCE_MAX_TRADE_SIZE", "10.0")
+IMBALANCE_MAX_CONCURRENT_POSITIONS = int(os.getenv("IMBALANCE_MAX_CONCURRENT_POSITIONS", "5"))
+
+# STRAT-02: News-Driven Resolution Sniping
+NEWS_SNIPE_ENABLED = _env_bool("NEWS_SNIPE_ENABLED", "false")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+FINNHUB_REQUEST_TIMEOUT = _env_float("FINNHUB_REQUEST_TIMEOUT", "10.0")
+NEWS_SNIPE_MAX_TRADE_SIZE = _env_float("NEWS_SNIPE_MAX_TRADE_SIZE", "25.0")
+NEWS_SNIPE_COOLDOWN = _env_float("NEWS_SNIPE_COOLDOWN", "30.0")
+NEWS_SNIPE_CONFIDENCE_THRESHOLD = _env_float("NEWS_SNIPE_CONFIDENCE_THRESHOLD", "0.5")
+
+# STRAT-06: Correlated Market Pairs
+CORRELATED_ENABLED = _env_bool("CORRELATED_ENABLED", "false")
+CORRELATED_PAIRS = os.getenv("CORRELATED_PAIRS", "[]")  # JSON list of [market_a, market_b] pairs
+CORRELATION_DIVERGENCE_THRESHOLD = _env_float("CORRELATION_DIVERGENCE_THRESHOLD", "0.10")
+CORRELATED_MAX_TRADE_SIZE = _env_float("CORRELATED_MAX_TRADE_SIZE", "20.0")
+CORRELATED_MIN_SPREAD_COLLAPSE_THRESHOLD = _env_float("CORRELATED_MIN_SPREAD_COLLAPSE_THRESHOLD", "0.20")
+
+# STRAT-07: Time Decay Convergence
+TIME_DECAY_ENABLED = _env_bool("TIME_DECAY_ENABLED", "false")
+TIME_DECAY_MIN_HOURS_EXPIRY = int(os.getenv("TIME_DECAY_MIN_HOURS_EXPIRY", "48"))
+TIME_DECAY_MIN_CONSENSUS = _env_float("TIME_DECAY_MIN_CONSENSUS", "0.90")
+TIME_DECAY_BUY_BELOW_PRICE = _env_float("TIME_DECAY_BUY_BELOW_PRICE", "0.95")
+TIME_DECAY_MAX_TRADE_SIZE = _env_float("TIME_DECAY_MAX_TRADE_SIZE", "50.0")
+TIME_DECAY_MIN_CONSENSUS_SAMPLE_SIZE = int(os.getenv("TIME_DECAY_MIN_CONSENSUS_SAMPLE_SIZE", "30"))
+
 # Convergence detection
 CONVERGENCE_MIN_DIVERGENCE = _env_float("CONVERGENCE_MIN_DIVERGENCE", "0.05")
 CONVERGENCE_MIN_PLATFORMS = _env_int("CONVERGENCE_MIN_PLATFORMS", "3")
@@ -652,12 +681,89 @@ def validate_config() -> list[str]:
             f"Valid: {', '.join(sorted(_VALID_PLATFORMS))}"
         )
 
+    # --- Strategy-specific validation (Phase 8) ---
+
+    # STRAT-01: Order Book Imbalance
+    if IMBALANCE_ENABLED and IMBALANCE_RATIO <= 1.0:
+        raise ConfigError(
+            f"IMBALANCE_RATIO={IMBALANCE_RATIO} must be > 1.0"
+        )
+
+    # STRAT-02: News-Driven Sniping
+    if NEWS_SNIPE_ENABLED and not FINNHUB_API_KEY:
+        warnings.append(
+            "News sniping enabled (NEWS_SNIPE_ENABLED=true) but "
+            "FINNHUB_API_KEY not set; disabling news sniping"
+        )
+
+    if NEWS_SNIPE_ENABLED and not (0 < NEWS_SNIPE_CONFIDENCE_THRESHOLD <= 1):
+        raise ConfigError(
+            f"NEWS_SNIPE_CONFIDENCE_THRESHOLD={NEWS_SNIPE_CONFIDENCE_THRESHOLD} "
+            f"must be in (0, 1]"
+        )
+
+    # STRAT-06: Correlated Market Pairs
+    if CORRELATED_ENABLED and CORRELATED_PAIRS == "[]":
+        warnings.append(
+            "Correlated pairs enabled (CORRELATED_ENABLED=true) but no pairs "
+            "configured (CORRELATED_PAIRS='[]'); disabling correlated pairs"
+        )
+
+    if CORRELATED_ENABLED and not (0 < CORRELATION_DIVERGENCE_THRESHOLD < 1):
+        raise ConfigError(
+            f"CORRELATION_DIVERGENCE_THRESHOLD={CORRELATION_DIVERGENCE_THRESHOLD} "
+            f"must be in (0, 1)"
+        )
+
+    # STRAT-07: Time Decay Convergence
+    if TIME_DECAY_ENABLED and not (0 < TIME_DECAY_MIN_CONSENSUS <= 1):
+        raise ConfigError(
+            f"TIME_DECAY_MIN_CONSENSUS={TIME_DECAY_MIN_CONSENSUS} "
+            f"must be in (0, 1]"
+        )
+
+    if TIME_DECAY_ENABLED and not (0 < TIME_DECAY_BUY_BELOW_PRICE <= 1):
+        raise ConfigError(
+            f"TIME_DECAY_BUY_BELOW_PRICE={TIME_DECAY_BUY_BELOW_PRICE} "
+            f"must be in (0, 1]"
+        )
+
     # --- Contradiction warnings ---
     if EXECUTION_MODE == "full-auto" and DRY_RUN:
         warnings.append(
             "EXECUTION_MODE=full-auto but DRY_RUN=true — "
             "no trades will be executed"
         )
+
+    # --- Startup summary for Phase 8 strategies ---
+    strategy_status = []
+    strategy_status.append(
+        f"Imbalance: {'ENABLED' if IMBALANCE_ENABLED else 'DISABLED'}"
+        + (f" (ratio {IMBALANCE_RATIO}, max ${IMBALANCE_MAX_TRADE_SIZE})" if IMBALANCE_ENABLED else "")
+    )
+    strategy_status.append(
+        f"NewsSnipe: {'ENABLED' if NEWS_SNIPE_ENABLED else 'DISABLED'}"
+        + (f" (confidence {NEWS_SNIPE_CONFIDENCE_THRESHOLD}, max ${NEWS_SNIPE_MAX_TRADE_SIZE})" if NEWS_SNIPE_ENABLED else "")
+    )
+    # Count correlated pairs if enabled
+    if CORRELATED_ENABLED and CORRELATED_PAIRS != "[]":
+        import json
+        try:
+            pairs = json.loads(CORRELATED_PAIRS)
+            num_pairs = len(pairs) if isinstance(pairs, list) else 0
+            strategy_status.append(f"Correlated: ENABLED ({num_pairs} pairs, threshold {CORRELATION_DIVERGENCE_THRESHOLD})")
+        except (json.JSONDecodeError, TypeError):
+            strategy_status.append("Correlated: ENABLED (invalid pairs format)")
+    else:
+        strategy_status.append("Correlated: DISABLED")
+
+    strategy_status.append(
+        f"TimeDecay: {'ENABLED' if TIME_DECAY_ENABLED else 'DISABLED'}"
+        + (f" ({TIME_DECAY_MIN_HOURS_EXPIRY}h, {int(TIME_DECAY_MIN_CONSENSUS*100)}% consensus)" if TIME_DECAY_ENABLED else "")
+    )
+
+    if any(IMBALANCE_ENABLED or NEWS_SNIPE_ENABLED or CORRELATED_ENABLED or TIME_DECAY_ENABLED for _ in [1]):
+        logger.info("Phase 8 Market Signal Strategies: %s", " | ".join(strategy_status))
 
     return warnings
 
