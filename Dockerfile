@@ -26,6 +26,7 @@ RUN python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-tran
 # ---------------------------------------------------------------------------
 COPY *.py ./
 COPY scans/ ./scans/
+COPY scripts/ ./scripts/
 
 # Create data directory for EFS mount (trades.db will live here)
 RUN mkdir -p /data
