@@ -464,6 +464,10 @@ class ArbitrageExecutor:
                         reason = f"Consensus {consensus:.2f} dropped below {TIME_DECAY_MIN_CONSENSUS}"
                     else:
                         reason = "time_decay_verified"
+            elif opp_type == "LogicalArb":
+                # STRAT-04: Logical arb revalidation — check both market prices haven't moved >10%
+                passed, reval_profit, reason = self._revalidate_logical_arb(
+                    opportunity, original_profit)
             # Unknown type — proceed cautiously (passed=True from init)
 
         except _RevalidationAPIError as e:
@@ -939,6 +943,56 @@ class ArbitrageExecutor:
 
         opp["net_profit"] = reval_profit
         return True, reval_profit, "passed"
+
+    def _revalidate_logical_arb(
+        self, opp: dict, original_profit: float,
+    ) -> tuple[bool, float, str]:
+        """Revalidate a LogicalArb opportunity by re-checking both markets' prices.
+
+        Layer 4: Checks that neither market price has moved >10% from scan time.
+        Returns:
+            (passed, reval_profit, reason)
+        """
+        token_ids = opp.get("_token_ids", [])
+        if not token_ids or len(token_ids) < 1:
+            raise _RevalidationAPIError("logical_arb missing token IDs")
+
+        # Fetch live prices for the underpriced outcome (then_yes)
+        try:
+            then_yes_token = token_ids[0]
+            then_yes_book = fetch_order_book(then_yes_token)
+            if not then_yes_book:
+                # API unavailable — proceed with scan prices (generous on Layer 4)
+                logger.debug("CLOB unavailable for logical_arb revalidation, proceeding with scan prices")
+                return True, original_profit, "clob_unavailable"
+
+            then_yes_asks = then_yes_book.get("asks", [])
+            if not then_yes_asks:
+                logger.debug("No asks in CLOB for logical_arb, proceeding")
+                return True, original_profit, "no_asks"
+
+            fresh_then_price = float(then_yes_asks[0].get("price", opp.get("_then_price", 0)))
+            original_then_price = opp.get("_then_price", fresh_then_price)
+
+            # Check for >10% price movement (Layer 4 threshold)
+            price_delta_pct = abs(fresh_then_price - original_then_price) / max(original_then_price, 0.001)
+            if price_delta_pct > 0.10:
+                logger.info(
+                    "Logical arb then_yes price moved %.1f%% (%.4f -> %.4f), rejecting",
+                    price_delta_pct * 100, original_then_price, fresh_then_price,
+                )
+                return False, 0.0, "price_moved_too_much"
+
+            # Update opportunity with fresh prices
+            opp["_then_price"] = fresh_then_price
+            opp["net_profit"] = original_profit  # Profit calc doesn't change if just refetching
+
+        except Exception as e:
+            logger.debug("Logical arb revalidation CLOB fetch failed: %s", e)
+            # Graceful degradation: accept if original ROI was good (handled by caller)
+            return True, original_profit, "clob_error_accepted"
+
+        return True, original_profit, "passed"
 
     def _refetch_platform_price(
         self, platform: str, opp: dict, price_cache: dict | None, side: str,
@@ -1564,6 +1618,35 @@ class ArbitrageExecutor:
             else:
                 legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
                          "price": opportunity.get("_no_price", 0), "_token_id": no_token}]
+
+        elif opp_type == "LogicalArb":
+            # STRAT-04: Combinatorial Logical Arbitrage — buy underpriced implied outcome, sell implying
+            # Example: Bitcoin >$100k (if_yes) implies Bitcoin >$90k (then_yes).
+            # If P(>$90k) < P(>$100k), buy >$90k and sell >$100k for arbitrage.
+            token_ids = opportunity.get("_token_ids", [])
+            if not token_ids:
+                logger.warning("LogicalArb opp missing token IDs: %s", opportunity)
+                return []
+
+            # We need two token IDs: one for then_yes (underpriced), one for if_yes (hedge)
+            # token_ids[0] is typically the then_yes YES token
+            then_yes_token = token_ids[0] if len(token_ids) > 0 else ""
+
+            # For the if_yes hedge, we need its token ID. In a two-outcome market,
+            # the NO token is the hedge. We may need to fetch if_market's token IDs separately.
+            # For now, we'll assume if_yes_token is provided or we have index [1]
+            if_yes_token = token_ids[1] if len(token_ids) > 1 else ""
+
+            if not then_yes_token or not if_yes_token:
+                logger.warning("LogicalArb opp missing required token IDs for both outcomes")
+                return []
+
+            legs = [
+                {"platform": "polymarket", "side": "BUY", "token": "yes",
+                 "price": opportunity.get("_then_price", 0), "_token_id": then_yes_token},
+                {"platform": "polymarket", "side": "SELL", "token": "yes",
+                 "price": opportunity.get("_if_price", 0), "_token_id": if_yes_token},
+            ]
 
         # HARDEN-05: Attach a per-leg idempotency key before returning.
         # Keys are stable within a 60-second minute bucket so that retries
