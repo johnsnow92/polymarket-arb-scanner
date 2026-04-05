@@ -106,7 +106,9 @@ class RiskManager:
         total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
         roi = net_profit / total_cost if total_cost > 0 else 0
 
-        if opp_type not in self._SKIP_DEPTH_TYPES:
+        # Use prefix matching: "KalshiMulti(4)" matches "KalshiMulti"
+        skip_depth = any(opp_type.startswith(t) for t in self._SKIP_DEPTH_TYPES)
+        if not skip_depth:
             # High-ROI opportunities (>5%) use lower depth threshold
             depth_threshold = self.min_liquidity_high_roi if roi > 0.05 else self.min_liquidity
             if depth < depth_threshold:
