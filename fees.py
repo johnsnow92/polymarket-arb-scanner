@@ -1326,3 +1326,77 @@ def net_profit_correlated(
 
     # Total net profit from both legs
     return long_net + short_net
+
+
+# ---------------------------------------------------------------------------
+# Time decay convergence fee calculations (Layer 2 - Near-Arb)
+# ---------------------------------------------------------------------------
+
+def net_profit_time_decay(
+    entry_price: float,
+    exit_price: float,
+    size: float,
+    platform: str = "polymarket",
+) -> float:
+    """Calculate net profit for a time decay convergence position.
+
+    Time decay trades hold near-certain outcomes to market resolution for
+    guaranteed profit. Entry price is <0.95 (buy at discount), exit price
+    is typically 1.0 (correct outcome at settlement) or 0.0 (wrong outcome).
+    Layer 2 (near-arbitrage) strategy.
+
+    Entry pays taker fee; exit at settlement may incur platform settlement fees
+    (e.g., Polymarket settlement fee on net winnings, Kalshi taker on close-out).
+
+    Args:
+        entry_price: Entry price in [0, 1] (typically 0.90-0.95 for <0.95 buy).
+        exit_price: Exit price in [0, 1] (typically 1.0 if correct, 0.0 if wrong).
+        size: Trade size in dollars.
+        platform: Platform for fee calculation ("polymarket", "kalshi", "gemini", etc.).
+
+    Returns:
+        Net profit in USD after entry and exit fees. Typically +1-5% if consensus
+        correct (entry 0.90, exit 1.0), negative if consensus wrong.
+    """
+    if size <= 0:
+        return 0.0
+
+    if platform == "polymarket":
+        # Polymarket: entry pays taker fee at trade time
+        # Exit at settlement: no additional settlement fee in March 2026 model
+        # (settlement fee removed; only entry-time fee applies)
+        entry_fee = polymarket_taker_fee(entry_price, contracts=1) * size
+        # Exit at resolution: if exit_price = 1.0 (correct), no additional fees
+        # If exit_price = 0.0 (wrong), no additional fees (loss is already baked in)
+        exit_fee = 0.0
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    elif platform == "kalshi":
+        # Kalshi: entry pays taker fee at trade time
+        # Exit at settlement: settlement may be automatic (no additional fee) or
+        # may require closing position (taker fee again)
+        # Conservative: estimate 1 taker fee for entry only
+        entry_fee = kalshi_taker_fee(entry_price, contracts=1) * size
+        exit_fee = 0.0  # Settlement is automatic; no explicit close-out
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    elif platform == "gemini":
+        # Gemini: entry pays taker fee at trade time
+        # Exit: automatic settlement at resolution
+        entry_fee = gemini_fee(entry_price, GEMINI_TAKER_RATE, 1) * size
+        exit_fee = 0.0
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    else:
+        # Default: use conservative taker fee estimate (1%)
+        # Entry pays taker fee; exit is free (settlement)
+        fee_rate = 0.01
+        entry_fee = entry_price * fee_rate * size
+        exit_fee = 0.0
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    return net_profit
