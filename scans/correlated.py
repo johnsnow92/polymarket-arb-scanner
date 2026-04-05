@@ -15,7 +15,14 @@ Example:
 import json
 import logging
 
-from matcher import token_set_ratio
+try:
+    from thefuzz import fuzz
+except ImportError:
+    try:
+        from fuzzywuzzy import fuzz
+    except ImportError:
+        fuzz = None
+
 from .helpers import capital_efficiency_score
 
 logger = logging.getLogger(__name__)
@@ -95,7 +102,7 @@ def _find_market_by_id_or_title(
     """Find a market by ID or fuzzy title match.
 
     First tries direct ID lookup. If not found, searches by title using fuzzy
-    matching with token_set_ratio.
+    matching with token_set_ratio (from thefuzz).
 
     Args:
         market_identifier: Market ID or title string.
@@ -110,6 +117,9 @@ def _find_market_by_id_or_title(
         return markets_by_key[market_identifier]
 
     # Fuzzy title match
+    if fuzz is None:
+        return None
+
     best_match = None
     best_score = 0
 
@@ -118,7 +128,7 @@ def _find_market_by_id_or_title(
         if not market_title:
             continue
 
-        score = token_set_ratio(market_identifier.lower(), market_title.lower())
+        score = fuzz.token_set_ratio(market_identifier.lower(), market_title.lower())
         if score > best_score:
             best_score = score
             best_match = market
