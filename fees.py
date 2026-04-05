@@ -1400,3 +1400,39 @@ def net_profit_time_decay(
         net_profit = gross_profit - entry_fee - exit_fee
 
     return net_profit
+
+
+def net_profit_logical_arb(price_if_yes: float, price_then_yes: float) -> float:
+    """Calculate net profit for logical arbitrage trade.
+
+    Buys the underpriced implied outcome (then_yes) and sells the implying outcome
+    (if_yes) to capitalize on semantic inconsistencies across related markets.
+
+    Layer 4: Informed trading with rapid execution at taker rates.
+
+    Formula: The trade structure is:
+    - BUY: then_yes at taker fee
+    - SELL: if_yes at taker fee (hedge)
+    - Profit: (price_if_yes - TAKER_FEE) - (price_then_yes + TAKER_FEE)
+
+    Example: Bitcoin >$100k trading at 0.50, Bitcoin >$90k trading at 0.45.
+    If P(>$100k) should be <= P(>$90k) logically, buy >$90k, sell >$100k.
+    Net profit = (0.50 - 0.04*0.5*(1-0.5)) - (0.45 + 0.04*0.45*(1-0.45)) ≈ 0.045
+
+    Args:
+        price_if_yes: Price of the implying outcome (e.g., Bitcoin >$100k).
+        price_then_yes: Price of the implied outcome (e.g., Bitcoin >$90k).
+
+    Returns:
+        Net profit in USD after both entry fees. Can be negative if trade is unfavorable.
+    """
+    # Entry fees: both legs pay Polymarket taker fee at trade entry
+    # Taker fee = POLYMARKET_DEFAULT_TAKER_RATE * P * (1 - P) per contract
+    fee_sell_if_yes = polymarket_taker_fee(price_if_yes)
+    fee_buy_then_yes = polymarket_taker_fee(price_then_yes)
+
+    # Net profit: receive if_yes price minus both entry fees, minus cost of then_yes
+    # Assuming 1 contract ($1 stake)
+    net_profit = price_if_yes - price_then_yes - fee_sell_if_yes - fee_buy_then_yes
+
+    return net_profit
