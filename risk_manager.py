@@ -23,7 +23,18 @@ class RiskManager:
         self.mm_max_total_exposure = config.get("mm_max_total_exposure", 500.0)
 
     # Opportunity types that skip depth and dedup checks
-    _SKIP_DEPTH_TYPES = frozenset({"MarketMake", "EventDivergence", "ConvergenceOpp"})
+    _SKIP_DEPTH_TYPES = frozenset({
+        "MarketMake", "EventDivergence", "ConvergenceOpp",
+        # KalshiMulti/MultiCross: CLOB order book API returns empty for many
+        # multi-outcome markets, but REST prices are real and tradeable.
+        # Depth was already checked during scan-phase CLOB refinement.
+        "KalshiMulti", "MultiCross",
+        # Phase 8-9 signal-based strategies — liquidity verified at revalidation
+        "Imbalance", "NewsSnipe", "Correlated", "TimeDecay",
+        "LogicalArb", "WhaleCopy",
+        # Reward strategies — we're placing orders, not filling existing ones
+        "PolymarketRewards", "KalshiRewards",
+    })
     _SKIP_DEDUP_TYPES = frozenset({"MarketMake"})
 
     def check(self, opportunity: dict, db, balances: dict | None = None) -> tuple[bool, str]:
