@@ -355,18 +355,48 @@ TIME_DECAY_BUY_BELOW_PRICE = _env_float("TIME_DECAY_BUY_BELOW_PRICE", "0.95")
 TIME_DECAY_MAX_TRADE_SIZE = _env_float("TIME_DECAY_MAX_TRADE_SIZE", "50.0")
 TIME_DECAY_MIN_CONSENSUS_SAMPLE_SIZE = int(os.getenv("TIME_DECAY_MIN_CONSENSUS_SAMPLE_SIZE", "30"))
 
-# STRAT-05: Whale Copy Trading
-WHALE_COPY_ENABLED = _env_bool("WHALE_COPY_ENABLED", "false")
-WHALE_COPY_MAX_POSITIONS = _env_int("WHALE_COPY_MAX_POSITIONS", "5")
-WHALE_COPY_MAX_TRADE_SIZE = _env_float("WHALE_COPY_MAX_TRADE_SIZE", "15.0")
-WHALE_WALLETS = os.getenv("WHALE_WALLETS", "")  # Comma-separated wallet addresses
-POLYGONSCAN_API_KEY = os.getenv("POLYGONSCAN_API_KEY", "YourApiKeyToken")
-
 # STRAT-04: Logical Arbitrage
 LOGICAL_ARB_ENABLED = _env_bool("LOGICAL_ARB_ENABLED", "false")
-LOGICAL_ARB_THRESHOLD = _env_float("LOGICAL_ARB_THRESHOLD", "0.05")  # 5% price gap
+LOGICAL_ARB_PRICE_THRESHOLD = _env_float("LOGICAL_ARB_PRICE_THRESHOLD", "0.05")
 LOGICAL_ARB_MAX_TRADE_SIZE = _env_float("LOGICAL_ARB_MAX_TRADE_SIZE", "20.0")
-LOGICAL_ARB_RULES = os.getenv("LOGICAL_ARB_RULES", "")  # JSON string or file path
+
+# Load logical arb rules from env var (JSON string) or file (logical_arb_rules.json)
+import json
+LOGICAL_ARB_RULES = []
+if LOGICAL_ARB_ENABLED:
+    rules_str = os.getenv("LOGICAL_ARB_RULES", "")
+    if rules_str:
+        try:
+            LOGICAL_ARB_RULES = json.loads(rules_str)
+        except json.JSONDecodeError as e:
+            raise ConfigError(f"Invalid LOGICAL_ARB_RULES JSON: {e}")
+    else:
+        # Fallback to file
+        rules_file = "logical_arb_rules.json"
+        if os.path.exists(rules_file):
+            with open(rules_file) as f:
+                LOGICAL_ARB_RULES = json.load(f)
+        else:
+            logger.warning("LOGICAL_ARB_ENABLED but no rules provided; feature disabled")
+            LOGICAL_ARB_ENABLED = False
+
+# STRAT-05: Whale Copy Trading
+WHALE_COPY_ENABLED = _env_bool("WHALE_COPY_ENABLED", "false")
+WHALE_COPY_MAX_TRADE_SIZE = _env_float("WHALE_COPY_MAX_TRADE_SIZE", "15.0")
+WHALE_COPY_MAX_POSITIONS = _env_int("WHALE_COPY_MAX_POSITIONS", "5")
+WHALE_COPY_POLL_INTERVAL = _env_int("WHALE_COPY_POLL_INTERVAL", "10")
+
+# Whale wallet addresses: comma-separated list of profitable Polymarket wallets to track
+WHALE_WALLETS = []
+whale_wallets_str = os.getenv("WHALE_WALLETS", "").strip()
+if whale_wallets_str:
+    WHALE_WALLETS = [w.strip() for w in whale_wallets_str.split(",") if w.strip()]
+if WHALE_COPY_ENABLED and not WHALE_WALLETS:
+    logger.warning("WHALE_COPY_ENABLED but WHALE_WALLETS empty; feature disabled")
+    WHALE_COPY_ENABLED = False
+
+# Polygonscan API for on-chain monitoring
+POLYGONSCAN_API_KEY = os.getenv("POLYGONSCAN_API_KEY", "")
 
 # Convergence detection
 CONVERGENCE_MIN_DIVERGENCE = _env_float("CONVERGENCE_MIN_DIVERGENCE", "0.05")
