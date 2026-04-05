@@ -233,11 +233,11 @@ class TradeDB:
             return realized + row2["total"]
 
     def get_daily_trade_count(self) -> int:
-        """Count trades executed today (UTC)."""
+        """Count trades actually executed (filled) today (UTC)."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         with self._lock:
             row = self.conn.execute(
-                "SELECT COUNT(*) as cnt FROM trades WHERE timestamp LIKE ?",
+                "SELECT COUNT(*) as cnt FROM trades WHERE timestamp LIKE ? AND status = 'filled'",
                 (f"{today}%",),
             ).fetchone()
             return row["cnt"]
