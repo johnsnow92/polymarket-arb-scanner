@@ -1436,3 +1436,33 @@ def net_profit_logical_arb(price_if_yes: float, price_then_yes: float) -> float:
     net_profit = price_if_yes - price_then_yes - fee_sell_if_yes - fee_buy_then_yes
 
     return net_profit
+
+
+# ---------------------------------------------------------------------------
+# Whale Copy Trading fee calculator
+# ---------------------------------------------------------------------------
+
+
+def net_profit_whale_copy(entry_price: float, exit_price: float) -> float:
+    """Calculate net profit for whale copy mirror trade.
+
+    Mirrors a profitable whale trader's position on Polymarket. We're buying
+    at entry_price (taker fee) and selling at exit_price (taker fee).
+
+    Layer 4: Rapid execution at taker rates on both legs.
+
+    Formula:
+    - BUY at entry_price: pay taker fee
+    - SELL at exit_price: pay taker fee
+    - Profit = (exit_price - entry_price) - fee_buy - fee_sell
+
+    Args:
+        entry_price: Price we buy at (copying whale's entry).
+        exit_price: Expected exit price (whale's target or current market).
+
+    Returns:
+        Net profit in USD after taker fees on both legs.
+    """
+    fee_buy = polymarket_taker_fee(entry_price)
+    fee_sell = polymarket_taker_fee(exit_price)
+    return (exit_price - entry_price) - fee_buy - fee_sell
