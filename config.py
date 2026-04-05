@@ -101,6 +101,7 @@ BASE_TRADE_SIZE = _env_float("BASE_TRADE_SIZE", "1.0")
 MAX_TRADE_SIZE = _env_float("MAX_TRADE_SIZE", "5.0")
 DAILY_LOSS_LIMIT = _env_float("DAILY_LOSS_LIMIT", "25.0")
 MAX_OPEN_POSITIONS = _env_int("MAX_OPEN_POSITIONS", "10")
+MAX_DAILY_TRADES = _env_int("MAX_DAILY_TRADES", "0")  # 0 = unlimited
 MIN_LIQUIDITY = _env_float("MIN_LIQUIDITY", "10.0")
 MIN_LIQUIDITY_HIGH_ROI = _env_float("MIN_LIQUIDITY_HIGH_ROI", "5.0")
 MIN_NET_ROI = _env_float("MIN_NET_ROI", "0")

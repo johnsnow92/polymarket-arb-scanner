@@ -232,6 +232,16 @@ class TradeDB:
             ).fetchone()
             return realized + row2["total"]
 
+    def get_daily_trade_count(self) -> int:
+        """Count trades executed today (UTC)."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM trades WHERE timestamp LIKE ?",
+                (f"{today}%",),
+            ).fetchone()
+            return row["cnt"]
+
     def get_open_positions_count(self) -> int:
         """Count positions that are currently open (not yet settled)."""
         with self._lock:
