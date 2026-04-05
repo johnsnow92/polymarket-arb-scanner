@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Profitable Trading & Strategy Expansion
-status: executing
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-04-04T22:21:28.433Z"
+status: In Progress
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-04-04T23:58:30.000Z"
 last_activity: 2026-04-04
 progress:
   total_phases: 5
   completed_phases: 3
-  total_plans: 13
-  completed_plans: 13
-  percent: 100
+  total_plans: 18
+  completed_plans: 14
+  percent: 78
 ---
 
 # STATE.md — Polymarket Arb Scanner
@@ -19,11 +19,11 @@ progress:
 ## Current Phase
 
 Phase: 8 of 9 (market signal strategies)
-Plan: Not started
-Status: Pending
+Plan: 01 of 05 - Complete
+Status: In Progress
 Last activity: 2026-04-04
 
-Progress: [██████░░░░] 60%
+Progress: [████████░░] 62%
 
 ## Project Reference
 
@@ -63,6 +63,9 @@ Recent decisions affecting current work:
 - [Phase 05-deploy-execute]: Polymarket fee model updated to rate*P*(1-P) entry-time (0.04 default), removing old 2% settlement fee
 - [Phase 05-deploy-execute]: STRATEGY_LAYERS moved to config.py as single source of truth; backtest.py imports from config
 - [Phase 05-deploy-execute]: REVAL_FLOORS and get_layer() added to config.py as infrastructure for Plan 02 revalidation
+- [Phase 08-01]: Min ratio threshold converted to imbalance formula: n:1 → (n-1)/(n+1) for consistent threshold behavior
+- [Phase 08-01]: Stage 2 collapse detection uses 70% magnitude preservation criterion to prevent stale/spoofed execution
+- [Phase 08-01]: Imbalance trades use taker fees (Layer 4 informed trading requires rapid time-sensitive execution)
 
 ### Pending Todos
 
@@ -76,6 +79,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T10:27:27.285Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-04-04T23:58:30.000Z
+Stopped at: Completed 08-01-PLAN.md
 Resume file: None
