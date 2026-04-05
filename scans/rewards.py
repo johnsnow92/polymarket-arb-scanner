@@ -291,8 +291,20 @@ def scan_kalshi_rewards(kalshi_client, reward_tracker, min_pool_usdc: float = 10
     logger.info("Scanning Kalshi markets for reward-eligible opportunities...")
 
     try:
-        # Fetch active Kalshi markets
-        kalshi_markets = kalshi_client.list_markets()
+        # Fetch active Kalshi markets via events → markets
+        if not hasattr(kalshi_client, "fetch_all_events"):
+            logger.warning("Kalshi client missing fetch_all_events; skipping reward scan")
+            return opportunities
+        events = kalshi_client.fetch_all_events() or []
+        kalshi_markets = []
+        for ev in events[:50]:  # Limit to top 50 events for reward scan
+            ticker = ev.get("event_ticker", "")
+            if ticker:
+                try:
+                    markets = kalshi_client.fetch_markets_for_event(ticker)
+                    kalshi_markets.extend(markets or [])
+                except Exception:
+                    pass
         if not kalshi_markets:
             logger.info("No Kalshi markets returned.")
             return opportunities
