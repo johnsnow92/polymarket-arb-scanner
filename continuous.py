@@ -1243,6 +1243,40 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     except Exception as exc:
                         logger.debug("Time decay scan failed: %s", exc)
 
+                # Structural alpha: Combinatorial logical arbitrage (Phase 9)
+                if args.mode in ("all", "logical-arb"):
+                    try:
+                        from config import LOGICAL_ARB_ENABLED, LOGICAL_ARB_RULES, LOGICAL_ARB_PRICE_THRESHOLD
+                        if LOGICAL_ARB_ENABLED and LOGICAL_ARB_RULES:
+                            from scans.logical_arb import scan_logical_arb
+                            logical_arb_opps = scan_logical_arb(
+                                markets_by_key=poly_markets if poly_markets else [],
+                                logical_arb_rules=LOGICAL_ARB_RULES,
+                                price_threshold=LOGICAL_ARB_PRICE_THRESHOLD,
+                            )
+                            all_opportunities.extend(logical_arb_opps)
+                            logger.info("Logical arb scan: found %d opportunities", len(logical_arb_opps))
+                    except Exception as e:
+                        logger.debug("Logical arb scan failed: %s", e)
+
+                # Structural alpha: Whale copy trading (Phase 9)
+                if args.mode in ("all", "whale-copy"):
+                    try:
+                        from config import WHALE_COPY_ENABLED, WHALE_WALLETS, POLYGONSCAN_API_KEY
+                        if WHALE_COPY_ENABLED and WHALE_WALLETS:
+                            from scans.whale_copy import scan_whale_copy
+                            from polygonscan_api import PolygonscanClient
+                            polygonscan = PolygonscanClient(api_key=POLYGONSCAN_API_KEY)
+                            whale_copy_opps = scan_whale_copy(
+                                whale_wallets=WHALE_WALLETS,
+                                polygonscan_client=polygonscan,
+                                last_block_cache=None,
+                            )
+                            all_opportunities.extend(whale_copy_opps)
+                            logger.info("Whale copy scan: found %d opportunities", len(whale_copy_opps))
+                    except Exception as e:
+                        logger.debug("Whale copy scan failed: %s", e)
+
                 # Seed PriceTracker from REST data (WS only covers subscribed markets)
                 if _price_tracker:
                     if poly_markets:
