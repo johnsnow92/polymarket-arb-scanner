@@ -408,28 +408,34 @@ class ArbitrageExecutor:
                 reason = "reward_refreshed"  # Reward quotes are refreshed during reward scan
             elif opp_type == "Imbalance":
                 # STRAT-01: Imbalance revalidation — check ratio hasn't collapsed
-                current_ratio = abs(opp.get("_imbalance_ratio", 0.0))
+                current_ratio = abs(opportunity.get("_imbalance_ratio", 0.0))
                 if current_ratio > 0:
-                    original_ratio = abs(opportunity.get("_imbalance_ratio", current_ratio))
+                    original_ratio = abs(opportunity.get("_original_imbalance_ratio", current_ratio))
                     min_ratio_to_revalidate = original_ratio * 0.7  # Allow 30% collapse
                     if current_ratio < min_ratio_to_revalidate:
                         logger.info(
                             "Imbalance collapsed %.1f%% -> rejected",
                             (1 - current_ratio / original_ratio) * 100 if original_ratio > 0 else 0
                         )
-                        return False, "Imbalance collapsed"
-                reason = "imbalance_stable"
+                        passed = False
+                        reason = "Imbalance collapsed"
+                    else:
+                        reason = "imbalance_stable"
+                else:
+                    reason = "imbalance_stable"
             elif opp_type == "NewsSnipe":
                 # STRAT-02: News snipe revalidation — check confidence threshold
-                confidence = opp.get("_confidence", 0.0)
+                confidence = opportunity.get("_confidence", 0.0)
                 if confidence < NEWS_SNIPE_CONFIDENCE_THRESHOLD:
                     logger.info("News snipe confidence too low: %.1f", confidence)
-                    return False, f"Confidence {confidence:.2f} below threshold {NEWS_SNIPE_CONFIDENCE_THRESHOLD}"
-                reason = "confidence_verified"
+                    passed = False
+                    reason = f"Confidence {confidence:.2f} below threshold {NEWS_SNIPE_CONFIDENCE_THRESHOLD}"
+                else:
+                    reason = "confidence_verified"
             elif opp_type == "Correlated":
                 # STRAT-06: Correlated revalidation — check spread hasn't collapsed
-                current_spread = opp.get("_spread", 0.0)
-                original_spread = opp.get("_original_spread", current_spread)
+                current_spread = opportunity.get("_spread", 0.0)
+                original_spread = opportunity.get("_original_spread", current_spread)
                 if original_spread > 0:
                     min_spread_to_revalidate = original_spread * 0.8  # Allow 20% collapse
                     if current_spread < min_spread_to_revalidate:
@@ -437,19 +443,27 @@ class ArbitrageExecutor:
                             "Correlated spread collapsed %.1f%% -> rejected",
                             (1 - current_spread / original_spread) * 100
                         )
-                        return False, "Spread collapsed"
-                reason = "spread_verified"
+                        passed = False
+                        reason = "Spread collapsed"
+                    else:
+                        reason = "spread_verified"
+                else:
+                    reason = "spread_verified"
             elif opp_type == "TimeDecay":
                 # STRAT-07: Time decay revalidation — check expiry and consensus
-                hours_left = opp.get("_hours_to_expiry", 0.0)
+                hours_left = opportunity.get("_hours_to_expiry", 0.0)
                 if hours_left < 1.0:
                     logger.info("Time decay: market expired before execution")
-                    return False, "Market expired"
-                consensus = opp.get("_consensus_prob", 0.0)
-                if consensus < TIME_DECAY_MIN_CONSENSUS:
-                    logger.info("Time decay: consensus dropped below threshold: %.2f", consensus)
-                    return False, f"Consensus {consensus:.2f} dropped below {TIME_DECAY_MIN_CONSENSUS}"
-                reason = "time_decay_verified"
+                    passed = False
+                    reason = "Market expired"
+                else:
+                    consensus = opportunity.get("_consensus_prob", 0.0)
+                    if consensus < TIME_DECAY_MIN_CONSENSUS:
+                        logger.info("Time decay: consensus dropped below threshold: %.2f", consensus)
+                        passed = False
+                        reason = f"Consensus {consensus:.2f} dropped below {TIME_DECAY_MIN_CONSENSUS}"
+                    else:
+                        reason = "time_decay_verified"
             # Unknown type — proceed cautiously (passed=True from init)
 
         except _RevalidationAPIError as e:
@@ -1488,45 +1502,45 @@ class ArbitrageExecutor:
                 legs = self._build_cross_all_legs(opportunity, size)
         elif opp_type == "Imbalance":
             # STRAT-01: Order Book Imbalance — buy on predicted direction
-            direction = opp.get("_direction", "YES")
-            token_ids = opp.get("_token_ids", [])
+            direction = opportunity.get("_direction", "YES")
+            token_ids = opportunity.get("_token_ids", [])
             if not token_ids or len(token_ids) < 2:
-                raise ValueError(f"Imbalance opp missing token IDs: {opp}")
+                raise ValueError(f"Imbalance opp missing token IDs: {opportunity}")
 
             yes_token = token_ids[0]
             no_token = token_ids[1]
 
             if direction == "YES":
                 legs = [{"platform": "polymarket", "side": "BUY", "token": "yes",
-                         "price": opp.get("_yes_price", 0), "_token_id": yes_token}]
+                         "price": opportunity.get("_yes_price", 0), "_token_id": yes_token}]
             else:
                 legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
-                         "price": opp.get("_no_price", 0), "_token_id": no_token}]
+                         "price": opportunity.get("_no_price", 0), "_token_id": no_token}]
         elif opp_type == "NewsSnipe":
             # STRAT-02: News Snipe — buy sentiment side at market (taker order)
-            sentiment = opp.get("_sentiment", "YES")
-            token_ids = opp.get("_token_ids", [])
+            sentiment = opportunity.get("_sentiment", "YES")
+            token_ids = opportunity.get("_token_ids", [])
             if not token_ids or len(token_ids) < 2:
-                raise ValueError(f"NewsSnipe opp missing token IDs: {opp}")
+                raise ValueError(f"NewsSnipe opp missing token IDs: {opportunity}")
 
             yes_token = token_ids[0]
             no_token = token_ids[1]
 
             if sentiment == "YES":
                 legs = [{"platform": "polymarket", "side": "BUY", "token": "yes",
-                         "price": opp.get("_yes_price", 0), "_token_id": yes_token}]
+                         "price": opportunity.get("_yes_price", 0), "_token_id": yes_token}]
             else:
                 legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
-                         "price": opp.get("_no_price", 0), "_token_id": no_token}]
+                         "price": opportunity.get("_no_price", 0), "_token_id": no_token}]
         elif opp_type == "Correlated":
             # STRAT-06: Correlated Pairs — long underpriced, short overpriced
-            long_leg = opp.get("_long_leg", {})
-            short_leg = opp.get("_short_leg", {})
+            long_leg = opportunity.get("_long_leg", {})
+            short_leg = opportunity.get("_short_leg", {})
             long_token_ids = long_leg.get("_token_ids", [])
             short_token_ids = short_leg.get("_token_ids", [])
 
             if not long_token_ids or not short_token_ids:
-                raise ValueError(f"Correlated opp missing token IDs: {opp}")
+                raise ValueError(f"Correlated opp missing token IDs: {opportunity}")
 
             legs = [
                 {"platform": "polymarket", "side": "BUY", "token": "yes",
@@ -1536,20 +1550,20 @@ class ArbitrageExecutor:
             ]
         elif opp_type == "TimeDecay":
             # STRAT-07: Time Decay — buy high-consensus outcome at discount
-            consensus_side = opp.get("_consensus_side", "YES")
-            token_ids = opp.get("_token_ids", [])
+            consensus_side = opportunity.get("_consensus_side", "YES")
+            token_ids = opportunity.get("_token_ids", [])
             if not token_ids or len(token_ids) < 2:
-                raise ValueError(f"TimeDecay opp missing token IDs: {opp}")
+                raise ValueError(f"TimeDecay opp missing token IDs: {opportunity}")
 
             yes_token = token_ids[0]
             no_token = token_ids[1]
 
             if consensus_side == "YES":
                 legs = [{"platform": "polymarket", "side": "BUY", "token": "yes",
-                         "price": opp.get("_yes_price", 0), "_token_id": yes_token}]
+                         "price": opportunity.get("_yes_price", 0), "_token_id": yes_token}]
             else:
                 legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
-                         "price": opp.get("_no_price", 0), "_token_id": no_token}]
+                         "price": opportunity.get("_no_price", 0), "_token_id": no_token}]
 
         # HARDEN-05: Attach a per-leg idempotency key before returning.
         # Keys are stable within a 60-second minute bucket so that retries

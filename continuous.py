@@ -1159,6 +1159,90 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     except Exception as exc:
                         logger.debug("Rewards scanning error: %s", exc)
 
+                # STRAT-01: Order Book Imbalance
+                if args.mode in ("all", "imbalance") and CONFIG_IMBALANCE_ENABLED:
+                    try:
+                        from scans.imbalance import scan_imbalance
+                        from config import IMBALANCE_RATIO, IMBALANCE_MAX_TRADE
+                        # Build markets_by_key dict for CLOB refinement
+                        _markets_by_key_imbalance: dict[str, dict] = {}
+                        if poly_markets:
+                            for mkt in poly_markets:
+                                cid = mkt.get("condition_id", "")
+                                if cid:
+                                    _markets_by_key_imbalance[f"polymarket-{cid}"] = mkt
+                        imbalance_opps = scan_imbalance(
+                            poly_markets=poly_markets if poly_markets else [],
+                            kalshi_data=kalshi_data,
+                            markets_by_key=_markets_by_key_imbalance,
+                            min_profit=min_profit,
+                        )
+                        all_opportunities.extend(imbalance_opps)
+                    except Exception as exc:
+                        logger.debug("Imbalance scan failed: %s", exc)
+
+                # STRAT-02: News-Driven Resolution Sniping
+                if args.mode in ("all", "news-snipe") and CONFIG_NEWS_SNIPE_ENABLED:
+                    try:
+                        from scans.news_snipe import scan_news_snipe
+                        from config import NEWS_SNIPE_CONFIDENCE_THRESHOLD, NEWS_SNIPE_MAX_TRADE
+                        if not FINNHUB_API_KEY:
+                            logger.debug("NEWS_SNIPE_ENABLED but FINNHUB_API_KEY not set")
+                        else:
+                            try:
+                                from finnhub_api import FinnhubNewsClient
+                                news_client = FinnhubNewsClient(api_key=FINNHUB_API_KEY)
+                                news_snipe_opps = scan_news_snipe(
+                                    poly_markets=poly_markets if poly_markets else [],
+                                    kalshi_data=kalshi_data,
+                                    news_client=news_client,
+                                    confidence_threshold=NEWS_SNIPE_CONFIDENCE_THRESHOLD,
+                                    min_profit=min_profit,
+                                )
+                                all_opportunities.extend(news_snipe_opps)
+                            except ImportError:
+                                logger.debug("finnhub_api module not available")
+                    except Exception as exc:
+                        logger.debug("News snipe scan failed: %s", exc)
+
+                # STRAT-06: Correlated Market Pairs
+                if args.mode in ("all", "correlated") and CONFIG_CORRELATED_ENABLED:
+                    try:
+                        from scans.correlated import scan_correlated
+                        from config import CORRELATION_DIVERGENCE_THRESHOLD, CORRELATED_PAIRS_CONFIG
+                        correlated_opps = scan_correlated(
+                            poly_markets=poly_markets if poly_markets else [],
+                            kalshi_data=kalshi_data,
+                            correlated_pairs=CORRELATED_PAIRS_CONFIG,
+                            divergence_threshold=CORRELATION_DIVERGENCE_THRESHOLD,
+                            min_profit=min_profit,
+                        )
+                        all_opportunities.extend(correlated_opps)
+                    except Exception as exc:
+                        logger.debug("Correlated pairs scan failed: %s", exc)
+
+                # STRAT-07: Time Decay Convergence
+                if args.mode in ("all", "time-decay") and CONFIG_TIME_DECAY_ENABLED:
+                    try:
+                        from scans.time_decay import scan_time_decay
+                        from config import (
+                            TIME_DECAY_HOURS_THRESHOLD, TIME_DECAY_MIN_CONSENSUS,
+                            TIME_DECAY_MAX_TRADE
+                        )
+                        from signal_aggregator import SignalAggregator
+                        _time_decay_aggregator = SignalAggregator()
+                        time_decay_opps = scan_time_decay(
+                            poly_markets=poly_markets if poly_markets else [],
+                            kalshi_data=kalshi_data,
+                            signal_aggregator=_time_decay_aggregator,
+                            hours_threshold=TIME_DECAY_HOURS_THRESHOLD,
+                            min_consensus=TIME_DECAY_MIN_CONSENSUS,
+                            min_profit=min_profit,
+                        )
+                        all_opportunities.extend(time_decay_opps)
+                    except Exception as exc:
+                        logger.debug("Time decay scan failed: %s", exc)
+
                 # Seed PriceTracker from REST data (WS only covers subscribed markets)
                 if _price_tracker:
                     if poly_markets:
