@@ -1249,3 +1249,80 @@ def net_profit_news_snipe(
 
     return net_profit
 
+
+def net_profit_correlated(
+    long_entry_price: float,
+    long_exit_price: float,
+    short_entry_price: float,
+    short_exit_price: float,
+    size: float,
+    platform_long: str = "polymarket",
+    platform_short: str = "polymarket",
+) -> float:
+    """Calculate net profit for a correlated pair convergence trade.
+
+    Correlated pair trades match-size both legs (long the underpriced outcome,
+    short the overpriced outcome) to capture spread convergence with minimal
+    directional exposure. Both legs are Layer 4 (informed trading) based on
+    correlation signals, typically executed with taker orders (time-sensitive).
+
+    Args:
+        long_entry_price: Entry price for the long leg (underpriced outcome).
+        long_exit_price: Exit price for the long leg.
+        short_entry_price: Entry price for the short leg (overpriced outcome).
+        short_exit_price: Exit price for the short leg.
+        size: Trade size in dollars (same for both legs to maintain correlation hedge).
+        platform_long: Platform for long leg ("polymarket", "kalshi", etc.).
+        platform_short: Platform for short leg (can differ from long leg).
+
+    Returns:
+        Net profit in USD after fees on both legs. May be negative if convergence
+        did not occur as expected.
+    """
+    if size <= 0:
+        return 0.0
+
+    # Long leg profit: buy at entry, sell at exit
+    long_gross = size * (long_exit_price - long_entry_price)
+    long_entry_fee = 0.0
+    long_exit_fee = 0.0
+
+    if platform_long == "polymarket":
+        long_entry_fee = polymarket_taker_fee(long_entry_price, 1) * size
+        long_exit_fee = polymarket_taker_fee(long_exit_price, 1) * size
+    elif platform_long == "kalshi":
+        long_entry_fee = kalshi_taker_fee(long_entry_price, 1) * size
+        long_exit_fee = kalshi_taker_fee(long_exit_price, 1) * size
+    elif platform_long == "gemini":
+        long_entry_fee = GEMINI_TAKER_RATE * long_entry_price * (1 - long_entry_price) * size
+        long_exit_fee = GEMINI_TAKER_RATE * long_exit_price * (1 - long_exit_price) * size
+    else:
+        # Default: 2% fee estimate
+        long_entry_fee = long_entry_price * 0.02 * size
+        long_exit_fee = long_exit_price * 0.02 * size
+
+    long_net = long_gross - long_entry_fee - long_exit_fee
+
+    # Short leg profit: sell at entry, buy back at exit (reversed)
+    short_gross = size * (short_entry_price - short_exit_price)
+    short_entry_fee = 0.0
+    short_exit_fee = 0.0
+
+    if platform_short == "polymarket":
+        short_entry_fee = polymarket_taker_fee(short_entry_price, 1) * size
+        short_exit_fee = polymarket_taker_fee(short_exit_price, 1) * size
+    elif platform_short == "kalshi":
+        short_entry_fee = kalshi_taker_fee(short_entry_price, 1) * size
+        short_exit_fee = kalshi_taker_fee(short_exit_price, 1) * size
+    elif platform_short == "gemini":
+        short_entry_fee = GEMINI_TAKER_RATE * short_entry_price * (1 - short_entry_price) * size
+        short_exit_fee = GEMINI_TAKER_RATE * short_exit_price * (1 - short_exit_price) * size
+    else:
+        # Default: 2% fee estimate
+        short_entry_fee = short_entry_price * 0.02 * size
+        short_exit_fee = short_exit_price * 0.02 * size
+
+    short_net = short_gross - short_entry_fee - short_exit_fee
+
+    # Total net profit from both legs
+    return long_net + short_net
