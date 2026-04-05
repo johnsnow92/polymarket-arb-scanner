@@ -904,7 +904,8 @@ def main():
                  "spread", "betfair", "smarkets", "sxbet", "matchbook",
                  "gemini", "ibkr", "event", "triangular", "multi-cross",
                  "stale", "resolution", "convergence", "mm", "rewards",
-                 "imbalance", "news-snipe", "correlated", "time-decay"],
+                 "imbalance", "news-snipe", "correlated", "time-decay",
+                 "logical-arb", "whale-copy"],
         default="all",
         help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay",
     )
