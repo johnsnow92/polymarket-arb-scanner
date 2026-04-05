@@ -148,6 +148,8 @@ class ArbitrageExecutor:
         self._decision_log_path = os.path.join(_data_dir, "decisions.jsonl")
         self._decision_log_lock = threading.Lock()
         self._decision_fh = open(self._decision_log_path, "a", encoding="utf-8", buffering=1)
+        # Whale copy position tracking
+        self._whale_copy_position_count = 0
 
     def _get_cached_balances(self, opp_type: str) -> dict | None:
         """Return cached balances if fresh, otherwise fetch and cache.
@@ -217,6 +219,17 @@ class ArbitrageExecutor:
             logger.debug(f"Duplicate trade for {market} within 60s window. Skipping.")
             self._log_skipped(opportunity, "duplicate_trade")
             return False
+
+        # 0d. STRAT-05: Whale copy position limit (max 5 concurrent)
+        if opp_type == "WhaleCopy":
+            from config import WHALE_COPY_MAX_POSITIONS
+            if self._whale_copy_position_count >= WHALE_COPY_MAX_POSITIONS:
+                logger.warning(
+                    "Whale copy position limit reached (%d/%d), skipping: %s",
+                    self._whale_copy_position_count, WHALE_COPY_MAX_POSITIONS, market,
+                )
+                self._log_skipped(opportunity, "whale_position_limit")
+                return False
 
         prefix = "[DRY RUN] " if self.dry_run else ""
 
@@ -467,6 +480,10 @@ class ArbitrageExecutor:
             elif opp_type == "LogicalArb":
                 # STRAT-04: Logical arb revalidation — check both market prices haven't moved >10%
                 passed, reval_profit, reason = self._revalidate_logical_arb(
+                    opportunity, original_profit)
+            elif opp_type == "WhaleCopy":
+                # STRAT-05: Whale copy revalidation — check <30s latency and price stability
+                passed, reval_profit, reason = self._revalidate_whale_copy(
                     opportunity, original_profit)
             # Unknown type — proceed cautiously (passed=True from init)
 
@@ -991,6 +1008,53 @@ class ArbitrageExecutor:
             logger.debug("Logical arb revalidation CLOB fetch failed: %s", e)
             # Graceful degradation: accept if original ROI was good (handled by caller)
             return True, original_profit, "clob_error_accepted"
+
+        return True, original_profit, "passed"
+
+    def _revalidate_whale_copy(
+        self, opp: dict, original_profit: float,
+    ) -> tuple[bool, float, str]:
+        """Revalidate a WhaleCopy opportunity — check <30s latency and price stability.
+
+        Layer 4: Rejects if whale trade is >30s old or market price moved >10%.
+        Returns:
+            (passed, reval_profit, reason)
+        """
+        import time as _time
+
+        # Check latency budget: whale trade must be <30s old
+        whale_ts = opp.get("_whale_timestamp", 0)
+        if whale_ts:
+            age_seconds = _time.time() - whale_ts
+            if age_seconds > 30:
+                logger.info(
+                    "WhaleCopy trade too old (%.1fs > 30s), rejecting: %s",
+                    age_seconds, opp.get("market", ""),
+                )
+                return False, 0.0, "stale_whale_trade"
+
+        # Check market price hasn't moved >10%
+        token_ids = opp.get("_token_ids", [])
+        if token_ids:
+            try:
+                book = fetch_order_book(token_ids[0])
+                if book:
+                    asks = book.get("asks", [])
+                    if asks:
+                        fresh_price = float(asks[0].get("price", 0))
+                        scan_price = opp.get("_market_price", fresh_price)
+                        if scan_price > 0:
+                            delta = abs(fresh_price - scan_price) / scan_price
+                            if delta > 0.10:
+                                logger.info(
+                                    "WhaleCopy price moved %.1f%% (%.4f -> %.4f), rejecting",
+                                    delta * 100, scan_price, fresh_price,
+                                )
+                                return False, 0.0, "price_moved_too_much"
+                        opp["_market_price"] = fresh_price
+            except Exception as e:
+                logger.debug("WhaleCopy revalidation CLOB fetch failed: %s", e)
+                return True, original_profit, "clob_error_accepted"
 
         return True, original_profit, "passed"
 
@@ -1648,6 +1712,18 @@ class ArbitrageExecutor:
                  "price": opportunity.get("_if_price", 0), "_token_id": if_yes_token},
             ]
 
+        elif opp_type == "WhaleCopy":
+            # STRAT-05: Whale copy trading — mirror whale trader's position
+            token_ids = opportunity.get("_token_ids", [])
+            if not token_ids:
+                logger.warning("WhaleCopy opp missing token IDs: %s", opportunity.get("market", ""))
+                return []
+            legs = [
+                {"platform": "polymarket", "side": "BUY", "token": "yes",
+                 "price": opportunity.get("_market_price", 0),
+                 "_token_id": token_ids[0]},
+            ]
+
         # HARDEN-05: Attach a per-leg idempotency key before returning.
         # Keys are stable within a 60-second minute bucket so that retries
         # within the same minute are identifiable as duplicates by the platform.
@@ -2142,6 +2218,9 @@ class ArbitrageExecutor:
             )
             # Invalidate balance cache after a successful trade
             self.invalidate_balance_cache()
+            # STRAT-05: Track whale copy positions
+            if opp_type == "WhaleCopy":
+                self._whale_copy_position_count += 1
             # Notify on successful trade
             self._notify_trade(opportunity, legs, size, success=True)
 
