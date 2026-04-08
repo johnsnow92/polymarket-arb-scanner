@@ -21,6 +21,7 @@ class PartialFillHedger:
         sxbet_client=None,
         matchbook_client=None,
         gemini_client=None,
+        ibkr_client=None,
         db: TradeDB = None,
     ):
         self.pm_trader = pm_trader
@@ -30,7 +31,8 @@ class PartialFillHedger:
         self.sxbet_client = sxbet_client
         self.matchbook_client = matchbook_client
         self.gemini_client = gemini_client
-        # Note: IBKR not included — cannot sell (BUY-only platform)
+        self.ibkr_client = ibkr_client
+        # Note: IBKR accepted for test coverage but cannot hedge (BUY-only platform)
         self.db = db
 
     def queue_hedge(

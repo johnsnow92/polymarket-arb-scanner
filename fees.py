@@ -1070,3 +1070,399 @@ def find_lowest_fee_path(
 
     return best
 
+
+def net_profit_rewards(bid_price: float, ask_price: float, size: float = 1.0,
+                       platform: str = "polymarket") -> dict:
+    """Calculate net profit for reward resting orders.
+
+    For rewards strategy, profit comes from two sources:
+    1. Spread capture (bid/ask spread on fills)
+    2. Reward payout (tracked separately in database)
+
+    This function calculates the spread profit per fill. Actual reward yield
+    is tracked separately via RewardTracker/KalshiRewardTracker in database.
+
+    Args:
+        bid_price: Resting bid price (0-1).
+        ask_price: Resting ask price (0-1).
+        size: Order size in dollars.
+        platform: "polymarket" or "kalshi".
+
+    Returns:
+        Dict with net_profit, spread, fees, net_roi, bid, ask keys.
+    """
+    mid = (bid_price + ask_price) / 2
+    spread = ask_price - bid_price
+
+    # Platform fees for resting limit orders (makers)
+    if platform == "polymarket":
+        # Polymarket maker fee: 0% for most cases, but conservative estimate of 0.5%
+        # in case of fee structures we're not aware of
+        fee_rate = 0.005
+    elif platform == "kalshi":
+        # Kalshi maker fee: lower than taker; use conservative 0.5% estimate
+        # Actual: ceil(KALSHI_MAKER_MULTIPLIER * P * (1 - P)) in cents
+        fee_rate = 0.005
+    else:
+        # Default conservative fee rate
+        fee_rate = 0.01
+
+    fees = spread * size * fee_rate
+    net_profit = spread * size - fees
+    net_roi = (net_profit / size) * 100 if size > 0 else 0.0
+
+    return {
+        "net_profit": net_profit,
+        "spread": spread,
+        "fees": fees,
+        "net_roi": net_roi,
+        "bid": bid_price,
+        "ask": ask_price,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Order book imbalance fee calculations (Layer 4 - Informed Trading)
+# ---------------------------------------------------------------------------
+
+def net_profit_imbalance(
+    entry_price: float,
+    exit_price: float,
+    size: float,
+    platform: str = "polymarket",
+) -> float:
+    """Calculate net profit for an order book imbalance signal execution.
+
+    Imbalance trades are Layer 4 (informed trading) based on directional signals
+    from bid/ask volume ratios. Execution uses taker orders (time-sensitive) because
+    the signal may decay quickly. Entry and exit both incur taker fees.
+
+    Args:
+        entry_price: Entry price in [0, 1] (where we buy the predicted direction).
+        exit_price: Exit price in [0, 1] (where we sell to lock in profit).
+        size: Trade size in dollars.
+        platform: Platform for fee calculation ("polymarket", "kalshi", "gemini", etc.).
+
+    Returns:
+        Net profit in USD after fees. May be negative if signal was wrong.
+    """
+    if size <= 0:
+        return 0.0
+
+    if platform == "polymarket":
+        # Polymarket: both entry and exit pay taker fee at trade time
+        # Fee formula: POLYMARKET_DEFAULT_TAKER_RATE * size * price * (1 - price)
+        entry_fee = polymarket_taker_fee(entry_price, contracts=1) * size
+        exit_fee = polymarket_taker_fee(exit_price, contracts=1) * size
+        gas = POLYGON_GAS_ESTIMATE * 2  # Two Polygon transactions
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee - gas
+
+    elif platform == "kalshi":
+        # Kalshi: both entry and exit pay taker fee
+        # Fee formula: ceil(0.07 * price * (1 - price)) per contract in cents
+        entry_fee = kalshi_taker_fee(entry_price, contracts=1) * size
+        exit_fee = kalshi_taker_fee(exit_price, contracts=1) * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    elif platform == "gemini":
+        # Gemini: 5% taker fee (or GEMINI_TAKER_RATE if defined)
+        # Fee = min(price, 1 - price) * fee_rate
+        entry_fee = min(entry_price, 1.0 - entry_price) * GEMINI_TAKER_RATE * size
+        exit_fee = min(exit_price, 1.0 - exit_price) * GEMINI_TAKER_RATE * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    else:
+        # Default: use conservative taker fee estimate (1%)
+        fee_rate = 0.01
+        entry_fee = entry_price * fee_rate * size
+        exit_fee = exit_price * fee_rate * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    return net_profit
+
+
+# ---------------------------------------------------------------------------
+# News-driven resolution sniping fee calculations (Layer 2 - Near-Arb)
+# ---------------------------------------------------------------------------
+
+def net_profit_news_snipe(
+    entry_price: float,
+    exit_price: float,
+    size: float,
+    platform: str = "polymarket",
+) -> float:
+    """Calculate net profit for a news-driven resolution snipe execution.
+
+    News sniping is a Layer 2 (near-arbitrage) strategy exploiting time-sensitive
+    event signals from Finnhub news headlines. Execution uses taker orders because
+    speed is critical — latency determines profitability. Both entry and exit incur
+    taker fees to ensure fast fills.
+
+    Args:
+        entry_price: Entry price in [0, 1] (where we buy the predicted outcome).
+        exit_price: Exit price in [0, 1] (where we sell at market rate).
+        size: Trade size in dollars.
+        platform: Platform for fee calculation ("polymarket", "kalshi", "gemini", etc.).
+
+    Returns:
+        Net profit in USD after taker fees. May be negative if signal was incorrect.
+    """
+    if size <= 0:
+        return 0.0
+
+    if platform == "polymarket":
+        # Polymarket: both entry and exit pay taker fee at trade time
+        # Fee formula: POLYMARKET_DEFAULT_TAKER_RATE * size * price * (1 - price)
+        entry_fee = polymarket_taker_fee(entry_price, contracts=1) * size
+        exit_fee = polymarket_taker_fee(exit_price, contracts=1) * size
+        gas = POLYGON_GAS_ESTIMATE * 2  # Two Polygon transactions (buy + sell)
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee - gas
+
+    elif platform == "kalshi":
+        # Kalshi: both entry and exit pay taker fee
+        # Fee formula: ceil(0.07 * price * (1 - price)) per contract in cents
+        entry_fee = kalshi_taker_fee(entry_price, contracts=1) * size
+        exit_fee = kalshi_taker_fee(exit_price, contracts=1) * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    elif platform == "gemini":
+        # Gemini: taker fee (default 5% or GEMINI_TAKER_RATE)
+        # Fee = price * (1 - price) * fee_rate per contract
+        entry_fee = gemini_fee(entry_price, GEMINI_TAKER_RATE, 1) * size
+        exit_fee = gemini_fee(exit_price, GEMINI_TAKER_RATE, 1) * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    else:
+        # Default: use conservative taker fee estimate (2%)
+        fee_rate = 0.02
+        entry_fee = entry_price * fee_rate * size
+        exit_fee = exit_price * fee_rate * size
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    return net_profit
+
+
+def net_profit_correlated(
+    long_entry_price: float,
+    long_exit_price: float,
+    short_entry_price: float,
+    short_exit_price: float,
+    size: float,
+    platform_long: str = "polymarket",
+    platform_short: str = "polymarket",
+) -> float:
+    """Calculate net profit for a correlated pair convergence trade.
+
+    Correlated pair trades match-size both legs (long the underpriced outcome,
+    short the overpriced outcome) to capture spread convergence with minimal
+    directional exposure. Both legs are Layer 4 (informed trading) based on
+    correlation signals, typically executed with taker orders (time-sensitive).
+
+    Args:
+        long_entry_price: Entry price for the long leg (underpriced outcome).
+        long_exit_price: Exit price for the long leg.
+        short_entry_price: Entry price for the short leg (overpriced outcome).
+        short_exit_price: Exit price for the short leg.
+        size: Trade size in dollars (same for both legs to maintain correlation hedge).
+        platform_long: Platform for long leg ("polymarket", "kalshi", etc.).
+        platform_short: Platform for short leg (can differ from long leg).
+
+    Returns:
+        Net profit in USD after fees on both legs. May be negative if convergence
+        did not occur as expected.
+    """
+    if size <= 0:
+        return 0.0
+
+    # Long leg profit: buy at entry, sell at exit
+    long_gross = size * (long_exit_price - long_entry_price)
+    long_entry_fee = 0.0
+    long_exit_fee = 0.0
+
+    if platform_long == "polymarket":
+        long_entry_fee = polymarket_taker_fee(long_entry_price, 1) * size
+        long_exit_fee = polymarket_taker_fee(long_exit_price, 1) * size
+    elif platform_long == "kalshi":
+        long_entry_fee = kalshi_taker_fee(long_entry_price, 1) * size
+        long_exit_fee = kalshi_taker_fee(long_exit_price, 1) * size
+    elif platform_long == "gemini":
+        long_entry_fee = GEMINI_TAKER_RATE * long_entry_price * (1 - long_entry_price) * size
+        long_exit_fee = GEMINI_TAKER_RATE * long_exit_price * (1 - long_exit_price) * size
+    else:
+        # Default: 2% fee estimate
+        long_entry_fee = long_entry_price * 0.02 * size
+        long_exit_fee = long_exit_price * 0.02 * size
+
+    long_net = long_gross - long_entry_fee - long_exit_fee
+
+    # Short leg profit: sell at entry, buy back at exit (reversed)
+    short_gross = size * (short_entry_price - short_exit_price)
+    short_entry_fee = 0.0
+    short_exit_fee = 0.0
+
+    if platform_short == "polymarket":
+        short_entry_fee = polymarket_taker_fee(short_entry_price, 1) * size
+        short_exit_fee = polymarket_taker_fee(short_exit_price, 1) * size
+    elif platform_short == "kalshi":
+        short_entry_fee = kalshi_taker_fee(short_entry_price, 1) * size
+        short_exit_fee = kalshi_taker_fee(short_exit_price, 1) * size
+    elif platform_short == "gemini":
+        short_entry_fee = GEMINI_TAKER_RATE * short_entry_price * (1 - short_entry_price) * size
+        short_exit_fee = GEMINI_TAKER_RATE * short_exit_price * (1 - short_exit_price) * size
+    else:
+        # Default: 2% fee estimate
+        short_entry_fee = short_entry_price * 0.02 * size
+        short_exit_fee = short_exit_price * 0.02 * size
+
+    short_net = short_gross - short_entry_fee - short_exit_fee
+
+    # Total net profit from both legs
+    return long_net + short_net
+
+
+# ---------------------------------------------------------------------------
+# Time decay convergence fee calculations (Layer 2 - Near-Arb)
+# ---------------------------------------------------------------------------
+
+def net_profit_time_decay(
+    entry_price: float,
+    exit_price: float,
+    size: float,
+    platform: str = "polymarket",
+) -> float:
+    """Calculate net profit for a time decay convergence position.
+
+    Time decay trades hold near-certain outcomes to market resolution for
+    guaranteed profit. Entry price is <0.95 (buy at discount), exit price
+    is typically 1.0 (correct outcome at settlement) or 0.0 (wrong outcome).
+    Layer 2 (near-arbitrage) strategy.
+
+    Entry pays taker fee; exit at settlement may incur platform settlement fees
+    (e.g., Polymarket settlement fee on net winnings, Kalshi taker on close-out).
+
+    Args:
+        entry_price: Entry price in [0, 1] (typically 0.90-0.95 for <0.95 buy).
+        exit_price: Exit price in [0, 1] (typically 1.0 if correct, 0.0 if wrong).
+        size: Trade size in dollars.
+        platform: Platform for fee calculation ("polymarket", "kalshi", "gemini", etc.).
+
+    Returns:
+        Net profit in USD after entry and exit fees. Typically +1-5% if consensus
+        correct (entry 0.90, exit 1.0), negative if consensus wrong.
+    """
+    if size <= 0:
+        return 0.0
+
+    if platform == "polymarket":
+        # Polymarket: entry pays taker fee at trade time
+        # Exit at settlement: no additional settlement fee in March 2026 model
+        # (settlement fee removed; only entry-time fee applies)
+        entry_fee = polymarket_taker_fee(entry_price, contracts=1) * size
+        # Exit at resolution: if exit_price = 1.0 (correct), no additional fees
+        # If exit_price = 0.0 (wrong), no additional fees (loss is already baked in)
+        exit_fee = 0.0
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    elif platform == "kalshi":
+        # Kalshi: entry pays taker fee at trade time
+        # Exit at settlement: settlement may be automatic (no additional fee) or
+        # may require closing position (taker fee again)
+        # Conservative: estimate 1 taker fee for entry only
+        entry_fee = kalshi_taker_fee(entry_price, contracts=1) * size
+        exit_fee = 0.0  # Settlement is automatic; no explicit close-out
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    elif platform == "gemini":
+        # Gemini: entry pays taker fee at trade time
+        # Exit: automatic settlement at resolution
+        entry_fee = gemini_fee(entry_price, GEMINI_TAKER_RATE, 1) * size
+        exit_fee = 0.0
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    else:
+        # Default: use conservative taker fee estimate (1%)
+        # Entry pays taker fee; exit is free (settlement)
+        fee_rate = 0.01
+        entry_fee = entry_price * fee_rate * size
+        exit_fee = 0.0
+        gross_profit = size * (exit_price - entry_price)
+        net_profit = gross_profit - entry_fee - exit_fee
+
+    return net_profit
+
+
+def net_profit_logical_arb(price_if_yes: float, price_then_yes: float) -> float:
+    """Calculate net profit for logical arbitrage trade.
+
+    Buys the underpriced implied outcome (then_yes) and sells the implying outcome
+    (if_yes) to capitalize on semantic inconsistencies across related markets.
+
+    Layer 4: Informed trading with rapid execution at taker rates.
+
+    Formula: The trade structure is:
+    - BUY: then_yes at taker fee
+    - SELL: if_yes at taker fee (hedge)
+    - Profit: (price_if_yes - TAKER_FEE) - (price_then_yes + TAKER_FEE)
+
+    Example: Bitcoin >$100k trading at 0.50, Bitcoin >$90k trading at 0.45.
+    If P(>$100k) should be <= P(>$90k) logically, buy >$90k, sell >$100k.
+    Net profit = (0.50 - 0.04*0.5*(1-0.5)) - (0.45 + 0.04*0.45*(1-0.45)) ≈ 0.045
+
+    Args:
+        price_if_yes: Price of the implying outcome (e.g., Bitcoin >$100k).
+        price_then_yes: Price of the implied outcome (e.g., Bitcoin >$90k).
+
+    Returns:
+        Net profit in USD after both entry fees. Can be negative if trade is unfavorable.
+    """
+    # Entry fees: both legs pay Polymarket taker fee at trade entry
+    # Taker fee = POLYMARKET_DEFAULT_TAKER_RATE * P * (1 - P) per contract
+    fee_sell_if_yes = polymarket_taker_fee(price_if_yes)
+    fee_buy_then_yes = polymarket_taker_fee(price_then_yes)
+
+    # Net profit: receive if_yes price minus both entry fees, minus cost of then_yes
+    # Assuming 1 contract ($1 stake)
+    net_profit = price_if_yes - price_then_yes - fee_sell_if_yes - fee_buy_then_yes
+
+    return net_profit
+
+
+# ---------------------------------------------------------------------------
+# Whale Copy Trading fee calculator
+# ---------------------------------------------------------------------------
+
+
+def net_profit_whale_copy(entry_price: float, exit_price: float) -> float:
+    """Calculate net profit for whale copy mirror trade.
+
+    Mirrors a profitable whale trader's position on Polymarket. We're buying
+    at entry_price (taker fee) and selling at exit_price (taker fee).
+
+    Layer 4: Rapid execution at taker rates on both legs.
+
+    Formula:
+    - BUY at entry_price: pay taker fee
+    - SELL at exit_price: pay taker fee
+    - Profit = (exit_price - entry_price) - fee_buy - fee_sell
+
+    Args:
+        entry_price: Price we buy at (copying whale's entry).
+        exit_price: Expected exit price (whale's target or current market).
+
+    Returns:
+        Net profit in USD after taker fees on both legs.
+    """
+    fee_buy = polymarket_taker_fee(entry_price)
+    fee_sell = polymarket_taker_fee(exit_price)
+    return (exit_price - entry_price) - fee_buy - fee_sell

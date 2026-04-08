@@ -322,3 +322,182 @@ class TestRebalanceEndpoint:
             state.platform_balances = original_bal
             state.platform_opp_flow = original_flow
             server.shutdown()
+
+
+class TestStrategyLeaderboardEndpoint:
+    """Tests for GET /api/strategy-leaderboard."""
+
+    def test_returns_200_with_required_keys(self):
+        """Returns 200 with strategies, timestamp, lookback_days keys."""
+        server, url = _start_test_server(19030)
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _get(url, "/api/strategy-leaderboard")
+            assert status == 200
+            data = json.loads(body)
+            assert "strategies" in data
+            assert "timestamp" in data
+            assert "lookback_days" in data
+            assert isinstance(data["strategies"], list)
+        finally:
+            server.shutdown()
+
+    def test_leaderboard_reflects_state(self):
+        """Returns strategy_leaderboard from module-level state."""
+        server, url = _start_test_server(19031)
+        original_lb = list(state.strategy_leaderboard)
+        original_ts = state.leaderboard_updated_at
+
+        state.strategy_leaderboard = [
+            {
+                "strategy": "binary",
+                "trade_count": 10,
+                "wins": 6,
+                "win_rate": 0.6,
+                "total_pnl": 0.05,
+                "avg_pnl": 0.005,
+                "annual_sharpe": 1.2,
+                "max_drawdown": -0.02
+            }
+        ]
+        state.leaderboard_updated_at = 1711000000.0
+
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _get(url, "/api/strategy-leaderboard")
+            assert status == 200
+            data = json.loads(body)
+            assert len(data["strategies"]) == 1
+            assert data["strategies"][0]["strategy"] == "binary"
+            assert data["strategies"][0]["trade_count"] == 10
+            assert data["strategies"][0]["win_rate"] == 0.6
+            assert data["timestamp"] == 1711000000.0
+            assert data["lookback_days"] == 7
+        finally:
+            state.strategy_leaderboard = original_lb
+            state.leaderboard_updated_at = original_ts
+            server.shutdown()
+
+    def test_empty_leaderboard_returns_valid_response(self):
+        """Returns valid JSON with empty array when no strategies."""
+        server, url = _start_test_server(19032)
+        original_lb = list(state.strategy_leaderboard)
+        state.strategy_leaderboard = []
+
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _get(url, "/api/strategy-leaderboard")
+            assert status == 200
+            data = json.loads(body)
+            assert data["strategies"] == []
+            assert data["lookback_days"] == 7
+        finally:
+            state.strategy_leaderboard = original_lb
+            server.shutdown()
+
+    def test_strategies_have_required_fields(self):
+        """Each strategy dict has all required metric fields."""
+        server, url = _start_test_server(19033)
+        original_lb = list(state.strategy_leaderboard)
+
+        state.strategy_leaderboard = [
+            {
+                "strategy": "cross",
+                "trade_count": 5,
+                "wins": 4,
+                "win_rate": 0.8,
+                "total_pnl": 0.1,
+                "avg_pnl": 0.02,
+                "annual_sharpe": 2.5,
+                "max_drawdown": -0.01
+            },
+            {
+                "strategy": "kalshi",
+                "trade_count": 3,
+                "wins": 2,
+                "win_rate": 0.667,
+                "total_pnl": 0.03,
+                "avg_pnl": 0.01,
+                "annual_sharpe": 1.8,
+                "max_drawdown": -0.005
+            }
+        ]
+
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _get(url, "/api/strategy-leaderboard")
+            assert status == 200
+            data = json.loads(body)
+            required_fields = {
+                "strategy", "trade_count", "wins", "win_rate",
+                "total_pnl", "avg_pnl", "annual_sharpe", "max_drawdown"
+            }
+            for strat in data["strategies"]:
+                assert set(strat.keys()) == required_fields
+        finally:
+            state.strategy_leaderboard = original_lb
+            server.shutdown()
+
+    def test_strategies_sorted_by_pnl_descending(self):
+        """Endpoint returns strategies in the order provided (analytics.py handles sorting)."""
+        server, url = _start_test_server(19034)
+        original_lb = list(state.strategy_leaderboard)
+
+        # Note: analytics.py sorts by total_pnl descending before returning,
+        # so we set them in sorted order to test endpoint just returns state as-is
+        state.strategy_leaderboard = [
+            {
+                "strategy": "high_pnl",
+                "trade_count": 5,
+                "wins": 4,
+                "win_rate": 0.8,
+                "total_pnl": 0.15,
+                "avg_pnl": 0.03,
+                "annual_sharpe": 2.0,
+                "max_drawdown": -0.01
+            },
+            {
+                "strategy": "low_pnl",
+                "trade_count": 2,
+                "wins": 1,
+                "win_rate": 0.5,
+                "total_pnl": 0.01,
+                "avg_pnl": 0.005,
+                "annual_sharpe": 0.5,
+                "max_drawdown": -0.01
+            }
+        ]
+
+        try:
+            with patch("config.DASHBOARD_PASS", ""):
+                status, body, _ = _get(url, "/api/strategy-leaderboard")
+            assert status == 200
+            data = json.loads(body)
+            # Verify order is maintained as set
+            assert data["strategies"][0]["total_pnl"] == 0.15
+            assert data["strategies"][1]["total_pnl"] == 0.01
+        finally:
+            state.strategy_leaderboard = original_lb
+            server.shutdown()
+
+    def test_update_strategy_metrics_method(self):
+        """_DashboardState.update_strategy_metrics() sets leaderboard and timestamp."""
+        s = _DashboardState()
+        metrics = [
+            {
+                "strategy": "test",
+                "trade_count": 1,
+                "wins": 1,
+                "win_rate": 1.0,
+                "total_pnl": 0.05,
+                "avg_pnl": 0.05,
+                "annual_sharpe": None,
+                "max_drawdown": 0
+            }
+        ]
+
+        s.update_strategy_metrics(metrics)
+
+        assert s.strategy_leaderboard == metrics
+        assert s.leaderboard_updated_at > 0
+        assert isinstance(s.leaderboard_updated_at, float)

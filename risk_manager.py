@@ -21,9 +21,22 @@ class RiskManager:
         # MM-specific limits
         self.mm_max_inventory_per_market = config.get("mm_max_inventory", 50.0)
         self.mm_max_total_exposure = config.get("mm_max_total_exposure", 500.0)
+        # Daily trade limit (0 = unlimited)
+        self.max_daily_trades = config.get("max_daily_trades", 0)
 
     # Opportunity types that skip depth and dedup checks
-    _SKIP_DEPTH_TYPES = frozenset({"MarketMake", "EventDivergence", "ConvergenceOpp"})
+    _SKIP_DEPTH_TYPES = frozenset({
+        "MarketMake", "EventDivergence", "ConvergenceOpp",
+        # KalshiMulti/MultiCross: CLOB order book API returns empty for many
+        # multi-outcome markets, but REST prices are real and tradeable.
+        # Depth was already checked during scan-phase CLOB refinement.
+        "KalshiMulti", "MultiCross",
+        # Phase 8-9 signal-based strategies — liquidity verified at revalidation
+        "Imbalance", "NewsSnipe", "Correlated", "TimeDecay",
+        "LogicalArb", "WhaleCopy",
+        # Reward strategies — we're placing orders, not filling existing ones
+        "PolymarketRewards", "KalshiRewards",
+    })
     _SKIP_DEDUP_TYPES = frozenset({"MarketMake"})
 
     def check(self, opportunity: dict, db, balances: dict | None = None) -> tuple[bool, str]:
@@ -41,6 +54,12 @@ class RiskManager:
         daily_pnl = db.get_daily_pnl()
         if daily_pnl < -self.daily_loss_limit:
             return False, f"Daily loss limit hit (P&L: ${daily_pnl:.2f}, limit: -${self.daily_loss_limit:.2f})"
+
+        # 1b. Daily trade count limit
+        if self.max_daily_trades > 0:
+            daily_trade_count = db.get_daily_trade_count()
+            if daily_trade_count >= self.max_daily_trades:
+                return False, f"Daily trade limit reached ({daily_trade_count}/{self.max_daily_trades})"
 
         # 2. Open positions limit
         open_count = db.get_open_positions_count()
@@ -95,7 +114,9 @@ class RiskManager:
         total_cost = float(total_cost_str.replace("$", "")) if isinstance(total_cost_str, str) else float(total_cost_str)
         roi = net_profit / total_cost if total_cost > 0 else 0
 
-        if opp_type not in self._SKIP_DEPTH_TYPES:
+        # Use prefix matching: "KalshiMulti(4)" matches "KalshiMulti"
+        skip_depth = any(opp_type.startswith(t) for t in self._SKIP_DEPTH_TYPES)
+        if not skip_depth:
             # High-ROI opportunities (>5%) use lower depth threshold
             depth_threshold = self.min_liquidity_high_roi if roi > 0.05 else self.min_liquidity
             if depth < depth_threshold:

@@ -78,6 +78,18 @@ class TradeDB:
                 created_at TEXT NOT NULL,
                 resolved_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS reward_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                market_key TEXT NOT NULL,
+                order_id TEXT,
+                event TEXT NOT NULL,
+                size REAL,
+                spread REAL,
+                resting_seconds INTEGER,
+                timestamp INTEGER NOT NULL
+            );
         """)
         self.conn.commit()
 
@@ -101,7 +113,20 @@ class TradeDB:
             self.conn.execute("ALTER TABLE trades ADD COLUMN slippage REAL")
             self.conn.commit()
         except sqlite3.OperationalError:
-            logger.debug("Migration: column already exists")
+            logger.debug("Migration: slippage column already exists")
+
+        # Safe migration: add reward columns if they don't exist
+        try:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN reward_score REAL")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            logger.debug("Migration: reward_score column already exists")
+
+        try:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN reward_yield_usdc REAL")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            logger.debug("Migration: reward_yield_usdc column already exists")
 
     def log_opportunity(
         self,
@@ -206,6 +231,16 @@ class TradeDB:
                 (f"{today}%",),
             ).fetchone()
             return realized + row2["total"]
+
+    def get_daily_trade_count(self) -> int:
+        """Count trades actually executed (filled) today (UTC)."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM trades WHERE timestamp LIKE ? AND status = 'filled'",
+                (f"{today}%",),
+            ).fetchone()
+            return row["cnt"]
 
     def get_open_positions_count(self) -> int:
         """Count positions that are currently open (not yet settled)."""
@@ -767,6 +802,31 @@ class TradeDB:
             "avg_hold_seconds": sum(hold_times) / len(hold_times) if hold_times else 0,
             "strategy_breakdown": breakdown,
         }
+
+    def log_reward_metric(self, platform: str, market_key: str, order_id: str,
+                         event: str, size: float, spread: float,
+                         resting_seconds: int) -> None:
+        """Log Kalshi reward tracking metrics (no Polymarket public API).
+
+        Args:
+            platform: "polymarket" or "kalshi"
+            market_key: Market identifier
+            order_id: Exchange order ID
+            event: "placed" or "cancelled"
+            size: Order size in dollars
+            spread: Bid-ask spread as decimal (0.05 = 5%)
+            resting_seconds: Seconds order has been resting
+        """
+        import time
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO reward_metrics
+                   (platform, market_key, order_id, event, size, spread, resting_seconds, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (platform, market_key, order_id, event, size, spread, resting_seconds,
+                 int(time.time())),
+            )
+            self.conn.commit()
 
     def close(self):
         self.conn.close()

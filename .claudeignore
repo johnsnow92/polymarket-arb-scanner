@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+*.log
+dashboard_error.log
+dashboard_output.log
+.planning/archive/

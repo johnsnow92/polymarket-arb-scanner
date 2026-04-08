@@ -64,12 +64,15 @@ from scans import (
     scan_stale_prices,
     scan_resolution_snipes,
     scan_convergence,
+    scan_polymarket_rewards,
+    scan_kalshi_rewards,
 )
 from config import (
     DEFAULT_MIN_PROFIT,
     MAX_TRADE_SIZE as CONFIG_MAX_TRADE_SIZE,
     DAILY_LOSS_LIMIT as CONFIG_DAILY_LOSS_LIMIT,
     MAX_OPEN_POSITIONS as CONFIG_MAX_OPEN_POSITIONS,
+    MAX_DAILY_TRADES as CONFIG_MAX_DAILY_TRADES,
     MIN_LIQUIDITY as CONFIG_MIN_LIQUIDITY,
     MIN_LIQUIDITY_HIGH_ROI as CONFIG_MIN_LIQUIDITY_HIGH_ROI,
     MIN_NET_ROI as CONFIG_MIN_NET_ROI,
@@ -90,6 +93,7 @@ from config import (
     EVENT_DIVERGENCE_THRESHOLD as CONFIG_EVENT_DIVERGENCE,
     EVENT_MONITOR_ENABLED as CONFIG_EVENT_MONITOR,
     CONCURRENT_EXECUTION as CONFIG_CONCURRENT_EXECUTION,
+    REWARDS_ENABLED as CONFIG_REWARDS_ENABLED,
 )
 
 # Load .env from project dir first, then ~/.claude/.env as fallback
@@ -503,6 +507,128 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         except Exception as exc:
             logger.warning("Market making scan failed: %s", exc)
 
+    # STRAT-01: Order Book Imbalance
+    if args.mode in ("all", "imbalance"):
+        from config import IMBALANCE_ENABLED, IMBALANCE_RATIO
+        if IMBALANCE_ENABLED:
+            logger.info("--- Order Book Imbalance Scan ---")
+            try:
+                from scans.imbalance import scan_imbalance
+                markets_by_key = {}
+                if poly_markets:
+                    for mkt in poly_markets:
+                        cid = mkt.get("condition_id", "")
+                        if cid:
+                            markets_by_key[cid] = mkt
+                imbalance_opps = scan_imbalance(markets_by_key, min_ratio=IMBALANCE_RATIO, price_cache={})
+                all_opportunities.extend(imbalance_opps)
+                logger.info("Found %d imbalance opportunities.", len(imbalance_opps))
+            except Exception as e:
+                logger.error("Imbalance scan failed: %s", e)
+
+    # STRAT-02: News-Driven Resolution Sniping
+    if args.mode in ("all", "news-snipe"):
+        from config import NEWS_SNIPE_ENABLED, FINNHUB_API_KEY
+        if NEWS_SNIPE_ENABLED and FINNHUB_API_KEY:
+            logger.info("--- News-Driven Sniping Scan ---")
+            try:
+                from scans.news_snipe import scan_news_snipe
+                from finnhub_api import FinnhubNewsClient
+                finnhub = FinnhubNewsClient(FINNHUB_API_KEY)
+                markets_by_key = {}
+                if poly_markets:
+                    for mkt in poly_markets:
+                        cid = mkt.get("condition_id", "")
+                        if cid:
+                            markets_by_key[cid] = mkt
+                news_opps = scan_news_snipe(markets_by_key, finnhub, cooldown_cache={})
+                all_opportunities.extend(news_opps)
+                logger.info("Found %d news snipe opportunities.", len(news_opps))
+            except Exception as e:
+                logger.error("News snipe scan failed: %s", e)
+
+    # STRAT-06: Correlated Market Pairs
+    if args.mode in ("all", "correlated"):
+        from config import CORRELATED_ENABLED, CORRELATED_PAIRS, CORRELATION_DIVERGENCE_THRESHOLD
+        if CORRELATED_ENABLED and CORRELATED_PAIRS != "[]":
+            logger.info("--- Correlated Market Pairs Scan ---")
+            try:
+                from scans.correlated import scan_correlated, _load_correlated_pairs
+                pairs = _load_correlated_pairs(CORRELATED_PAIRS)
+                markets_by_key = {}
+                if poly_markets:
+                    for mkt in poly_markets:
+                        cid = mkt.get("condition_id", "")
+                        if cid:
+                            markets_by_key[cid] = mkt
+                corr_opps = scan_correlated(markets_by_key, pairs, min_spread=CORRELATION_DIVERGENCE_THRESHOLD)
+                all_opportunities.extend(corr_opps)
+                logger.info("Found %d correlated opportunities.", len(corr_opps))
+            except Exception as e:
+                logger.error("Correlated pairs scan failed: %s", e)
+
+    # STRAT-07: Time Decay Convergence
+    if args.mode in ("all", "time-decay"):
+        from config import TIME_DECAY_ENABLED
+        if TIME_DECAY_ENABLED:
+            logger.info("--- Time Decay Convergence Scan ---")
+            try:
+                from scans.time_decay import scan_time_decay
+                from config import (
+                    TIME_DECAY_MIN_HOURS_EXPIRY, TIME_DECAY_MIN_CONSENSUS,
+                    TIME_DECAY_BUY_BELOW_PRICE
+                )
+                # Initialize signal aggregator if not already available
+                signal_agg = extra_clients.get("signal_aggregator")
+                if not signal_agg:
+                    from signal_aggregator import SignalAggregator
+                    signal_agg = SignalAggregator()
+                markets_by_key = {}
+                if poly_markets:
+                    for mkt in poly_markets:
+                        cid = mkt.get("condition_id", "")
+                        if cid:
+                            markets_by_key[cid] = mkt
+                decay_opps = scan_time_decay(
+                    markets_by_key, signal_agg,
+                    min_hours_to_expiry=TIME_DECAY_MIN_HOURS_EXPIRY,
+                    min_consensus=TIME_DECAY_MIN_CONSENSUS,
+                    buy_below_price=TIME_DECAY_BUY_BELOW_PRICE,
+                )
+                all_opportunities.extend(decay_opps)
+                logger.info("Found %d time decay opportunities.", len(decay_opps))
+            except Exception as e:
+                logger.error("Time decay scan failed: %s", e)
+
+    # Rewards scanning (Layer 3: liquidity rewards)
+    if args.mode in ("all", "rewards") and CONFIG_REWARDS_ENABLED:
+        logger.info("--- Rewards Scan ---")
+        try:
+            # Polymarket rewards scan
+            if poly_markets:
+                from market_maker import RewardTracker
+                reward_tracker = RewardTracker()
+                pm_reward_opps = scan_polymarket_rewards(
+                    poly_markets, reward_tracker, min_pool_usdc=10.0
+                )
+                all_opportunities.extend(pm_reward_opps)
+                logger.info("Found %d Polymarket reward opportunities.", len(pm_reward_opps))
+        except Exception as e:
+            logger.error("Polymarket rewards scan failed: %s", e)
+
+        try:
+            # Kalshi rewards scan
+            if kalshi_client:
+                from market_maker import KalshiRewardTracker
+                kalshi_reward_tracker = KalshiRewardTracker()
+                k_reward_opps = scan_kalshi_rewards(
+                    kalshi_client, kalshi_reward_tracker, min_pool_usdc=10.0
+                )
+                all_opportunities.extend(k_reward_opps)
+                logger.info("Found %d Kalshi reward opportunities.", len(k_reward_opps))
+        except Exception as e:
+            logger.error("Kalshi rewards scan failed: %s", e)
+
     # Filter by minimum depth if specified
     if args.min_depth > 0:
         before = len(all_opportunities)
@@ -778,9 +904,11 @@ def main():
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
                  "spread", "betfair", "smarkets", "sxbet", "matchbook",
                  "gemini", "ibkr", "event", "triangular", "multi-cross",
-                 "stale", "resolution", "convergence", "mm"],
+                 "stale", "resolution", "convergence", "mm", "rewards",
+                 "imbalance", "news-snipe", "correlated", "time-decay",
+                 "logical-arb", "whale-copy"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay",
     )
     parser.add_argument(
         "--min-profit",
@@ -909,6 +1037,7 @@ def main():
         "max_trade_size": max_trade,
         "daily_loss_limit": CONFIG_DAILY_LOSS_LIMIT,
         "max_open_positions": CONFIG_MAX_OPEN_POSITIONS,
+        "max_daily_trades": CONFIG_MAX_DAILY_TRADES,
         "min_liquidity": CONFIG_MIN_LIQUIDITY,
         "min_liquidity_high_roi": CONFIG_MIN_LIQUIDITY_HIGH_ROI,
         "min_net_roi": CONFIG_MIN_NET_ROI,

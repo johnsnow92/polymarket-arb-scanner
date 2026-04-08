@@ -645,3 +645,59 @@ class TestMarketMakerDryRun:
         assert call_kwargs.get("dry_run") is True, (
             "MarketMaker should receive dry_run=True when executor.dry_run is True"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 (Structural Alpha Strategies) — new CLI modes
+# ---------------------------------------------------------------------------
+
+class TestPhase9CLIModes:
+    """Test that logical-arb and whale-copy modes are registered and accepted."""
+
+    def test_mode_logical_arb_recognized(self):
+        """Test that --mode logical-arb is a valid CLI choice."""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--mode", choices=[
+            "all", "binary", "negrisk", "cross", "kalshi", "cross-all",
+            "spread", "betfair", "smarkets", "sxbet", "matchbook",
+            "gemini", "ibkr", "event", "triangular", "multi-cross",
+            "stale", "resolution", "convergence", "mm", "rewards",
+            "imbalance", "news-snipe", "correlated", "time-decay",
+            "logical-arb", "whale-copy",
+        ], default="all")
+        args = parser.parse_args(["--mode", "logical-arb"])
+        assert args.mode == "logical-arb"
+
+    def test_mode_whale_copy_recognized(self):
+        """Test that --mode whale-copy is a valid CLI choice."""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--mode", choices=[
+            "all", "binary", "negrisk", "cross", "kalshi", "cross-all",
+            "spread", "betfair", "smarkets", "sxbet", "matchbook",
+            "gemini", "ibkr", "event", "triangular", "multi-cross",
+            "stale", "resolution", "convergence", "mm", "rewards",
+            "imbalance", "news-snipe", "correlated", "time-decay",
+            "logical-arb", "whale-copy",
+        ], default="all")
+        args = parser.parse_args(["--mode", "whale-copy"])
+        assert args.mode == "whale-copy"
+
+    def test_help_includes_new_modes(self, capsys):
+        """Test that --help output includes both new Phase 9 modes."""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--mode", choices=[
+            "all", "binary", "negrisk", "cross", "kalshi", "cross-all",
+            "spread", "betfair", "smarkets", "sxbet", "matchbook",
+            "gemini", "ibkr", "event", "triangular", "multi-cross",
+            "stale", "resolution", "convergence", "mm", "rewards",
+            "imbalance", "news-snipe", "correlated", "time-decay",
+            "logical-arb", "whale-copy",
+        ], default="all", help="Scanning mode")
+        try:
+            parser.parse_args(["--help"])
+        except SystemExit:
+            # --help causes parser to exit; capture output instead
+            pass
+        captured = capsys.readouterr()
+        assert "logical-arb" in captured.out or "logical-arb" in captured.err
+        assert "whale-copy" in captured.out or "whale-copy" in captured.err

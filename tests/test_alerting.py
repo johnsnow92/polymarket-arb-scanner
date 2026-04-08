@@ -267,3 +267,203 @@ class TestModuleSingleton:
     def test_singleton_exists(self):
         from alerting import alert_manager
         assert isinstance(alert_manager, AlertManager)
+
+
+class TestStrategyLossStreak:
+    """Test per-strategy loss streak tracking (MON-03)."""
+
+    def test_single_loss_no_alert(self):
+        """Single loss for a strategy should not fire alert."""
+        am = AlertManager(rate_limit_seconds=0)
+        result = am.check_strategy_loss_streak("binary", False)
+        assert result is False
+
+    def test_two_losses_no_alert(self):
+        """Two consecutive losses should not fire alert (threshold is 3)."""
+        am = AlertManager(rate_limit_seconds=0)
+        am.check_strategy_loss_streak("binary", False)
+        result = am.check_strategy_loss_streak("binary", False)
+        assert result is False
+
+    def test_three_losses_fires_alert(self):
+        """Exactly 3 consecutive losses should fire LOSS_STREAK alert."""
+        am = AlertManager(rate_limit_seconds=0)
+        am.check_strategy_loss_streak("binary", False)
+        am.check_strategy_loss_streak("binary", False)
+        result = am.check_strategy_loss_streak("binary", False)
+        assert result is True
+        recent = am.get_recent_alerts()
+        loss_alerts = [a for a in recent if a["type"] == "LOSS_STREAK"]
+        assert len(loss_alerts) == 1
+        assert "binary" in loss_alerts[0]["message"]
+        assert "3 consecutive" in loss_alerts[0]["message"]
+
+    def test_four_consecutive_losses_rate_limited(self):
+        """Fourth consecutive loss should not re-alert (rate-limited)."""
+        am = AlertManager(rate_limit_seconds=0)
+        am.check_strategy_loss_streak("binary", False)
+        am.check_strategy_loss_streak("binary", False)
+        am.check_strategy_loss_streak("binary", False)  # Alert fires
+        result = am.check_strategy_loss_streak("binary", False)
+        # Fourth loss should not fire a new alert (rate limiting prevents it)
+        assert result is False
+
+    def test_loss_streak_resets_on_win(self):
+        """A win should reset the loss counter."""
+        am = AlertManager(rate_limit_seconds=0)
+        am.check_strategy_loss_streak("binary", False)
+        am.check_strategy_loss_streak("binary", False)
+        am.check_strategy_loss_streak("binary", True)  # Win resets
+        am.check_strategy_loss_streak("binary", False)
+        am.check_strategy_loss_streak("binary", False)
+        # Only 2 consecutive losses now, not 3
+        recent = am.get_recent_alerts()
+        loss_alerts = [a for a in recent if a["type"] == "LOSS_STREAK"]
+        assert len(loss_alerts) == 0
+
+    def test_multiple_strategies_independent(self):
+        """Different strategies should track losses independently."""
+        am = AlertManager(rate_limit_seconds=0)
+        # Binary: 3 losses (should alert)
+        am.check_strategy_loss_streak("binary", False)
+        am.check_strategy_loss_streak("binary", False)
+        r1 = am.check_strategy_loss_streak("binary", False)
+        # Cross: 1 loss (should not alert)
+        r2 = am.check_strategy_loss_streak("cross", False)
+        assert r1 is True  # Binary alerts
+        assert r2 is False  # Cross does not
+        recent = am.get_recent_alerts()
+        loss_alerts = [a for a in recent if a["type"] == "LOSS_STREAK"]
+        assert len(loss_alerts) == 1
+        assert "binary" in loss_alerts[0]["message"]
+
+    def test_alert_includes_metadata(self):
+        """Alert should include strategy name and loss count."""
+        am = AlertManager(rate_limit_seconds=0)
+        am.check_strategy_loss_streak("kalshi", False)
+        am.check_strategy_loss_streak("kalshi", False)
+        am.check_strategy_loss_streak("kalshi", False)
+        recent = am.get_recent_alerts()
+        loss_alerts = [a for a in recent if a["type"] == "LOSS_STREAK"]
+        assert len(loss_alerts) == 1
+        alert = loss_alerts[0]
+        assert alert["details"]["strategy"] == "kalshi"
+        assert alert["details"]["loss_count"] == 3
+
+
+class TestZeroOpportunityPeriod:
+    """Test per-strategy zero-opportunity period detection (MON-03)."""
+
+    def test_zero_opp_under_30min_no_alert(self):
+        """No alert should fire for zero opps under 30 minutes."""
+        am = AlertManager(rate_limit_seconds=0)
+        with patch("alerting.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            am.record_strategy_opportunity("binary")
+            mock_time.time.return_value = 1600.0  # 10 min later
+            am.check_zero_opp_period_per_strategy({"binary": 0})
+        recent = am.get_recent_alerts()
+        zero_alerts = [a for a in recent if a["type"] == "ZERO_OPP"]
+        assert len(zero_alerts) == 0
+
+    def test_zero_opp_over_30min_fires_alert(self):
+        """Alert should fire after 30+ minutes with zero opps."""
+        am = AlertManager(rate_limit_seconds=0)
+        with patch("alerting.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            mock_time.gmtime.side_effect = lambda x=None: time.gmtime(mock_time.time.return_value if x is None else x)
+            mock_time.strftime.side_effect = lambda fmt, t: time.strftime(fmt, t)
+            am.record_strategy_opportunity("binary")
+            mock_time.time.return_value = 3800.0  # 30+ min later
+            am.check_zero_opp_period_per_strategy({"binary": 0})
+        recent = am.get_recent_alerts()
+        zero_alerts = [a for a in recent if a["type"] == "ZERO_OPP"]
+        assert len(zero_alerts) == 1
+        assert "binary" in zero_alerts[0]["message"]
+        assert "30" in zero_alerts[0]["message"]
+
+    def test_zero_opp_alert_rate_limited(self):
+        """Alert should only fire once per 30-min window (rate limiting)."""
+        am = AlertManager(rate_limit_seconds=300)  # 5-min rate limit
+        with patch("alerting.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            mock_time.gmtime.side_effect = lambda x=None: time.gmtime(mock_time.time.return_value if x is None else x)
+            mock_time.strftime.side_effect = lambda fmt, t: time.strftime(fmt, t)
+            am.record_strategy_opportunity("binary")
+            mock_time.time.return_value = 3800.0  # 30+ min later
+            am.check_zero_opp_period_per_strategy({"binary": 0})
+            # Second check immediately after (still rate-limited by AlertManager)
+            mock_time.time.return_value = 3900.0
+            am.check_zero_opp_period_per_strategy({"binary": 0})
+        recent = am.get_recent_alerts()
+        zero_alerts = [a for a in recent if a["type"] == "ZERO_OPP"]
+        # Rate limiting prevents the second alert
+        assert len(zero_alerts) == 1
+
+    def test_new_opp_resets_zero_window(self):
+        """Finding a new opp should reset the zero-opp window."""
+        am = AlertManager(rate_limit_seconds=0)
+        with patch("alerting.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            mock_time.gmtime.side_effect = lambda x=None: time.gmtime(mock_time.time.return_value if x is None else x)
+            mock_time.strftime.side_effect = lambda fmt, t: time.strftime(fmt, t)
+            am.record_strategy_opportunity("binary")
+            mock_time.time.return_value = 3800.0  # 30+ min later
+            am.check_zero_opp_period_per_strategy({"binary": 0})
+            # First alert fired
+            recent1 = am.get_recent_alerts()
+            zero_alerts1 = [a for a in recent1 if a["type"] == "ZERO_OPP"]
+            assert len(zero_alerts1) == 1
+            # Now record a new opportunity to reset window
+            mock_time.time.return_value = 3900.0
+            am.record_strategy_opportunity("binary")
+            mock_time.time.return_value = 5700.0  # 30+ min after reset
+            am.check_zero_opp_period_per_strategy({"binary": 0})
+            # Second alert should fire (window was reset)
+            recent2 = am.get_recent_alerts()
+            zero_alerts2 = [a for a in recent2 if a["type"] == "ZERO_OPP"]
+            assert len(zero_alerts2) == 2
+
+    def test_empty_opportunity_dict_no_crash(self):
+        """Empty opportunity dict should not crash."""
+        am = AlertManager(rate_limit_seconds=0)
+        # Should not raise exception
+        am.check_zero_opp_period_per_strategy({})
+        recent = am.get_recent_alerts()
+        assert len(recent) == 0
+
+    def test_multiple_strategies_zero_opp(self):
+        """Multiple strategies with zero opps should track independently."""
+        am = AlertManager(rate_limit_seconds=0)
+        with patch("alerting.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            mock_time.gmtime.side_effect = lambda x=None: time.gmtime(mock_time.time.return_value if x is None else x)
+            mock_time.strftime.side_effect = lambda fmt, t: time.strftime(fmt, t)
+            am.record_strategy_opportunity("binary")
+            am.record_strategy_opportunity("cross")
+            mock_time.time.return_value = 3800.0  # 30+ min later
+            # Both have zero opps now
+            am.check_zero_opp_period_per_strategy({"binary": 0, "cross": 0})
+        recent = am.get_recent_alerts()
+        zero_alerts = [a for a in recent if a["type"] == "ZERO_OPP"]
+        # Both should alert (though may be rate-limited)
+        assert len(zero_alerts) >= 1
+
+    def test_opp_count_resets_window(self):
+        """Non-zero opp count should reset the zero-opp window."""
+        am = AlertManager(rate_limit_seconds=0)
+        with patch("alerting.time") as mock_time:
+            mock_time.time.return_value = 1000.0
+            mock_time.gmtime.side_effect = lambda x=None: time.gmtime(mock_time.time.return_value if x is None else x)
+            mock_time.strftime.side_effect = lambda fmt, t: time.strftime(fmt, t)
+            am.record_strategy_opportunity("binary")
+            mock_time.time.return_value = 3700.0  # Just under 30 min
+            # Still have opportunities, should reset
+            am.check_zero_opp_period_per_strategy({"binary": 5})
+            mock_time.time.return_value = 5500.0  # 30+ min after reset
+            # Now zero opps
+            am.check_zero_opp_period_per_strategy({"binary": 0})
+        # Alert should fire because window was reset when we had opps
+        recent = am.get_recent_alerts()
+        zero_alerts = [a for a in recent if a["type"] == "ZERO_OPP"]
+        assert len(zero_alerts) == 1

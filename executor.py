@@ -16,6 +16,7 @@ from config import (
     FAILED_TRADE_COOLDOWN, WS_CACHE_MAX_AGE_REVALIDATION,
     REVALIDATION_MIN_FLOOR as CONFIG_REVALIDATION_MIN_FLOOR,
     REVAL_FLOORS, get_layer,
+    NEWS_SNIPE_CONFIDENCE_THRESHOLD, TIME_DECAY_MIN_CONSENSUS,
 )
 
 
@@ -32,6 +33,13 @@ try:
         _metrics = None
 except Exception:
     _metrics = None
+
+# Conditional alerting import — MON-03: per-strategy loss streak tracking
+try:
+    from alerting import alert_manager as _alert_manager
+except Exception:
+    _alert_manager = None
+
 from db import TradeDB
 from risk_manager import RiskManager
 from polymarket_api import get_clob_prices, fetch_order_book, get_best_bid_ask, PolymarketTrader
@@ -140,6 +148,8 @@ class ArbitrageExecutor:
         self._decision_log_path = os.path.join(_data_dir, "decisions.jsonl")
         self._decision_log_lock = threading.Lock()
         self._decision_fh = open(self._decision_log_path, "a", encoding="utf-8", buffering=1)
+        # Whale copy position tracking
+        self._whale_copy_position_count = 0
 
     def _get_cached_balances(self, opp_type: str) -> dict | None:
         """Return cached balances if fresh, otherwise fetch and cache.
@@ -210,19 +220,35 @@ class ArbitrageExecutor:
             self._log_skipped(opportunity, "duplicate_trade")
             return False
 
+        # 0d. STRAT-05: Whale copy position limit (max 5 concurrent)
+        if opp_type == "WhaleCopy":
+            from config import WHALE_COPY_MAX_POSITIONS
+            if self._whale_copy_position_count >= WHALE_COPY_MAX_POSITIONS:
+                logger.warning(
+                    "Whale copy position limit reached (%d/%d), skipping: %s",
+                    self._whale_copy_position_count, WHALE_COPY_MAX_POSITIONS, market,
+                )
+                self._log_skipped(opportunity, "whale_position_limit")
+                return False
+
         prefix = "[DRY RUN] " if self.dry_run else ""
 
         logger.info(f"{prefix}--- Evaluating: {market} ({opp_type}) ---")
 
         _exec_start = time.time()
 
-        # 1. Re-validate prices
-        _reval_result = True if self.dry_run else self._revalidate(opportunity, self.price_cache)
-        if not _reval_result:
+        # 1. Re-validate prices (always run for REVAL| calibration logging)
+        _reval_result = self._revalidate(opportunity, self.price_cache)
+        if not _reval_result and not self.dry_run:
             self._log_skipped(opportunity, "stale_prices")
             if _metrics:
                 _metrics.inc("revalidation_failures", {"type": opp_type, "reason": "price_degraded"})
             return False
+        if not _reval_result and self.dry_run:
+            logger.info("%sRevalidation would reject (calibration only)", prefix)
+            if _metrics:
+                _metrics.inc("revalidation_failures", {"type": opp_type, "reason": "price_degraded_dryrun"})
+            # Continue in dry-run — log the rejection but don't skip
 
         # 2. Risk gate (uses cached balances to avoid redundant API calls)
         balances = self._get_cached_balances(opp_type)
@@ -389,6 +415,76 @@ class ArbitrageExecutor:
                 reason = "signal_based"  # Signal/time-based — directional, no mid-price revalidation
             elif opp_type == "MarketMake":
                 reason = "mm_refreshed"  # MM quotes are continuously refreshed by the MM engine
+            elif opp_type == "PolymarketRewards":
+                reason = "reward_refreshed"  # Reward quotes are refreshed during reward scan
+            elif opp_type == "KalshiRewards":
+                reason = "reward_refreshed"  # Reward quotes are refreshed during reward scan
+            elif opp_type == "Imbalance":
+                # STRAT-01: Imbalance revalidation — check ratio hasn't collapsed
+                current_ratio = abs(opportunity.get("_imbalance_ratio", 0.0))
+                if current_ratio > 0:
+                    original_ratio = abs(opportunity.get("_original_imbalance_ratio", current_ratio))
+                    min_ratio_to_revalidate = original_ratio * 0.7  # Allow 30% collapse
+                    if current_ratio < min_ratio_to_revalidate:
+                        logger.info(
+                            "Imbalance collapsed %.1f%% -> rejected",
+                            (1 - current_ratio / original_ratio) * 100 if original_ratio > 0 else 0
+                        )
+                        passed = False
+                        reason = "Imbalance collapsed"
+                    else:
+                        reason = "imbalance_stable"
+                else:
+                    reason = "imbalance_stable"
+            elif opp_type == "NewsSnipe":
+                # STRAT-02: News snipe revalidation — check confidence threshold
+                confidence = opportunity.get("_confidence", 0.0)
+                if confidence < NEWS_SNIPE_CONFIDENCE_THRESHOLD:
+                    logger.info("News snipe confidence too low: %.1f", confidence)
+                    passed = False
+                    reason = f"Confidence {confidence:.2f} below threshold {NEWS_SNIPE_CONFIDENCE_THRESHOLD}"
+                else:
+                    reason = "confidence_verified"
+            elif opp_type == "Correlated":
+                # STRAT-06: Correlated revalidation — check spread hasn't collapsed
+                current_spread = opportunity.get("_spread", 0.0)
+                original_spread = opportunity.get("_original_spread", current_spread)
+                if original_spread > 0:
+                    min_spread_to_revalidate = original_spread * 0.8  # Allow 20% collapse
+                    if current_spread < min_spread_to_revalidate:
+                        logger.info(
+                            "Correlated spread collapsed %.1f%% -> rejected",
+                            (1 - current_spread / original_spread) * 100
+                        )
+                        passed = False
+                        reason = "Spread collapsed"
+                    else:
+                        reason = "spread_verified"
+                else:
+                    reason = "spread_verified"
+            elif opp_type == "TimeDecay":
+                # STRAT-07: Time decay revalidation — check expiry and consensus
+                hours_left = opportunity.get("_hours_to_expiry", 0.0)
+                if hours_left < 1.0:
+                    logger.info("Time decay: market expired before execution")
+                    passed = False
+                    reason = "Market expired"
+                else:
+                    consensus = opportunity.get("_consensus_prob", 0.0)
+                    if consensus < TIME_DECAY_MIN_CONSENSUS:
+                        logger.info("Time decay: consensus dropped below threshold: %.2f", consensus)
+                        passed = False
+                        reason = f"Consensus {consensus:.2f} dropped below {TIME_DECAY_MIN_CONSENSUS}"
+                    else:
+                        reason = "time_decay_verified"
+            elif opp_type == "LogicalArb":
+                # STRAT-04: Logical arb revalidation — check both market prices haven't moved >10%
+                passed, reval_profit, reason = self._revalidate_logical_arb(
+                    opportunity, original_profit)
+            elif opp_type == "WhaleCopy":
+                # STRAT-05: Whale copy revalidation — check <30s latency and price stability
+                passed, reval_profit, reason = self._revalidate_whale_copy(
+                    opportunity, original_profit)
             # Unknown type — proceed cautiously (passed=True from init)
 
         except _RevalidationAPIError as e:
@@ -507,6 +603,15 @@ class ArbitrageExecutor:
         yes_ask = no_ask = None
         cached_yes = self._check_ws_cache(price_cache, "polymarket", token_ids[0])
         cached_no = self._check_ws_cache(price_cache, "polymarket", token_ids[1])
+
+        # Check for stale feeds (no message in 30s) — skip stale prices
+        if cached_yes and cached_yes.get("_stale", False):
+            logger.info("Skipping revalidation: polymarket YES stale for >30s")
+            return False, 0.0, "feed_stale"
+        if cached_no and cached_no.get("_stale", False):
+            logger.info("Skipping revalidation: polymarket NO stale for >30s")
+            return False, 0.0, "feed_stale"
+
         if cached_yes and cached_no:
             yes_ask = cached_yes.get("price")
             no_ask = cached_no.get("price")
@@ -555,6 +660,12 @@ class ArbitrageExecutor:
             if not tid:
                 raise _RevalidationAPIError("empty token ID in negrisk")
             cached = self._check_ws_cache(price_cache, "polymarket", tid)
+
+            # Check for stale feed
+            if cached and cached.get("_stale", False):
+                logger.info("Skipping revalidation: polymarket token %s stale for >30s", tid)
+                return False, 0.0, "feed_stale"
+
             if cached and cached.get("price") is not None:
                 yes_asks.append(cached["price"])
             else:
@@ -594,6 +705,12 @@ class ArbitrageExecutor:
         if len(token_ids) >= 2:
             for i, tid in enumerate(token_ids[:2]):
                 cached = self._check_ws_cache(price_cache, "polymarket", tid)
+
+                # Check for stale feed
+                if cached and cached.get("_stale", False):
+                    logger.info("Skipping revalidation: polymarket token %s stale for >30s", tid)
+                    return False, 0.0, "feed_stale"
+
                 if cached and cached.get("price") is not None:
                     if i == 0:
                         pm_yes = cached["price"]
@@ -613,6 +730,12 @@ class ArbitrageExecutor:
         k_yes = k_no = None
         if kalshi_ticker and self.kalshi_client:
             cached_k = self._check_ws_cache(price_cache, "kalshi", kalshi_ticker)
+
+            # Check for stale feed
+            if cached_k and cached_k.get("_stale", False):
+                logger.info("Skipping revalidation: kalshi %s stale for >30s", kalshi_ticker)
+                return False, 0.0, "feed_stale"
+
             if cached_k:
                 k_yes = cached_k.get("yes_price")
                 k_no = cached_k.get("no_price")
@@ -811,6 +934,12 @@ class ArbitrageExecutor:
             # Try to get a fresh price from WS cache
             cache_key = leg.get("_token_id") or leg.get("_kalshi_ticker", "")
             cached = self._check_ws_cache(price_cache, platform, cache_key) if cache_key else None
+
+            # Check for stale feed
+            if cached and cached.get("_stale", False):
+                logger.info("Skipping revalidation: %s %s stale for >30s", platform, cache_key)
+                return False, 0.0, "feed_stale"
+
             if cached:
                 fresh_price = cached.get("yes_ask") or cached.get("yes", price)
                 prices.append(fresh_price)
@@ -832,6 +961,103 @@ class ArbitrageExecutor:
         opp["net_profit"] = reval_profit
         return True, reval_profit, "passed"
 
+    def _revalidate_logical_arb(
+        self, opp: dict, original_profit: float,
+    ) -> tuple[bool, float, str]:
+        """Revalidate a LogicalArb opportunity by re-checking both markets' prices.
+
+        Layer 4: Checks that neither market price has moved >10% from scan time.
+        Returns:
+            (passed, reval_profit, reason)
+        """
+        token_ids = opp.get("_token_ids", [])
+        if not token_ids or len(token_ids) < 1:
+            raise _RevalidationAPIError("logical_arb missing token IDs")
+
+        # Fetch live prices for the underpriced outcome (then_yes)
+        try:
+            then_yes_token = token_ids[0]
+            then_yes_book = fetch_order_book(then_yes_token)
+            if not then_yes_book:
+                # API unavailable — proceed with scan prices (generous on Layer 4)
+                logger.debug("CLOB unavailable for logical_arb revalidation, proceeding with scan prices")
+                return True, original_profit, "clob_unavailable"
+
+            then_yes_asks = then_yes_book.get("asks", [])
+            if not then_yes_asks:
+                logger.debug("No asks in CLOB for logical_arb, proceeding")
+                return True, original_profit, "no_asks"
+
+            fresh_then_price = float(then_yes_asks[0].get("price", opp.get("_then_price", 0)))
+            original_then_price = opp.get("_then_price", fresh_then_price)
+
+            # Check for >10% price movement (Layer 4 threshold)
+            price_delta_pct = abs(fresh_then_price - original_then_price) / max(original_then_price, 0.001)
+            if price_delta_pct > 0.10:
+                logger.info(
+                    "Logical arb then_yes price moved %.1f%% (%.4f -> %.4f), rejecting",
+                    price_delta_pct * 100, original_then_price, fresh_then_price,
+                )
+                return False, 0.0, "price_moved_too_much"
+
+            # Update opportunity with fresh prices
+            opp["_then_price"] = fresh_then_price
+            opp["net_profit"] = original_profit  # Profit calc doesn't change if just refetching
+
+        except Exception as e:
+            logger.debug("Logical arb revalidation CLOB fetch failed: %s", e)
+            # Graceful degradation: accept if original ROI was good (handled by caller)
+            return True, original_profit, "clob_error_accepted"
+
+        return True, original_profit, "passed"
+
+    def _revalidate_whale_copy(
+        self, opp: dict, original_profit: float,
+    ) -> tuple[bool, float, str]:
+        """Revalidate a WhaleCopy opportunity — check <30s latency and price stability.
+
+        Layer 4: Rejects if whale trade is >30s old or market price moved >10%.
+        Returns:
+            (passed, reval_profit, reason)
+        """
+        import time as _time
+
+        # Check latency budget: whale trade must be <30s old
+        whale_ts = opp.get("_whale_timestamp", 0)
+        if whale_ts:
+            age_seconds = _time.time() - whale_ts
+            if age_seconds > 30:
+                logger.info(
+                    "WhaleCopy trade too old (%.1fs > 30s), rejecting: %s",
+                    age_seconds, opp.get("market", ""),
+                )
+                return False, 0.0, "stale_whale_trade"
+
+        # Check market price hasn't moved >10%
+        token_ids = opp.get("_token_ids", [])
+        if token_ids:
+            try:
+                book = fetch_order_book(token_ids[0])
+                if book:
+                    asks = book.get("asks", [])
+                    if asks:
+                        fresh_price = float(asks[0].get("price", 0))
+                        scan_price = opp.get("_market_price", fresh_price)
+                        if scan_price > 0:
+                            delta = abs(fresh_price - scan_price) / scan_price
+                            if delta > 0.10:
+                                logger.info(
+                                    "WhaleCopy price moved %.1f%% (%.4f -> %.4f), rejecting",
+                                    delta * 100, scan_price, fresh_price,
+                                )
+                                return False, 0.0, "price_moved_too_much"
+                        opp["_market_price"] = fresh_price
+            except Exception as e:
+                logger.debug("WhaleCopy revalidation CLOB fetch failed: %s", e)
+                return True, original_profit, "clob_error_accepted"
+
+        return True, original_profit, "passed"
+
     def _refetch_platform_price(
         self, platform: str, opp: dict, price_cache: dict | None, side: str,
     ) -> float | None:
@@ -845,6 +1071,12 @@ class ArbitrageExecutor:
             if idx < len(token_ids):
                 tid = token_ids[idx]
                 cached = self._check_ws_cache(price_cache, "polymarket", tid)
+
+                # Check for stale feed
+                if cached and cached.get("_stale", False):
+                    logger.info("Skipping price refetch: polymarket %s stale for >30s", tid)
+                    return None
+
                 if cached and cached.get("price") is not None:
                     return cached["price"]
                 book = fetch_order_book(tid)
@@ -855,6 +1087,12 @@ class ArbitrageExecutor:
             ticker = opp.get("_kalshi_ticker", "")
             if ticker and self.kalshi_client:
                 cached = self._check_ws_cache(price_cache, "kalshi", ticker)
+
+                # Check for stale feed
+                if cached and cached.get("_stale", False):
+                    logger.info("Skipping price refetch: kalshi %s stale for >30s", ticker)
+                    return None
+
                 if cached and cached.get(f"{side}_price") is not None:
                     return cached[f"{side}_price"]
                 book = self.kalshi_client.fetch_order_book(ticker)
@@ -1254,6 +1492,54 @@ class ArbitrageExecutor:
         elif opp_type in ("StalePriceOpp", "ResolutionSnipeOpp", "ConvergenceOpp"):
             # Layer 2-4: single-leg directional trades
             legs = self._build_directional_legs(opportunity, size)
+        elif opp_type == "PolymarketRewards":
+            # Layer 3: Polymarket liquidity rewards — resting limit orders
+            optimal_bid = opportunity.get("optimal_bid", 0)
+            optimal_ask = opportunity.get("optimal_ask", 0)
+            reward_size = opportunity.get("size", size)
+
+            if not optimal_bid or not optimal_ask:
+                return []
+
+            # Determine sides based on midpoint range (Polymarket reward rule)
+            mid = (optimal_bid + optimal_ask) / 2
+            sides = []
+            if 0.10 <= mid <= 0.90:
+                # Single-sided OK; post both for better reward score
+                sides = [
+                    {"platform": "polymarket", "side": "BUY", "price": optimal_bid,
+                     "token": "yes", "_market_key": opportunity.get("_market_key", "")},
+                    {"platform": "polymarket", "side": "SELL", "price": optimal_ask,
+                     "token": "yes", "_market_key": opportunity.get("_market_key", "")},
+                ]
+            else:
+                # Outside range: must post both sides anyway for reward eligibility
+                sides = [
+                    {"platform": "polymarket", "side": "BUY", "price": optimal_bid,
+                     "token": "yes", "_market_key": opportunity.get("_market_key", "")},
+                    {"platform": "polymarket", "side": "SELL", "price": optimal_ask,
+                     "token": "yes", "_market_key": opportunity.get("_market_key", "")},
+                ]
+
+            legs = sides
+        elif opp_type == "KalshiRewards":
+            # Layer 3: Kalshi liquidity incentive program — resting limit orders
+            optimal_bid = opportunity.get("optimal_bid", 0)
+            optimal_ask = opportunity.get("optimal_ask", 0)
+            reward_size = opportunity.get("size", size)
+            market_ticker = opportunity.get("market_ticker", "")
+
+            if not optimal_bid or not optimal_ask or not market_ticker:
+                return []
+
+            sides = [
+                {"platform": "kalshi", "side": "yes", "action": "buy",
+                 "price": optimal_bid, "_ticker": market_ticker},
+                {"platform": "kalshi", "side": "yes", "action": "sell",
+                 "price": optimal_ask, "_ticker": market_ticker},
+            ]
+
+            legs = sides
         elif opp_type == "MarketMake":
             # Layer 3: market making — bid+ask pair
             legs = self._build_mm_legs(opportunity, size)
@@ -1332,6 +1618,111 @@ class ArbitrageExecutor:
             elif "_platform_a" in opportunity:
                 # Generic cross-platform handler for cross-all opportunities
                 legs = self._build_cross_all_legs(opportunity, size)
+        elif opp_type == "Imbalance":
+            # STRAT-01: Order Book Imbalance — buy on predicted direction
+            direction = opportunity.get("_direction", "YES")
+            token_ids = opportunity.get("_token_ids", [])
+            if not token_ids or len(token_ids) < 2:
+                raise ValueError(f"Imbalance opp missing token IDs: {opportunity}")
+
+            yes_token = token_ids[0]
+            no_token = token_ids[1]
+
+            if direction == "YES":
+                legs = [{"platform": "polymarket", "side": "BUY", "token": "yes",
+                         "price": opportunity.get("_yes_price", 0), "_token_id": yes_token}]
+            else:
+                legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
+                         "price": opportunity.get("_no_price", 0), "_token_id": no_token}]
+        elif opp_type == "NewsSnipe":
+            # STRAT-02: News Snipe — buy sentiment side at market (taker order)
+            sentiment = opportunity.get("_sentiment", "YES")
+            token_ids = opportunity.get("_token_ids", [])
+            if not token_ids or len(token_ids) < 2:
+                raise ValueError(f"NewsSnipe opp missing token IDs: {opportunity}")
+
+            yes_token = token_ids[0]
+            no_token = token_ids[1]
+
+            if sentiment == "YES":
+                legs = [{"platform": "polymarket", "side": "BUY", "token": "yes",
+                         "price": opportunity.get("_yes_price", 0), "_token_id": yes_token}]
+            else:
+                legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
+                         "price": opportunity.get("_no_price", 0), "_token_id": no_token}]
+        elif opp_type == "Correlated":
+            # STRAT-06: Correlated Pairs — long underpriced, short overpriced
+            long_leg = opportunity.get("_long_leg", {})
+            short_leg = opportunity.get("_short_leg", {})
+            long_token_ids = long_leg.get("_token_ids", [])
+            short_token_ids = short_leg.get("_token_ids", [])
+
+            if not long_token_ids or not short_token_ids:
+                raise ValueError(f"Correlated opp missing token IDs: {opportunity}")
+
+            legs = [
+                {"platform": "polymarket", "side": "BUY", "token": "yes",
+                 "price": long_leg.get("_yes_price", 0), "_token_id": long_token_ids[0]},
+                {"platform": "polymarket", "side": "SELL", "token": "yes",
+                 "price": short_leg.get("_yes_price", 0), "_token_id": short_token_ids[0]},
+            ]
+        elif opp_type == "TimeDecay":
+            # STRAT-07: Time Decay — buy high-consensus outcome at discount
+            consensus_side = opportunity.get("_consensus_side", "YES")
+            token_ids = opportunity.get("_token_ids", [])
+            if not token_ids or len(token_ids) < 2:
+                raise ValueError(f"TimeDecay opp missing token IDs: {opportunity}")
+
+            yes_token = token_ids[0]
+            no_token = token_ids[1]
+
+            if consensus_side == "YES":
+                legs = [{"platform": "polymarket", "side": "BUY", "token": "yes",
+                         "price": opportunity.get("_yes_price", 0), "_token_id": yes_token}]
+            else:
+                legs = [{"platform": "polymarket", "side": "BUY", "token": "no",
+                         "price": opportunity.get("_no_price", 0), "_token_id": no_token}]
+
+        elif opp_type == "LogicalArb":
+            # STRAT-04: Combinatorial Logical Arbitrage — buy underpriced implied outcome, sell implying
+            # Example: Bitcoin >$100k (if_yes) implies Bitcoin >$90k (then_yes).
+            # If P(>$90k) < P(>$100k), buy >$90k and sell >$100k for arbitrage.
+            token_ids = opportunity.get("_token_ids", [])
+            if not token_ids:
+                logger.warning("LogicalArb opp missing token IDs: %s", opportunity)
+                return []
+
+            # We need two token IDs: one for then_yes (underpriced), one for if_yes (hedge)
+            # token_ids[0] is typically the then_yes YES token
+            then_yes_token = token_ids[0] if len(token_ids) > 0 else ""
+
+            # For the if_yes hedge, we need its token ID. In a two-outcome market,
+            # the NO token is the hedge. We may need to fetch if_market's token IDs separately.
+            # For now, we'll assume if_yes_token is provided or we have index [1]
+            if_yes_token = token_ids[1] if len(token_ids) > 1 else ""
+
+            if not then_yes_token or not if_yes_token:
+                logger.warning("LogicalArb opp missing required token IDs for both outcomes")
+                return []
+
+            legs = [
+                {"platform": "polymarket", "side": "BUY", "token": "yes",
+                 "price": opportunity.get("_then_price", 0), "_token_id": then_yes_token},
+                {"platform": "polymarket", "side": "SELL", "token": "yes",
+                 "price": opportunity.get("_if_price", 0), "_token_id": if_yes_token},
+            ]
+
+        elif opp_type == "WhaleCopy":
+            # STRAT-05: Whale copy trading — mirror whale trader's position
+            token_ids = opportunity.get("_token_ids", [])
+            if not token_ids:
+                logger.warning("WhaleCopy opp missing token IDs: %s", opportunity.get("market", ""))
+                return []
+            legs = [
+                {"platform": "polymarket", "side": "BUY", "token": "yes",
+                 "price": opportunity.get("_market_price", 0),
+                 "_token_id": token_ids[0]},
+            ]
 
         # HARDEN-05: Attach a per-leg idempotency key before returning.
         # Keys are stable within a 60-second minute bucket so that retries
@@ -1827,9 +2218,36 @@ class ArbitrageExecutor:
             )
             # Invalidate balance cache after a successful trade
             self.invalidate_balance_cache()
+            # STRAT-05: Track whale copy positions
+            if opp_type == "WhaleCopy":
+                self._whale_copy_position_count += 1
             # Notify on successful trade
             self._notify_trade(opportunity, legs, size, success=True)
+
+            # MON-03: Check per-strategy loss streak after logging successful trade
+            if _alert_manager:
+                try:
+                    strategy_type = opportunity.get("type", "unknown")
+                    trade_won = opportunity.get("net_profit", 0) > 0
+                    _alert_manager.check_strategy_loss_streak(strategy_type, trade_won)
+                    logger.debug(
+                        "Logged trade for strategy %s: %s",
+                        strategy_type,
+                        "win" if trade_won else "loss",
+                    )
+                except Exception as e:
+                    logger.warning("Error checking strategy loss streak: %s", str(e))
         else:
+            # MON-03: Check per-strategy loss streak for failed/partial trades
+            if _alert_manager:
+                try:
+                    strategy_type = opportunity.get("type", "unknown")
+                    trade_won = False  # Partial/failed trades are always losses
+                    _alert_manager.check_strategy_loss_streak(strategy_type, trade_won)
+                    logger.debug("Logged failed/partial trade for strategy %s: loss", strategy_type)
+                except Exception as e:
+                    logger.warning("Error checking strategy loss streak: %s", str(e))
+
             # Partial fill detected — attempt hedging on filled legs
             logger.warning("Partial fill detected. Attempting hedge...")
             if HEDGE_ENABLED:

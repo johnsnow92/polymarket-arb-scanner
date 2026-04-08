@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(curl * | sh)",
+      "Bash(curl * | bash)"
+    ]
+  }
+}

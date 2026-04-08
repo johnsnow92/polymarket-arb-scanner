@@ -527,3 +527,212 @@ class MarketMaker:
             "positions": positions,
             "dry_run": self.dry_run,
         }
+
+
+# ---------------------------------------------------------------------------
+# RewardTracker (Polymarket)
+# ---------------------------------------------------------------------------
+
+class RewardTracker:
+    """Track Polymarket reward program metadata and calculate optimal spreads.
+
+    Thread-safe cache of reward scores per market with TTL-based expiration.
+    """
+
+    def __init__(self):
+        self._reward_cache: dict[str, dict] = {}  # {market_key: reward_data}
+        self._cache_timestamps: dict[str, float] = {}  # {market_key: timestamp}
+        self._lock = threading.Lock()
+
+    def update_polymarket_reward(self, market_key: str, reward_data: dict,
+                                ttl_seconds: float = 300.0) -> None:
+        """Update reward metadata for a market.
+
+        Args:
+            market_key: Market identifier (conditionId).
+            reward_data: Dict with min_incentive_size, max_incentive_spread, pool_size_usdc, etc.
+            ttl_seconds: Cache TTL in seconds.
+        """
+        with self._lock:
+            self._reward_cache[market_key] = reward_data
+            self._cache_timestamps[market_key] = time.time() + ttl_seconds
+
+    def get_polymarket_reward(self, market_key: str) -> dict | None:
+        """Get cached reward metadata for a market.
+
+        Returns None if not cached, expired, or never set.
+        """
+        with self._lock:
+            if market_key not in self._reward_cache:
+                return None
+            expiry = self._cache_timestamps.get(market_key, 0)
+            if time.time() > expiry:
+                # Cache expired
+                del self._reward_cache[market_key]
+                if market_key in self._cache_timestamps:
+                    del self._cache_timestamps[market_key]
+                return None
+            return self._reward_cache[market_key]
+
+    def calculate_optimal_reward_spread(self, market_key: str, mid_price: float,
+                                       inventory: float = 0.0) -> dict | None:
+        """Calculate bid/ask spread optimized for reward qualification.
+
+        Takes into account platform-specific constraints and inventory position.
+
+        Args:
+            market_key: Market identifier.
+            mid_price: Current mid-price (0-1).
+            inventory: Current inventory position (positive = long).
+
+        Returns:
+            Dict with bid, ask, spread, or None if no reward data.
+        """
+        reward_data = self.get_polymarket_reward(market_key)
+        if not reward_data:
+            return None
+
+        max_spread = reward_data.get("max_incentive_spread", 0.05)
+
+        # Target spread: 60% of max for good reward score while staying competitive
+        target_spread = max_spread * 0.6
+        half_spread = target_spread / 2
+
+        # Apply inventory skew: when long, tighten ask (sell faster)
+        skew = 0.0
+        if inventory > 0:
+            skew = -target_spread * 0.1
+
+        bid = mid_price - half_spread + skew
+        ask = mid_price + half_spread + skew
+
+        # Clamp to valid range
+        bid = max(0.01, min(0.99, bid))
+        ask = max(0.01, min(0.99, ask))
+
+        return {
+            "bid": round(bid, 4),
+            "ask": round(ask, 4),
+            "spread": round(ask - bid, 4),
+            "reward_optimized": True,
+        }
+
+
+# ---------------------------------------------------------------------------
+# KalshiRewardTracker
+# ---------------------------------------------------------------------------
+
+class KalshiRewardTracker:
+    """Track Kalshi liquidity incentive program participation via local order logging.
+
+    Kalshi has no public reward API, so we track qualifying order metrics locally.
+    Thread-safe.
+    """
+
+    def __init__(self, db=None):
+        """Initialize tracker.
+
+        Args:
+            db: TradeDB instance for persisting reward metrics (optional).
+        """
+        self._db = db
+        self._active_orders: dict[str, dict] = {}  # {order_id: order_data}
+        self._lock = threading.Lock()
+
+    def log_order_placed(self, order_id: str, market_key: str, size: float,
+                        price: float, mid_price: float, side: str) -> None:
+        """Log a Kalshi limit order placement.
+
+        Args:
+            order_id: Order ID from exchange.
+            market_key: Market identifier.
+            size: Order size in dollars.
+            price: Limit price.
+            mid_price: Current mid-price for spread calculation.
+            side: "buy" or "sell".
+        """
+        spread = abs(price - mid_price) / mid_price if mid_price > 0 else 0
+
+        with self._lock:
+            self._active_orders[order_id] = {
+                "market_key": market_key,
+                "size": size,
+                "price": price,
+                "side": side,
+                "spread": spread,
+                "placed_at": time.time(),
+            }
+
+        # Persist to database if available
+        if self._db:
+            self._db.log_reward_metric(
+                platform="kalshi",
+                market_key=market_key,
+                order_id=order_id,
+                event="placed",
+                size=size,
+                spread=spread,
+                resting_seconds=0,
+            )
+
+    def log_order_cancelled(self, order_id: str) -> None:
+        """Log a Kalshi order cancellation.
+
+        Args:
+            order_id: Order ID that was cancelled.
+        """
+        with self._lock:
+            if order_id not in self._active_orders:
+                return
+
+            order = self._active_orders.pop(order_id)
+            resting_seconds = int(time.time() - order["placed_at"])
+
+            # Persist cancellation to database if available
+            if self._db:
+                self._db.log_reward_metric(
+                    platform="kalshi",
+                    market_key=order["market_key"],
+                    order_id=order_id,
+                    event="cancelled",
+                    size=order["size"],
+                    spread=order["spread"],
+                    resting_seconds=resting_seconds,
+                )
+
+    def get_active_orders(self) -> list[dict]:
+        """Get all currently active orders."""
+        with self._lock:
+            return [
+                {"order_id": oid, **info}
+                for oid, info in self._active_orders.items()
+            ]
+
+    def estimate_daily_reward(self, market_key: str) -> float:
+        """Estimate daily reward yield for a market based on resting orders.
+
+        This is a rough estimate only; actual rewards are computed daily by Kalshi.
+
+        Args:
+            market_key: Market identifier.
+
+        Returns:
+            Estimated daily reward in USDC.
+        """
+        with self._lock:
+            orders = [
+                o for o in self._active_orders.values()
+                if o["market_key"] == market_key
+            ]
+
+        if not orders:
+            return 0.0
+
+        # Kalshi reward formula is proprietary; estimate based on resting time + spread
+        # Assumption: ~$0.50/day per 24h of resting at mid-spread (3%)
+        total_resting = sum(time.time() - o["placed_at"] for o in orders)
+        avg_spread = sum(o["spread"] for o in orders) / len(orders) if orders else 0
+
+        # Estimate: reward ∝ resting_time * (1 - spread_tightness)
+        estimated_daily = (total_resting / 86400) * (1 - avg_spread * 100) * 0.50
+        return max(0.0, estimated_daily)
