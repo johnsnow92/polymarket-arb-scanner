@@ -335,6 +335,13 @@ KALSHI_MULTI_ENABLED = _env_bool("KALSHI_MULTI_ENABLED", "true")
 # Fill-or-Kill partial-fill trap on thin multi-outcome markets.
 KALSHI_MULTI_MIN_DEPTH = _env_int("KALSHI_MULTI_MIN_DEPTH", "10")
 
+# Execution budget per scan cycle. After sorting opportunities by
+# capital_efficiency_score, only the top N are attempted in each scan.
+# 0 = unlimited (current behavior). Set to a small integer (3-5) to
+# force the bot to be selective and only execute the highest-priority
+# opportunities each cycle, preserving capital for the best trades.
+EXECUTION_BUDGET_PER_SCAN = _env_int("EXECUTION_BUDGET_PER_SCAN", "0")
+
 # STRAT-01: Order Book Imbalance
 IMBALANCE_ENABLED = _env_bool("IMBALANCE_ENABLED", "false")
 IMBALANCE_RATIO = _env_float("IMBALANCE_RATIO", "3.0")

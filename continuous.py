@@ -1549,9 +1549,23 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
                 # Execute opportunities sequentially (balance must be rechecked between trades)
                 if all_opportunities:
+                    # Apply execution budget cap (selectivity control).
+                    # Opportunities are already sorted by _execution_priority
+                    # (weight * capital_efficiency_score), so slicing [:N]
+                    # keeps the top N highest-priority candidates per cycle.
+                    budget = getattr(config, "EXECUTION_BUDGET_PER_SCAN", 0)
+                    exec_queue = (
+                        all_opportunities[:budget]
+                        if budget > 0 else all_opportunities
+                    )
+                    if budget > 0 and len(all_opportunities) > budget:
+                        logger.info(
+                            "Execution budget: top %d of %d opportunities selected",
+                            budget, len(all_opportunities),
+                        )
                     logger.info("--- Execution Pass ---")
                     executed = 0
-                    for opp in all_opportunities:
+                    for opp in exec_queue:
                         if shutdown_event.is_set():
                             break
                         try:
@@ -1571,7 +1585,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                                     logger.debug("Post-trade bankroll refresh failed: %s", exc)
                         except Exception as e:
                             logger.error("Execution error: %s", e)
-                    logger.info("Executed: %d/%d", executed, len(all_opportunities))
+                    logger.info("Executed: %d/%d", executed, len(exec_queue))
 
                 # Process any pending hedges from partial fills
                 if hedger:
