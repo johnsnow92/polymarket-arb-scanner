@@ -942,9 +942,16 @@ class ArbitrageExecutor:
     ) -> tuple[bool, float, str]:
         """Revalidate a MultiCross opportunity by re-checking each leg's price.
 
+        Also enforces a per-leg depth check on EACH Kalshi leg to prevent
+        the Fill-or-Kill partial-fill trap. If any Kalshi leg has fewer than
+        MULTI_CROSS_MIN_DEPTH contracts at best ask, reject the opportunity.
+
         Returns:
             (passed, reval_profit, reason)
         """
+        import config as _config
+        min_depth = getattr(_config, "MULTI_CROSS_MIN_DEPTH", 10)
+
         outcome_legs = opp.get("_outcome_legs", [])
         if not outcome_legs:
             raise _RevalidationAPIError("no outcome legs for multi_cross")
@@ -954,6 +961,35 @@ class ArbitrageExecutor:
         for leg in outcome_legs:
             platform = leg.get("platform", "")
             price = leg.get("price", 0)
+
+            # Depth gate for Kalshi legs — check resting volume before
+            # attempting FOK order that could leave unhedgeable orphans
+            if platform == "kalshi" and self.kalshi_client:
+                ticker = leg.get("_kalshi_ticker", "")
+                if ticker:
+                    try:
+                        book = self.kalshi_client.fetch_order_book(ticker)
+                        if book:
+                            orderbook = book.get("orderbook", book)
+                            yes_entries = orderbook.get("yes", [])
+                            if yes_entries:
+                                entry = yes_entries[0]
+                                if isinstance(entry, list) and len(entry) >= 2:
+                                    leg_depth = int(entry[1])
+                                elif isinstance(entry, dict):
+                                    leg_depth = int(entry.get("quantity", entry.get("size", 0)))
+                                else:
+                                    leg_depth = 0
+                            else:
+                                leg_depth = 0
+                            if leg_depth < min_depth:
+                                logger.info(
+                                    "MultiCross depth gate: %s leg_depth=%d < min=%d, rejecting",
+                                    ticker, leg_depth, min_depth,
+                                )
+                                return False, original_profit, "insufficient_leg_depth"
+                    except Exception as e:
+                        logger.debug("MultiCross depth check failed for %s: %s", ticker, e)
 
             # Try to get a fresh price from WS cache
             cache_key = leg.get("_token_id") or leg.get("_kalshi_ticker", "")
