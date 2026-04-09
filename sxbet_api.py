@@ -191,30 +191,30 @@ class SXBetClient:
         if not market_hash:
             return None, None
 
-        # Fetch orderbook for market
-        data = self._request("GET", f"/markets/{market_hash}/orderbook")
-        if not data:
+        # Fetch active orders for market (SX Bet has no dedicated orderbook endpoint)
+        data = self._request("GET", "/orders", params={"marketHashes": market_hash})
+        if not data or "data" not in data:
             return None, None
 
-        bids = data.get("bids", [])
-        asks = data.get("asks", [])
+        orders = data["data"]
+        if not orders:
+            return None, None
 
-        yes_price = None
-        no_price = None
+        # Parse orders into YES/NO best prices
+        # percentageOdds is 18-decimal (e.g. "60000000000000000000" = 60% = 0.60)
+        best_yes = None
+        best_no = None
+        for order in orders:
+            odds_raw = int(order.get("percentageOdds", 0))
+            prob = odds_raw / 1e18  # Convert to 0-1 probability
+            is_outcome_one = order.get("isMakerBettingOutcomeOne", True)
+            if is_outcome_one and (best_yes is None or prob > best_yes):
+                best_yes = prob
+            elif not is_outcome_one and (best_no is None or prob > best_no):
+                best_no = prob
 
-        # Best bid = highest buy price (YES equivalent)
-        if bids:
-            best_bid = bids[0]
-            price = float(best_bid.get("price", 0))
-            if price > 0:
-                yes_price = price  # SX Bet prices already in 0-1 range
-
-        # Best ask = lowest sell price
-        if asks:
-            best_ask = asks[0]
-            price = float(best_ask.get("price", 0))
-            if price > 0:
-                no_price = 1.0 - price
+        yes_price = best_yes
+        no_price = best_no
 
         if yes_price is not None and no_price is None:
             no_price = 1.0 - yes_price
@@ -224,29 +224,60 @@ class SXBetClient:
         return yes_price, no_price
 
     def list_runners(self, market_hash: str) -> list[dict]:
-        """Fetch outcomes for a market.
+        """Return outcomes for a market from its cached market data.
+
+        SX Bet markets are binary (outcomeOne / outcomeTwo), so this returns
+        a synthetic list matching the scan module's expectations.
 
         Args:
             market_hash: SX Bet market hash.
 
         Returns:
-            List of outcome dicts.
+            List of outcome dicts with 'name' key.
         """
-        data = self._request("GET", f"/markets/{market_hash}/outcomes")
-        if data and "data" in data:
-            return data["data"]
-        return []
+        # SX Bet binary markets embed outcome names in the market dict itself.
+        # Multi-outcome markets are not supported on SX Bet.
+        return [{"name": "Outcome 1"}, {"name": "Outcome 2"}]
 
     def get_orderbook(self, market_hash: str) -> dict | None:
-        """Fetch full orderbook for a market.
+        """Fetch active resting orders for a market (order book equivalent).
+
+        Uses GET /orders?marketHashes={hash} since SX Bet has no dedicated
+        orderbook endpoint.
 
         Args:
             market_hash: SX Bet market hash.
 
         Returns:
-            Orderbook dict or None.
+            Dict with 'bids' and 'asks' lists (normalized from raw orders),
+            or None on failure.
         """
-        return self._request("GET", f"/markets/{market_hash}/orderbook")
+        data = self._request("GET", "/orders", params={"marketHashes": market_hash})
+        if not data or "data" not in data:
+            return None
+
+        orders = data["data"]
+        bids = []  # YES side (isMakerBettingOutcomeOne=true)
+        asks = []  # NO side (isMakerBettingOutcomeOne=false)
+
+        for order in orders:
+            odds_raw = int(order.get("percentageOdds", 0))
+            prob = odds_raw / 1e18
+            total_size = int(order.get("totalBetSize", 0))
+            fill_amount = int(order.get("fillAmount", 0))
+            remaining = (total_size - fill_amount) / 1e6  # USDC 6 decimals
+
+            entry = {"price": prob, "size": remaining}
+            if order.get("isMakerBettingOutcomeOne", True):
+                bids.append(entry)
+            else:
+                asks.append(entry)
+
+        # Sort: bids highest first, asks lowest first
+        bids.sort(key=lambda x: x["price"], reverse=True)
+        asks.sort(key=lambda x: x["price"])
+
+        return {"bids": bids, "asks": asks}
 
     def place_order(self, market_hash: str, outcome_id: str, side: str,
                     price: float, size: float) -> dict | None:
