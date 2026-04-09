@@ -163,7 +163,11 @@ class SXBetClient:
                 "pageSize": 50,
             })
             if market_data and "data" in market_data:
-                for market in market_data["data"]:
+                # API returns {"data": {"markets": [...], "nextKey": "..."}}
+                markets_list = market_data["data"]
+                if isinstance(markets_list, dict):
+                    markets_list = markets_list.get("markets", [])
+                for market in markets_list:
                     if not isinstance(market, dict):
                         logger.debug("SX Bet: skipping non-dict market entry: %s", type(market).__name__)
                         continue
