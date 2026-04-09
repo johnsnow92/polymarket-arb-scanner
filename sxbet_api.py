@@ -50,7 +50,7 @@ class SXBetClient:
         self.session = requests.Session()
         # Note: SXBET_PROXY_URL (forward proxy) is deprecated in favor of
         # SXBET_API_BASE_URL (reverse proxy). Kept for backward compat.
-        proxy_url = os.getenv("SXBET_PROXY_URL")
+        proxy_url = os.getenv("SXBET_PROXY_URL", "").strip().strip('"')
         if proxy_url:
             self.session.proxies = {"http": proxy_url, "https": proxy_url}
         self.session.headers.update({
