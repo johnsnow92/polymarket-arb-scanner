@@ -327,6 +327,14 @@ REWARDS_MAX_SPREAD = _env_float("REWARDS_MAX_SPREAD", "0.05")
 REWARDS_POLL_INTERVAL = _env_int("REWARDS_POLL_INTERVAL", "60")
 REWARDS_MIN_RESTING_TIME = _env_int("REWARDS_MIN_RESTING_TIME", "300")
 
+# Kalshi multi-outcome execution gating (kill-switch + depth check)
+# Set to false to disable KalshiMulti scanning/execution entirely.
+KALSHI_MULTI_ENABLED = _env_bool("KALSHI_MULTI_ENABLED", "true")
+# Minimum resting yes-side contracts required at the best ask on EACH leg
+# before the executor will even attempt a KalshiMulti trade. Prevents the
+# Fill-or-Kill partial-fill trap on thin multi-outcome markets.
+KALSHI_MULTI_MIN_DEPTH = _env_int("KALSHI_MULTI_MIN_DEPTH", "10")
+
 # STRAT-01: Order Book Imbalance
 IMBALANCE_ENABLED = _env_bool("IMBALANCE_ENABLED", "false")
 IMBALANCE_RATIO = _env_float("IMBALANCE_RATIO", "3.0")

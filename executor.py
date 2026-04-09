@@ -818,9 +818,17 @@ class ArbitrageExecutor:
     ) -> tuple[bool, float, str]:
         """Revalidate a Kalshi multi-outcome opportunity.
 
+        Also enforces a pre-trade depth check on EACH leg to prevent the
+        Fill-or-Kill partial-fill trap: if any leg has fewer than
+        config.KALSHI_MULTI_MIN_DEPTH contracts at the best ask, reject the
+        opportunity rather than risk an unhedgeable partial fill.
+
         Returns:
             (passed, reval_profit, reason)
         """
+        import config as _config
+        min_depth = getattr(_config, "KALSHI_MULTI_MIN_DEPTH", 10)
+
         tickers = opp.get("_kalshi_tickers", [])
         if not tickers or not self.kalshi_client:
             raise _RevalidationAPIError("no tickers or no Kalshi client for kalshi_multi")
@@ -834,7 +842,23 @@ class ArbitrageExecutor:
             if not yes_entries:
                 raise _RevalidationAPIError(f"empty yes entries for Kalshi {ticker}")
             entry = yes_entries[0]
-            price = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
+            if isinstance(entry, list) and len(entry) >= 2:
+                price = float(entry[0]) / 100
+                leg_depth = int(entry[1])
+            elif isinstance(entry, dict):
+                price = float(entry.get("price", 0)) / 100
+                leg_depth = int(entry.get("quantity", entry.get("size", 0)))
+            else:
+                raise _RevalidationAPIError(f"malformed yes entry for Kalshi {ticker}")
+            # Pre-trade depth gate: refuse to trade thin legs that will
+            # cause fill_or_kill_insufficient_resting_volume rejections
+            # and unhedgeable partial fills.
+            if leg_depth < min_depth:
+                logger.info(
+                    "KalshiMulti depth gate: %s leg_depth=%d < min_depth=%d, rejecting",
+                    ticker, leg_depth, min_depth,
+                )
+                return False, original_profit, "insufficient_leg_depth"
             yes_prices.append(price)
         result = net_profit_kalshi_multi(yes_prices)
         reval_profit = result["net_profit"]

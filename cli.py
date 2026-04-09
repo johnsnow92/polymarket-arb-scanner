@@ -67,6 +67,7 @@ from scans import (
     scan_polymarket_rewards,
     scan_kalshi_rewards,
 )
+import config
 from config import (
     DEFAULT_MIN_PROFIT,
     MAX_TRADE_SIZE as CONFIG_MAX_TRADE_SIZE,
@@ -151,8 +152,11 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         if args.mode in ("all", "kalshi") and kalshi_client:
             scan_futures["kalshi_binary"] = pool.submit(
                 scan_kalshi_binary, kalshi_client, min_profit, kalshi_data=kalshi_data)
-            scan_futures["kalshi_multi"] = pool.submit(
-                scan_kalshi_multi, kalshi_client, min_profit, kalshi_data=kalshi_data)
+            # KalshiMulti kill-switch: disable for thin multi-outcome markets
+            # that cause Fill-or-Kill partial fills (no exit liquidity for hedge)
+            if config.KALSHI_MULTI_ENABLED:
+                scan_futures["kalshi_multi"] = pool.submit(
+                    scan_kalshi_multi, kalshi_client, min_profit, kalshi_data=kalshi_data)
 
         for key, future in scan_futures.items():
             try:
