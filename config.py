@@ -335,6 +335,15 @@ KALSHI_MULTI_ENABLED = _env_bool("KALSHI_MULTI_ENABLED", "true")
 # Fill-or-Kill partial-fill trap on thin multi-outcome markets.
 KALSHI_MULTI_MIN_DEPTH = _env_int("KALSHI_MULTI_MIN_DEPTH", "10")
 
+# Multi-outcome cross-platform execution gating (kill-switch + depth check)
+# MultiCross places N legs concurrently across Polymarket + Kalshi. Same
+# Fill-or-Kill partial-fill vulnerability as KalshiMulti. Set to false to
+# disable MultiCross scanning/execution entirely.
+MULTI_CROSS_ENABLED = _env_bool("MULTI_CROSS_ENABLED", "true")
+# Minimum resting contracts required at the best ask on EACH Kalshi leg
+# of a MultiCross arb before the executor will attempt the trade.
+MULTI_CROSS_MIN_DEPTH = _env_int("MULTI_CROSS_MIN_DEPTH", "10")
+
 # Execution budget per scan cycle. After sorting opportunities by
 # capital_efficiency_score, only the top N are attempted in each scan.
 # 0 = unlimited (current behavior). Set to a small integer (3-5) to

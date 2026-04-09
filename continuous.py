@@ -1132,7 +1132,13 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     )
                     all_opportunities.extend(tri_opps)
 
-                if args.mode in ("all", "multi-cross") and poly_events and kalshi_client:
+                # MultiCross kill-switch: same FOK partial-fill vulnerability
+                # as KalshiMulti. Places N legs concurrently on thin Kalshi
+                # multi-outcome markets, leaving unhedgeable orphans when legs
+                # fail. Disabled until depth gate is added.
+                if (args.mode in ("all", "multi-cross")
+                        and poly_events and kalshi_client
+                        and config.MULTI_CROSS_ENABLED):
                     mc_opps = scan_multi_cross(
                         poly_events, kalshi_client, min_profit,
                         kalshi_data=kalshi_data,
