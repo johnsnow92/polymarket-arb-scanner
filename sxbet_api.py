@@ -12,7 +12,8 @@ from rate_limiter import PlatformCircuitBreaker
 
 logger = logging.getLogger(__name__)
 
-SXBET_API_URL = "https://api.sx.bet"
+# Base URL: overridable via env var for reverse-proxy routing (e.g. Singapore)
+SXBET_API_URL = os.getenv("SXBET_API_BASE_URL", "https://api.sx.bet")
 
 # Rate limiting (thread-safe)
 _last_request_time = 0
@@ -47,6 +48,8 @@ class SXBetClient:
 
     def __init__(self):
         self.session = requests.Session()
+        # Note: SXBET_PROXY_URL (forward proxy) is deprecated in favor of
+        # SXBET_API_BASE_URL (reverse proxy). Kept for backward compat.
         proxy_url = os.getenv("SXBET_PROXY_URL")
         if proxy_url:
             self.session.proxies = {"http": proxy_url, "https": proxy_url}
