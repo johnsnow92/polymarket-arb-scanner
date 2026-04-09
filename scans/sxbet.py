@@ -12,8 +12,11 @@ logger = logging.getLogger(__name__)
 def scan_sxbet_backall(sxbet_client: SXBetClient, min_profit: float) -> list[dict]:
     """Scan for SX Bet back-all arbitrage (under-round books).
 
-    Sum of implied prices across all outcomes < 1.0.
+    SX Bet markets are binary (outcomeOne / outcomeTwo). Back-all arb
+    exists when buying YES on both outcomes costs < $1.00 total.
     SX Bet has 0% commission so full spread is profit.
+
+    Uses batch orderbook fetching to avoid rate limits.
     """
     opportunities = []
 
@@ -27,82 +30,64 @@ def scan_sxbet_backall(sxbet_client: SXBetClient, min_profit: float) -> list[dic
 
     logger.info("Scanning %d SX Bet markets for back-all arbs...", len(markets))
 
+    # Batch fetch all orderbooks (20 per API call instead of 1)
+    market_hashes = [m.get("marketHash", "") for m in markets if m.get("marketHash")]
+    orderbooks = sxbet_client.get_orderbooks_batch(market_hashes, batch_size=20)
+
     for market in markets:
         market_hash = market.get("marketHash", "")
         if not market_hash:
             continue
 
-        # Fetch outcomes and orderbook
-        orderbook = sxbet_client.get_orderbook(market_hash)
-        if not orderbook:
+        ob = orderbooks.get(market_hash)
+        if not ob:
             continue
 
-        # SX Bet markets may have multiple outcomes with separate orderbooks
-        # For single-market scan, use the top-level bids as implied prices
-        outcomes = market.get("outcomes", [])
-        if len(outcomes) < 2:
+        bids = ob.get("bids", [])
+        asks = ob.get("asks", [])
+
+        # For binary back-all: need best YES price (from bids) and best NO price (from asks)
+        # bids = YES side (isMakerBettingOutcomeOne=true), sorted highest first
+        # asks = NO side (isMakerBettingOutcomeOne=false), sorted lowest first
+        if not bids or not asks:
             continue
 
-        implied_probs = []
-        outcome_ids = []
-        valid = True
+        yes_price = float(bids[0]["price"])
+        no_price = float(asks[0]["price"])
 
-        for outcome in outcomes:
-            outcome_id = outcome.get("outcomeId", "")
-            # Fetch per-outcome orderbook
-            ob = sxbet_client.get_orderbook(f"{market_hash}/{outcome_id}") if outcome_id else None
-
-            # Fall back to using the outcome's last price or implied probability
-            price = outcome.get("price") or outcome.get("impliedProbability")
-            if ob and ob.get("bids"):
-                price = float(ob["bids"][0].get("price", 0))
-
-            if not price or float(price) <= 0 or float(price) >= 1:
-                valid = False
-                break
-
-            implied_probs.append(float(price))
-            outcome_ids.append(outcome_id)
-
-        if not valid or not implied_probs:
+        if yes_price <= 0 or no_price <= 0 or yes_price >= 1 or no_price >= 1:
             continue
 
+        implied_probs = [yes_price, no_price]
         result = net_profit_sxbet_backall(implied_probs)
+
         if result["net_profit"] >= min_profit:
             total = sum(implied_probs)
-            n = len(implied_probs)
             sport_info = market.get("_sport", {})
-            sport_name = sport_info.get("label", "")
-            market_title = market.get("title", market.get("label", "Unknown"))
-            title = f"{sport_name} - {market_title}" if sport_name else market_title
+            sport_name = sport_info.get("label", market.get("sportLabel", ""))
+            team1 = market.get("teamOneName", "")
+            team2 = market.get("teamTwoName", "")
+            league = market.get("leagueLabel", "")
+            title = f"{team1} vs {team2}" if team1 and team2 else league or "Unknown"
+            if sport_name:
+                title = f"{sport_name} - {title}"
 
-            price_summary = ", ".join(
-                f"{p:.3f}" for p in sorted(implied_probs, reverse=True)[:5]
-            )
-            if n > 5:
-                price_summary += f"... ({n} outcomes)"
-
-            # Depth from orderbook
-            min_depth = 0
-            if orderbook.get("bids"):
-                for bid in orderbook["bids"][:1]:
-                    size = float(bid.get("size", bid.get("amount", 0)))
-                    min_depth = size if min_depth == 0 else min(min_depth, size)
+            bid_size = float(bids[0].get("size", 0))
+            ask_size = float(asks[0].get("size", 0))
 
             opportunities.append({
                 "type": "SXBetBackAll",
-                "_layer": 1,  # Layer 1: pure arbitrage
+                "_layer": 1,
                 "market": title[:60],
-                "prices": price_summary,
+                "prices": f"{yes_price:.3f}, {no_price:.3f}",
                 "total_cost": f"${total:.4f}",
                 "gross_spread": f"{result['gross_spread']:.4f}",
                 "fees": f"${result['fees']:.4f}",
                 "net_profit": result["net_profit"],
-                "net_roi": f"{result['net_profit'] / total * 100:.2f}%",
+                "net_roi": f"{result['net_profit'] / total * 100:.2f}%" if total > 0 else "0%",
                 "_sx_market_hash": market_hash,
-                "_sx_outcome_ids": outcome_ids,
                 "_sx_prices": implied_probs,
-                "_clob_depth": min_depth,
+                "_clob_depth": min(bid_size, ask_size),
             })
 
     logger.info("Found %d SX Bet back-all opportunities.", len(opportunities))
@@ -115,6 +100,8 @@ def scan_sxbet_backlay(sxbet_client: SXBetClient, min_profit: float) -> list[dic
 
     Same outcome has best bid > best ask (crossed book).
     SX Bet has 0% commission so full spread is profit.
+
+    Uses batch orderbook fetching to avoid rate limits.
     """
     opportunities = []
 
@@ -127,23 +114,27 @@ def scan_sxbet_backlay(sxbet_client: SXBetClient, min_profit: float) -> list[dic
 
     logger.info("Scanning %d SX Bet markets for back-lay arbs...", len(markets))
 
+    # Batch fetch all orderbooks
+    market_hashes = [m.get("marketHash", "") for m in markets if m.get("marketHash")]
+    orderbooks = sxbet_client.get_orderbooks_batch(market_hashes, batch_size=20)
+
     for market in markets:
         market_hash = market.get("marketHash", "")
         if not market_hash:
             continue
 
-        orderbook = sxbet_client.get_orderbook(market_hash)
-        if not orderbook:
+        ob = orderbooks.get(market_hash)
+        if not ob:
             continue
 
-        bids = orderbook.get("bids", [])
-        asks = orderbook.get("asks", [])
+        bids = ob.get("bids", [])
+        asks = ob.get("asks", [])
 
         if not bids or not asks:
             continue
 
-        best_bid = float(bids[0].get("price", 0))
-        best_ask = float(asks[0].get("price", 0))
+        best_bid = float(bids[0]["price"])
+        best_ask = float(asks[0]["price"])
 
         if best_bid <= 0 or best_ask <= 0:
             continue
@@ -152,23 +143,25 @@ def scan_sxbet_backlay(sxbet_client: SXBetClient, min_profit: float) -> list[dic
         if best_bid <= best_ask:
             continue
 
-        # In probability terms: back_prob = ask, lay_prob = bid
         back_prob = best_ask
         lay_prob = best_bid
 
         result = net_profit_sxbet_backlay(back_prob, lay_prob)
         if result["net_profit"] >= min_profit:
             sport_info = market.get("_sport", {})
-            sport_name = sport_info.get("label", "")
-            market_title = market.get("title", market.get("label", "Unknown"))
-            title = f"{sport_name} - {market_title}" if sport_name else market_title
+            sport_name = sport_info.get("label", market.get("sportLabel", ""))
+            team1 = market.get("teamOneName", "")
+            team2 = market.get("teamTwoName", "")
+            title = f"{team1} vs {team2}" if team1 and team2 else "Unknown"
+            if sport_name:
+                title = f"{sport_name} - {title}"
 
-            bid_size = float(bids[0].get("size", bids[0].get("amount", 0)))
-            ask_size = float(asks[0].get("size", asks[0].get("amount", 0)))
+            bid_size = float(bids[0].get("size", 0))
+            ask_size = float(asks[0].get("size", 0))
 
             opportunities.append({
                 "type": "SXBetBackLay",
-                "_layer": 1,  # Layer 1: pure arbitrage
+                "_layer": 1,
                 "market": title[:60],
                 "prices": f"back={back_prob:.3f} lay={lay_prob:.3f}",
                 "total_cost": f"${back_prob:.4f}",

@@ -279,6 +279,54 @@ class SXBetClient:
 
         return {"bids": bids, "asks": asks}
 
+    def get_orderbooks_batch(self, market_hashes: list[str], batch_size: int = 20) -> dict[str, dict]:
+        """Fetch order books for multiple markets in batched API calls.
+
+        Sends comma-separated marketHashes to GET /orders to minimize API calls.
+        Returns a dict mapping market_hash → orderbook (bids/asks).
+        """
+        result: dict[str, dict] = {}
+        for i in range(0, len(market_hashes), batch_size):
+            batch = market_hashes[i:i + batch_size]
+            hashes_param = ",".join(batch)
+            data = self._request("GET", "/orders", params={"marketHashes": hashes_param})
+            if not data or "data" not in data:
+                continue
+
+            # Group orders by marketHash
+            by_market: dict[str, list] = {}
+            for order in data["data"]:
+                mh = order.get("marketHash", "")
+                if mh not in by_market:
+                    by_market[mh] = []
+                by_market[mh].append(order)
+
+            # Parse each market's orders into bids/asks
+            for mh, orders in by_market.items():
+                bids = []
+                asks = []
+                for order in orders:
+                    odds_raw = int(order.get("percentageOdds", 0))
+                    prob = odds_raw / 1e18
+                    total_size = int(order.get("totalBetSize", 0))
+                    fill_amount = int(order.get("fillAmount", 0))
+                    remaining = (total_size - fill_amount) / 1e6
+                    entry = {"price": prob, "size": remaining}
+                    if order.get("isMakerBettingOutcomeOne", True):
+                        bids.append(entry)
+                    else:
+                        asks.append(entry)
+                bids.sort(key=lambda x: x["price"], reverse=True)
+                asks.sort(key=lambda x: x["price"])
+                result[mh] = {"bids": bids, "asks": asks}
+
+            # Markets with no orders get empty books
+            for mh in batch:
+                if mh not in result:
+                    result[mh] = {"bids": [], "asks": []}
+
+        return result
+
     def place_order(self, market_hash: str, outcome_id: str, side: str,
                     price: float, size: float) -> dict | None:
         """Place an order on SX Bet.
