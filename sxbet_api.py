@@ -138,42 +138,52 @@ class SXBetClient:
             return None
 
     def fetch_all_markets(self) -> list[dict]:
-        """Fetch active markets from SX Bet.
+        """Fetch active markets from SX Bet with pagination and deduplication.
 
-        Iterates over active sports and fetches markets for each.
+        Uses GET /markets/active with pagination (nextKey) to fetch all
+        active markets. Deduplicates on marketHash since the API may return
+        the same market under multiple sport categories.
 
         Returns:
-            List of market dicts, each with an attached ``_sport`` parent.
+            List of unique market dicts.
         """
         all_markets = []
+        seen_hashes: set[str] = set()
+        next_key = None
 
-        # Get sports list
-        sports = self._request("GET", "/sports")
-        if not sports or "data" not in sports:
-            return all_markets
+        while True:
+            params: dict = {"pageSize": 50}
+            if next_key:
+                params["paginationKey"] = next_key
 
-        for sport in sports.get("data", []):
-            sport_id = sport.get("sportId")
-            if not sport_id:
-                continue
+            market_data = self._request("GET", "/markets/active", params=params)
+            if not market_data or "data" not in market_data:
+                break
 
-            # Fetch markets for this sport (SX Bet max pageSize = 50)
-            market_data = self._request("GET", "/markets/active", params={
-                "sportId": sport_id,
-                "pageSize": 50,
-            })
-            if market_data and "data" in market_data:
-                # API returns {"data": {"markets": [...], "nextKey": "..."}}
-                markets_list = market_data["data"]
-                if isinstance(markets_list, dict):
-                    markets_list = markets_list.get("markets", [])
-                for market in markets_list:
-                    if not isinstance(market, dict):
-                        logger.debug("SX Bet: skipping non-dict market entry: %s", type(market).__name__)
-                        continue
-                    market["_sport"] = sport
+            data = market_data["data"]
+            if isinstance(data, dict):
+                markets_list = data.get("markets", [])
+                next_key = data.get("nextKey")
+            else:
+                markets_list = data if isinstance(data, list) else []
+                next_key = None
+
+            if not markets_list:
+                break
+
+            for market in markets_list:
+                if not isinstance(market, dict):
+                    continue
+                mh = market.get("marketHash", "")
+                if mh and mh not in seen_hashes:
+                    seen_hashes.add(mh)
                     all_markets.append(market)
 
+            # Stop if no more pages
+            if not next_key:
+                break
+
+        logger.info("SX Bet: fetched %d unique active markets", len(all_markets))
         return all_markets
 
     def get_market_price(self, market: dict) -> tuple[float | None, float | None]:
@@ -206,7 +216,7 @@ class SXBetClient:
         best_no = None
         for order in orders:
             odds_raw = int(order.get("percentageOdds", 0))
-            prob = odds_raw / 1e18  # Convert to 0-1 probability
+            prob = odds_raw / 1e18 / 100  # 18-decimal percentage → 0-1 probability
             is_outcome_one = order.get("isMakerBettingOutcomeOne", True)
             if is_outcome_one and (best_yes is None or prob > best_yes):
                 best_yes = prob
@@ -262,7 +272,7 @@ class SXBetClient:
 
         for order in orders:
             odds_raw = int(order.get("percentageOdds", 0))
-            prob = odds_raw / 1e18
+            prob = odds_raw / 1e18 / 100  # 18-decimal percentage → 0-1
             total_size = int(order.get("totalBetSize", 0))
             fill_amount = int(order.get("fillAmount", 0))
             remaining = (total_size - fill_amount) / 1e6  # USDC 6 decimals
@@ -307,7 +317,7 @@ class SXBetClient:
                 asks = []
                 for order in orders:
                     odds_raw = int(order.get("percentageOdds", 0))
-                    prob = odds_raw / 1e18
+                    prob = odds_raw / 1e18 / 100  # 18-decimal percentage → 0-1
                     total_size = int(order.get("totalBetSize", 0))
                     fill_amount = int(order.get("fillAmount", 0))
                     remaining = (total_size - fill_amount) / 1e6
