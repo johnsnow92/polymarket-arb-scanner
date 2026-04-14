@@ -5,5 +5,19 @@
       "Bash(curl * | sh)",
       "Bash(curl * | bash)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/Users/jtamm/.claude/hooks/verify-changed-file.js\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
   }
 }

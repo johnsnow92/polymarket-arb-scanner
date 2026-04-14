@@ -63,14 +63,14 @@ class BetfairClient:
         Args:
             username: Betfair username (falls back to BETFAIR_USERNAME env var).
             password: Betfair password (falls back to BETFAIR_PASSWORD env var).
-            api_key: Betfair API key (falls back to BETFAIR_API_KEY env var).
+            api_key: Betfair app key (falls back to BETFAIR_APP_KEY, then BETFAIR_API_KEY).
 
         Returns:
             True if login succeeded.
         """
         username = username or os.getenv("BETFAIR_USERNAME")
         password = password or os.getenv("BETFAIR_PASSWORD")
-        api_key = api_key or os.getenv("BETFAIR_API_KEY")
+        api_key = api_key or os.getenv("BETFAIR_APP_KEY") or os.getenv("BETFAIR_API_KEY")
 
         if not all([username, password, api_key]):
             logger.error("Betfair credentials not provided")

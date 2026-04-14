@@ -29,6 +29,28 @@ GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://api.gemini.com")
 _last_request_time = 0
 _rate_lock = threading.Lock()
 
+# Nonce generation: Gemini requires strictly-monotonic nonces per API key.
+# Millisecond precision + counter guarantees uniqueness under concurrent calls.
+_nonce_lock = threading.Lock()
+_last_nonce = 0
+
+
+def _next_nonce() -> str:
+    """Return a strictly-monotonic nonce as string.
+
+    Gemini's server enforces a 30-second window check that interprets the
+    nonce as seconds regardless of its magnitude, so we use second-precision
+    and bump by 1 on same-second collisions. This stays correct under
+    concurrent calls while keeping nonces within the server window.
+    """
+    global _last_nonce
+    with _nonce_lock:
+        now_s = int(time.time())
+        nxt = max(now_s, _last_nonce + 1)
+        _last_nonce = nxt
+    return str(nxt)
+
+
 # HARDEN-04: circuit breaker — opens after 3 consecutive failures, resets after 30s
 _circuit = PlatformCircuitBreaker("gemini", fail_limit=3, reset_timeout=30.0)
 
@@ -62,6 +84,12 @@ class GeminiClient:
         self.authenticated = False
         self.base_url = GEMINI_BASE_URL
         self._account = None  # Set to "primary" for master API keys
+        # Markets cache: shared between binary + multi scans within a cycle.
+        self._markets_cache: list[dict] | None = None
+        self._markets_cache_key: tuple | None = None
+        self._markets_cache_ts: float = 0.0
+        self._markets_cache_ttl: float = float(os.getenv("GEMINI_MARKETS_CACHE_TTL", "20"))
+        self._markets_cache_lock = threading.Lock()
 
     def login(self, api_key: str = None, api_secret: str = None) -> bool:
         """Store credentials and verify connectivity.
@@ -109,7 +137,7 @@ class GeminiClient:
         """
         payload_data = payload_data or {}
         payload_data["request"] = endpoint
-        payload_data["nonce"] = str(int(time.time()))
+        payload_data["nonce"] = _next_nonce()
         if self._account and "account" not in payload_data:
             payload_data["account"] = self._account
 
@@ -206,6 +234,10 @@ class GeminiClient:
     def fetch_all_markets(self, status: str = "active", category: str = None) -> list[dict]:
         """Fetch all prediction market events with pagination.
 
+        Caches results in-memory for ``GEMINI_MARKETS_CACHE_TTL`` seconds
+        (default 20s) so binary + multi scans in the same cycle share one
+        fetch. Cache is keyed by (status, category).
+
         Args:
             status: Filter by event status (default ``"active"``).
             category: Optional category filter.
@@ -213,6 +245,15 @@ class GeminiClient:
         Returns:
             Normalized list of event dicts with contracts.
         """
+        cache_key = (status, category)
+        with self._markets_cache_lock:
+            if (
+                self._markets_cache is not None
+                and self._markets_cache_key == cache_key
+                and (time.time() - self._markets_cache_ts) < self._markets_cache_ttl
+            ):
+                return self._markets_cache
+
         all_events = []
         offset = 0
         limit = 100
@@ -240,10 +281,26 @@ class GeminiClient:
             offset += limit
 
         logger.info("Fetched %d Gemini prediction market events.", len(all_events))
+        with self._markets_cache_lock:
+            self._markets_cache = all_events
+            self._markets_cache_key = cache_key
+            self._markets_cache_ts = time.time()
         return all_events
+
+    def invalidate_markets_cache(self) -> None:
+        """Force the next fetch_all_markets call to re-fetch from the API."""
+        with self._markets_cache_lock:
+            self._markets_cache = None
+            self._markets_cache_ts = 0.0
 
     def _normalize_event(self, event: dict) -> dict | None:
         """Normalize a Gemini event into a standard format.
+
+        Gemini binary events expose a single contract whose ``prices`` object
+        carries both yes and no buy prices; the NO side trades through the
+        same instrumentSymbol with ``outcome="no"``. This normalizer
+        synthesizes explicit yes/no contracts for binary events so the rest
+        of the scanner can treat binary events uniformly.
 
         Returns:
             Dict with keys: id, title, type, category, contracts, status.
@@ -253,42 +310,79 @@ class GeminiClient:
         if not event_id or not title:
             return None
 
+        event_type = event.get("type") or ("binary" if len(event.get("contracts", [])) == 2 else "categorical")
+
         contracts = []
         raw_contracts = event.get("contracts", event.get("markets", []))
-        for c in raw_contracts:
-            # Extract price from nested prices object or flat fields
-            price = None
-            prices_obj = c.get("prices")
-            if isinstance(prices_obj, dict):
-                # Prefer bestAsk for buy-side scanning, fall back to lastTradePrice
-                raw = prices_obj.get("bestAsk") or prices_obj.get("lastTradePrice")
-                if raw is not None:
-                    try:
-                        price = float(raw)
-                    except (ValueError, TypeError):
-                        pass
-            if price is None:
-                raw = c.get("lastPrice") or c.get("price")
-                if raw is not None:
-                    try:
-                        price = float(raw)
-                    except (ValueError, TypeError):
-                        pass
 
-            contract = {
-                "id": c.get("contractId") or c.get("id", ""),
-                "label": c.get("label") or c.get("title") or c.get("outcome", ""),
-                "price": price,
-                "instrumentSymbol": c.get("instrumentSymbol") or c.get("symbol", ""),
-                "outcome": c.get("outcome", ""),
-            }
-            # Preserve full prices object for CLOB refinement
-            if isinstance(prices_obj, dict):
-                contract["_prices"] = prices_obj
-            contracts.append(contract)
+        if event_type == "binary" and len(raw_contracts) == 1:
+            # Gemini binary events: synthesize yes + no contracts from the
+            # single contract's prices.buy.{yes,no}.
+            c = raw_contracts[0]
+            prices_obj = c.get("prices") if isinstance(c.get("prices"), dict) else {}
+            buy = prices_obj.get("buy") if isinstance(prices_obj.get("buy"), dict) else {}
 
-        # Use API-provided type, fall back to contract count heuristic
-        event_type = event.get("type", "binary" if len(contracts) == 2 else "categorical")
+            def _to_float(raw):
+                try:
+                    return float(raw) if raw is not None else None
+                except (ValueError, TypeError):
+                    return None
+
+            yes_price = _to_float(buy.get("yes")) or _to_float(prices_obj.get("bestAsk"))
+            no_price = _to_float(buy.get("no"))
+            if yes_price is not None and no_price is None:
+                no_price = round(1.0 - yes_price, 6)
+
+            symbol = c.get("instrumentSymbol") or c.get("symbol", "")
+            contract_id = c.get("contractId") or c.get("id", "")
+
+            contracts.append({
+                "id": contract_id,
+                "label": "Yes",
+                "price": yes_price,
+                "instrumentSymbol": symbol,
+                "outcome": "yes",
+                "_prices": prices_obj,
+            })
+            contracts.append({
+                "id": contract_id,  # Same contract, NO leg trades through same symbol
+                "label": "No",
+                "price": no_price,
+                "instrumentSymbol": symbol,
+                "outcome": "no",
+                "_prices": prices_obj,
+            })
+        else:
+            for c in raw_contracts:
+                # Extract price from nested prices object or flat fields
+                price = None
+                prices_obj = c.get("prices")
+                if isinstance(prices_obj, dict):
+                    # Prefer bestAsk for buy-side scanning, fall back to lastTradePrice
+                    raw = prices_obj.get("bestAsk") or prices_obj.get("lastTradePrice")
+                    if raw is not None:
+                        try:
+                            price = float(raw)
+                        except (ValueError, TypeError):
+                            pass
+                if price is None:
+                    raw = c.get("lastPrice") or c.get("price")
+                    if raw is not None:
+                        try:
+                            price = float(raw)
+                        except (ValueError, TypeError):
+                            pass
+
+                contract = {
+                    "id": c.get("contractId") or c.get("id", ""),
+                    "label": c.get("label") or c.get("title") or c.get("outcome", ""),
+                    "price": price,
+                    "instrumentSymbol": c.get("instrumentSymbol") or c.get("symbol", ""),
+                    "outcome": c.get("outcome", ""),
+                }
+                if isinstance(prices_obj, dict):
+                    contract["_prices"] = prices_obj
+                contracts.append(contract)
 
         return {
             "id": event_id,

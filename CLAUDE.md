@@ -50,10 +50,10 @@ Python CLI tool that scans for arbitrage opportunities across prediction markets
 
 ## Current Status
 
-- **Last session**: 2026-04-04 5:01 PM
-- **Worked on**: 11 commit(s): docs(06-01): complete analytics plan SUMMARY.md
-- **Next recommended**: GSD Phase 2/5 — continue execution
-- **Project type**: dev-only | GSD Phase 1/5
+- **Last session**: 2026-04-14 11:04 PM
+- **Worked on**: HubSpot: hubspot_accounts, hubspot_api
+- **Next recommended**: GSD: /gsd:progress to check next step
+- **Project type**: dev-only | GSD Phase 9/9
 ## Commands
 
 ```bash
@@ -278,6 +278,21 @@ The following env vars should be set in Railway for production deployment (Railw
 Already documented above. Ensure ALL platform credentials are set for full cross-platform coverage: `POLYMARKET_PRIVATE_KEY`, `KALSHI_API_KEY_ID`/`KALSHI_PRIVATE_KEY_PATH`, `BETFAIR_APP_KEY`/`BETFAIR_USERNAME`/`BETFAIR_PASSWORD`, `SMARKETS_API_KEY`, `SXBET_API_KEY`, `MATCHBOOK_USERNAME`/`MATCHBOOK_PASSWORD`, `GEMINI_API_KEY`/`GEMINI_API_SECRET`, `IBKR_HOST`/`IBKR_PORT`/`IBKR_CLIENT_ID`.
 
 Note: `POLYMARKET_PRIVATE_KEY` and `KALSHI_API_KEY_ID`/`KALSHI_PRIVATE_KEY_PATH` should already be configured from initial deployment. The IBKR connection requires IB Gateway running and reachable from Railway — requires a persistent IB Gateway host (not a local machine).
+
+## OpticOdds CLI Integration
+
+The `opticodds` CLI (`~/.local/bin/opticodds`) provides unified access to real-time and historical odds from 170+ sportsbooks including every exchange this project trades on: Polymarket, Kalshi, Betfair Exchange (back+lay), SX Bet, Sporttrade, Novig, BetDEX, Matchbook. Use for:
+
+- **Cross-platform price validation**: `opticodds odds --fixture <id> --book polymarket,kalshi,betfair_exchange --json`
+- **Exchange order book depth**: `opticodds odds --fixture <id> --book betfair_exchange --exclude-fees --json` (returns `order_book` + `source_ids`)
+- **Historical odds for backtesting**: `opticodds odds --fixture <id> --book kalshi --historical --json`
+- **Bet grading/settlement**: `opticodds grader --fixture <id> --market Moneyline --name "Team Name"`
+- **Fixture discovery**: `opticodds fixtures --sport <sport> --active --json`
+- **Live odds streaming**: `opticodds stream-odds --sport basketball --book draftkings,betfair_exchange --json`
+
+Auth: `OPTICODDS_API_KEY` is set globally in `~/.claude/settings.json`. Full reference: `~/.claude/references/opticodds-cli.md`.
+
+Prefer `opticodds` over direct HTTP when you need normalized cross-platform data. Prefer direct platform API clients (`*_api.py`) for execution and platform-specific operations (order placement, position management).
 
 ## Agent Team Notes
 

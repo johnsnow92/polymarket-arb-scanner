@@ -1095,7 +1095,7 @@ def main():
     sxbet_client = None
 
     if args.mode in ("all", "cross-all", "betfair"):
-        bf_api_key = os.getenv("BETFAIR_API_KEY")
+        bf_api_key = os.getenv("BETFAIR_APP_KEY") or os.getenv("BETFAIR_API_KEY")
         bf_user = os.getenv("BETFAIR_USERNAME")
         if bf_api_key and bf_user:
             betfair_client = BetfairClient()
