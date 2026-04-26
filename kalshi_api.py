@@ -376,17 +376,18 @@ class KalshiClient:
 # ---------------------------------------------------------------------------
 # Defensive sort-order audit for Kalshi orderbooks
 # ---------------------------------------------------------------------------
-# Per docs.kalshi.com canonical "Orderbook Responses" page, each side's array
-# contains BIDS only, sorted ASCENDING by price (best bid = entries[-1]).
-# However: (a) the codebase has historically read entries[0] as the "best
-# price" / "ask price" in several places, (b) Kalshi has two separate docs
-# pages with contradictory wording on sort order ("ascending, best=last" vs
-# "best to worst"), and (c) every existing test case uses single-entry
-# arrays so sort order has never been verified empirically.
+# RESOLVED 2026-04-26 via real API fetch (KXBTC-26APR2717-T87749.99,
+# 33-entry no_dollars array). See tests/fixtures/kalshi_orderbook_real_sample.json.
 #
-# This auditor logs a WARNING the first time a multi-entry orderbook arrives,
-# capturing the actual entries so we can confirm or refute the assumed sort
-# order from real production data without having to babysit the bot.
+#   Sort order:  ASCENDING by price.
+#   Best bid:    LAST element (entries[-1]).
+#   Format:      orderbook_fp.{yes_dollars,no_dollars} = [[price_str, qty_str], ...]
+#                (NOT the legacy orderbook.{yes,no} with integer cents that the
+#                rest of this codebase still reads — separate schema-drift bug
+#                tracked outside this audit.)
+#
+# Audit hook retained because (a) it cost nothing and (b) it'll catch any
+# future schema reversal. It self-disables after one observation per process.
 # ---------------------------------------------------------------------------
 
 _orderbook_sort_audit_logged = False
