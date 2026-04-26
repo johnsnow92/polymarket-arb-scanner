@@ -1619,19 +1619,31 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if _now - _last_bankroll_refresh >= _bankroll_refresh_interval:
                     try:
                         balances = executor._fetch_balances("Cross")
-                        if balances and executor.position_sizer:
-                            total = sum(
-                                v for v in balances.values() if isinstance(v, (int, float))
-                            )
-                            if total > 0:
-                                executor.position_sizer.update_bankroll(total)
-                                logger.info(
-                                    "Bankroll refreshed: $%.2f across %d platforms",
-                                    total, len(balances),
+                        if balances:
+                            from dashboard import state as _ds
+                            from datetime import datetime as _dt, timezone as _tz
+                            _ds.platform_balances = dict(balances)
+                            _ds.last_bankroll_refresh = _dt.now(_tz.utc).isoformat()
+                            if executor.position_sizer:
+                                total = sum(
+                                    v for v in balances.values() if isinstance(v, (int, float))
                                 )
+                                if total > 0:
+                                    executor.position_sizer.update_bankroll(total)
+                                    logger.info(
+                                        "Bankroll refreshed: $%.2f across %d platforms",
+                                        total, len(balances),
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Bankroll refresh returned $0 across %d platforms: %s",
+                                        len(balances), balances,
+                                    )
+                        else:
+                            logger.warning("Bankroll refresh: _fetch_balances returned no balances")
                         _last_bankroll_refresh = _now
                     except Exception as exc:
-                        logger.debug("Bankroll refresh failed: %s", exc)
+                        logger.warning("Bankroll refresh failed: %s", exc, exc_info=True)
                         _last_bankroll_refresh = _now  # Don't retry immediately on failure
 
                 # Hourly fee rate reload (OPTIMIZE-01)

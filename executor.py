@@ -1307,7 +1307,7 @@ class ArbitrageExecutor:
                     if bal is not None:
                         balances[name] = bal
                 except Exception as e:
-                    logger.debug("Failed to fetch %s balance: %s", name, e)
+                    logger.warning("Failed to fetch %s balance: %s", name, e)
         return balances if balances else None
 
     def _build_legs(self, opportunity: dict, size: float) -> list[dict]:
