@@ -1672,10 +1672,10 @@ class TestFillConfirmationExchanges:
         assert result is None  # timeout returns None, not expected_price
 
     def test_confirm_fill_betfair_no_client(self, executor):
-        """Returns expected_price when no betfair client."""
+        """Returns None when no betfair client (cannot confirm = treat as not filled)."""
         executor.betfair_client = None
         result = executor._confirm_fill_betfair("bet123", 0.40)
-        assert result == pytest.approx(0.40)
+        assert result is None
 
     def test_confirm_fill_smarkets_filled(self, executor):
         """Smarkets fill confirm returns price when matched."""
@@ -1689,12 +1689,12 @@ class TestFillConfirmationExchanges:
         assert result == pytest.approx(0.40)
 
     def test_confirm_fill_smarkets_cancelled(self, executor):
-        """Smarkets fill confirm returns expected on cancel."""
+        """Smarkets fill confirm returns None on cancel (cancelled order is not a fill)."""
         mock_sm = MagicMock()
         mock_sm.get_order_status.return_value = {"state": "cancelled"}
         executor.smarkets_client = mock_sm
         result = executor._confirm_fill_smarkets("order456", 0.40)
-        assert result == pytest.approx(0.40)
+        assert result is None
 
     def test_confirm_fill_sxbet_filled(self, executor):
         """SX Bet fill confirm returns price when FILLED."""
@@ -1708,10 +1708,10 @@ class TestFillConfirmationExchanges:
         assert result == pytest.approx(0.42)
 
     def test_confirm_fill_sxbet_no_client(self, executor):
-        """Returns expected_price when no sxbet client."""
+        """Returns None when no sxbet client (cannot confirm = treat as not filled)."""
         executor.sxbet_client = None
         result = executor._confirm_fill_sxbet("order789", 0.40)
-        assert result == pytest.approx(0.40)
+        assert result is None
 
     def test_confirm_fill_matchbook_filled(self, executor):
         """Matchbook fill confirm returns price when matched."""
@@ -1725,12 +1725,12 @@ class TestFillConfirmationExchanges:
         assert result == pytest.approx(1.0 / 2.5)
 
     def test_confirm_fill_matchbook_expired(self, executor):
-        """Matchbook fill confirm returns expected on expired."""
+        """Matchbook fill confirm returns None on expired (expired order is not a fill)."""
         mock_mb = MagicMock()
         mock_mb.get_order_status.return_value = {"status": "expired"}
         executor.matchbook_client = mock_mb
         result = executor._confirm_fill_matchbook("offer123", 0.40)
-        assert result == pytest.approx(0.40)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

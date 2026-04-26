@@ -2554,6 +2554,9 @@ class ArbitrageExecutor:
                 else:
                     # FOK: poll for fill confirmation
                     fill_price = self._confirm_fill_pm(order_id, price)
+                    if fill_price is None:
+                        logger.warning("Polymarket FOK order %s not filled (cancel/expire/timeout)", order_id)
+                        return False, order_id, None
                     return True, order_id, fill_price
             return False, None, None
 
@@ -2610,6 +2613,9 @@ class ArbitrageExecutor:
                             logger.warning("Failed to cancel Kalshi GTC order %s: %s",
                                            order_id, e)
                         return False, order_id, None
+                    if fill_price is None:
+                        logger.warning("Kalshi FOK order %s rested then failed (cancel/expire/timeout)", order_id)
+                        return False, order_id, None
                     return True, order_id, fill_price
                 logger.warning("Kalshi order not filled: status=%s ticker=%s resp=%s",
                                status, ticker, str(resp)[:300])
@@ -2645,6 +2651,9 @@ class ArbitrageExecutor:
                     bet_id = results[0].get("betId", "")
                     leg["_order_id"] = bet_id
                     fill_price = self._confirm_fill_betfair(bet_id, price)
+                    if fill_price is None:
+                        logger.warning("Betfair bet %s not filled (cancel/expire/timeout)", bet_id)
+                        return False, bet_id, None
                     return True, bet_id, fill_price
             return False, None, None
 
@@ -2661,11 +2670,16 @@ class ArbitrageExecutor:
                 market_id=market_id, contract_id=contract_id,
                 side=side, price=price, quantity=quantity,
             )
-            if resp:
+            if resp and not resp.get("error"):
                 order_id = str(resp.get("id", resp.get("order_id", "")))
                 leg["_order_id"] = order_id
                 fill_price = self._confirm_fill_smarkets(order_id, price)
+                if fill_price is None:
+                    logger.warning("Smarkets order %s not filled (cancel/expire/timeout)", order_id)
+                    return False, order_id, None
                 return True, order_id, fill_price
+            if resp and resp.get("error"):
+                logger.warning("Smarkets place_order returned error: %s", resp.get("error"))
             return False, None, None
 
         elif platform == "sxbet":
@@ -2681,11 +2695,16 @@ class ArbitrageExecutor:
                 market_hash=market_hash, outcome_id=outcome_id,
                 side=side, price=price, quantity=quantity,
             )
-            if resp:
+            if resp and not resp.get("error"):
                 order_id = str(resp.get("orderHash", resp.get("id", "")))
                 leg["_order_id"] = order_id
                 fill_price = self._confirm_fill_sxbet(order_id, price)
+                if fill_price is None:
+                    logger.warning("SX Bet order %s not filled (cancel/expire/timeout)", order_id)
+                    return False, order_id, None
                 return True, order_id, fill_price
+            if resp and resp.get("error"):
+                logger.warning("SX Bet place_order returned error: %s", resp.get("error"))
             return False, None, None
 
         elif platform == "matchbook":
@@ -2702,11 +2721,16 @@ class ArbitrageExecutor:
                 market_id=market_id, runner_id=runner_id,
                 side=side, odds=decimal_odds, stake=round(size, 2),
             )
-            if resp:
+            if resp and not resp.get("error"):
                 order_id = str(resp.get("id", resp.get("offer-id", "")))
                 leg["_order_id"] = order_id
                 fill_price = self._confirm_fill_matchbook(order_id, price)
+                if fill_price is None:
+                    logger.warning("Matchbook order %s not filled (cancel/expire/timeout)", order_id)
+                    return False, order_id, None
                 return True, order_id, fill_price
+            if resp and resp.get("error"):
+                logger.warning("Matchbook place_order returned error: %s", resp.get("error"))
             return False, None, None
 
         elif platform == "gemini":
@@ -2723,11 +2747,16 @@ class ArbitrageExecutor:
                 symbol=symbol, side="buy", outcome=outcome,
                 quantity=quantity, price=price, time_in_force=tif,
             )
-            if resp:
+            if resp and not resp.get("error"):
                 order_id = str(resp.get("orderId", resp.get("order_id", "")))
                 leg["_order_id"] = order_id
                 fill_price = self._confirm_fill_gemini(order_id, price)
+                if fill_price is None:
+                    logger.warning("Gemini order %s not filled (cancel/expire/timeout)", order_id)
+                    return False, order_id, None
                 return True, order_id, fill_price
+            if resp and resp.get("error"):
+                logger.warning("Gemini place_order returned error: %s", resp.get("error"))
             return False, None, None
 
         elif platform == "ibkr":
@@ -2740,19 +2769,24 @@ class ArbitrageExecutor:
             resp = self.ibkr_client.place_order(
                 conid=conid, quantity=quantity, price=price,
             )
-            if resp:
+            if resp and not resp.get("error"):
                 order_id = str(resp.get("orderId", resp.get("order_id", "")))
                 leg["_order_id"] = order_id
                 fill_price = self._confirm_fill_ibkr(order_id, price)
+                if fill_price is None:
+                    logger.warning("IBKR order %s not filled (cancel/expire/timeout)", order_id)
+                    return False, order_id, None
                 return True, order_id, fill_price
+            if resp and resp.get("error"):
+                logger.warning("IBKR place_order returned error: %s", resp.get("error"))
             return False, None, None
 
         return False, None, None
 
     def _confirm_fill_gemini(self, order_id: str, expected_price: float) -> float | None:
-        """Poll Gemini for fill confirmation. Returns actual fill price or None on timeout."""
+        """Poll Gemini for fill confirmation. Returns actual fill price, or None if not filled (cancel/expire/timeout)."""
         if not self.gemini_client or not order_id:
-            return expected_price
+            return None
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
         for _ in range(max_polls):
             status = self.gemini_client.get_order_status(order_id)
@@ -2764,16 +2798,16 @@ class ArbitrageExecutor:
                         return float(avg_price)
                     return expected_price
                 elif order_status in ("cancelled", "canceled", "expired"):
-                    return expected_price
+                    return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for Gemini order %s after %.1fs — status uncertain",
                         order_id, FILL_POLL_TIMEOUT)
         return None
 
     def _confirm_fill_ibkr(self, order_id: str, expected_price: float) -> float | None:
-        """Poll IBKR for fill confirmation. Returns actual fill price or None on timeout."""
+        """Poll IBKR for fill confirmation. Returns actual fill price, or None if not filled (cancel/expire/timeout)."""
         if not self.ibkr_client or not order_id:
-            return expected_price
+            return None
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
         for _ in range(max_polls):
             status = self.ibkr_client.get_order_status(order_id)
@@ -2785,16 +2819,16 @@ class ArbitrageExecutor:
                         return float(avg_price)
                     return expected_price
                 elif order_status in ("cancelled", "expired", "inactive"):
-                    return expected_price
+                    return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for IBKR order %s after %.1fs — status uncertain",
                         order_id, FILL_POLL_TIMEOUT)
         return None
 
     def _confirm_fill_pm(self, order_id: str, expected_price: float) -> float | None:
-        """Poll Polymarket for fill confirmation. Returns actual fill price or None on timeout."""
+        """Poll Polymarket for fill confirmation. Returns actual fill price, or None if not filled (cancel/expire/timeout)."""
         if not self.pm_trader or not order_id:
-            return expected_price
+            return None
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
         for _ in range(max_polls):
             status = self.pm_trader.get_order_status(order_id)
@@ -2803,16 +2837,16 @@ class ArbitrageExecutor:
                 if order_status == "matched":
                     return float(status.get("price", expected_price))
                 elif order_status in ("canceled", "expired"):
-                    return expected_price
+                    return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for Polymarket order %s after %.1fs — status uncertain",
                         order_id, FILL_POLL_TIMEOUT)
         return None
 
     def _confirm_fill_kalshi(self, order_id: str, expected_price: float) -> float | None:
-        """Poll Kalshi for fill confirmation. Returns actual fill price or None on timeout."""
+        """Poll Kalshi for fill confirmation. Returns actual fill price, or None if not filled (cancel/expire/timeout)."""
         if not self.kalshi_client or not order_id:
-            return expected_price
+            return None
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
         for _ in range(max_polls):
             status = self.kalshi_client.get_order_status(order_id)
@@ -2824,16 +2858,16 @@ class ArbitrageExecutor:
                         return float(avg_price) / 100.0
                     return expected_price
                 elif order_status in ("canceled", "expired"):
-                    return expected_price
+                    return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for Kalshi order %s after %.1fs — status uncertain",
                         order_id, FILL_POLL_TIMEOUT)
         return None
 
     def _confirm_fill_betfair(self, bet_id: str, expected_price: float) -> float | None:
-        """Poll Betfair for fill confirmation. Returns actual fill price or None on timeout."""
+        """Poll Betfair for fill confirmation. Returns actual fill price, or None if not filled (cancel/expire/timeout)."""
         if not self.betfair_client or not bet_id:
-            return expected_price
+            return None
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
         for _ in range(max_polls):
             status = self.betfair_client.get_order_status(bet_id)
@@ -2845,16 +2879,16 @@ class ArbitrageExecutor:
                         return 1.0 / float(avg_price)  # decimal odds -> probability
                     return expected_price
                 elif order_status in ("CANCELLED", "EXPIRED", "LAPSED"):
-                    return expected_price
+                    return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for Betfair bet %s after %.1fs — status uncertain",
                         bet_id, FILL_POLL_TIMEOUT)
         return None
 
     def _confirm_fill_smarkets(self, order_id: str, expected_price: float) -> float | None:
-        """Poll Smarkets for fill confirmation. Returns actual fill price or None on timeout."""
+        """Poll Smarkets for fill confirmation. Returns actual fill price, or None if not filled (cancel/expire/timeout)."""
         if not self.smarkets_client or not order_id:
-            return expected_price
+            return None
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
         for _ in range(max_polls):
             status = self.smarkets_client.get_order_status(order_id)
@@ -2866,16 +2900,16 @@ class ArbitrageExecutor:
                         return float(avg_price) / 10000.0  # basis points -> probability
                     return expected_price
                 elif order_status in ("cancelled", "expired"):
-                    return expected_price
+                    return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for Smarkets order %s after %.1fs — status uncertain",
                         order_id, FILL_POLL_TIMEOUT)
         return None
 
     def _confirm_fill_sxbet(self, order_id: str, expected_price: float) -> float | None:
-        """Poll SX Bet for fill confirmation. Returns actual fill price or None on timeout."""
+        """Poll SX Bet for fill confirmation. Returns actual fill price, or None if not filled (cancel/expire/timeout)."""
         if not self.sxbet_client or not order_id:
-            return expected_price
+            return None
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
         for _ in range(max_polls):
             status = self.sxbet_client.get_order_status(order_id)
@@ -2887,16 +2921,16 @@ class ArbitrageExecutor:
                         return float(avg_price)
                     return expected_price
                 elif order_status in ("CANCELLED", "EXPIRED"):
-                    return expected_price
+                    return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for SX Bet order %s after %.1fs — status uncertain",
                         order_id, FILL_POLL_TIMEOUT)
         return None
 
     def _confirm_fill_matchbook(self, order_id: str, expected_price: float) -> float | None:
-        """Poll Matchbook for fill confirmation. Returns actual fill price or None on timeout."""
+        """Poll Matchbook for fill confirmation. Returns actual fill price, or None if not filled (cancel/expire/timeout)."""
         if not self.matchbook_client or not order_id:
-            return expected_price
+            return None
         max_polls = int(FILL_POLL_TIMEOUT / FILL_POLL_INTERVAL)
         for _ in range(max_polls):
             status = self.matchbook_client.get_order_status(order_id)
@@ -2908,7 +2942,7 @@ class ArbitrageExecutor:
                         return 1.0 / float(avg_odds)  # decimal odds -> probability
                     return expected_price
                 elif order_status in ("cancelled", "expired"):
-                    return expected_price
+                    return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for Matchbook order %s after %.1fs — status uncertain",
                         order_id, FILL_POLL_TIMEOUT)
