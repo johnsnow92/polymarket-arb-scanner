@@ -817,3 +817,74 @@ class TestCrossFeeFuncsMap:
         # kalshi-betfair should be findable
         key = ("kalshi", "betfair")
         assert key in _CROSS_FEE_FUNCS or ("betfair", "kalshi") in _CROSS_FEE_FUNCS
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the directional-strategy fee bug:
+# the buggy formulas computed `fee_per_contract * size_in_dollars`, which is
+# off by a factor of `price`. At size=$1 (1 contract) the bug is invisible,
+# but at realistic sizes ($10+) it underestimates the fee significantly.
+# ---------------------------------------------------------------------------
+
+class TestDirectionalStrategyFeesScaleWithContracts:
+    def test_imbalance_polymarket_fee_scales_with_contracts(self):
+        """A $20 trade at price 0.50 buys 40 contracts; fee must reflect 40
+        contracts, not 1. Buggy code computed `fee(P,1) * size` = ~$0.10,
+        correct is ~$0.40."""
+        from fees import net_profit_imbalance, polymarket_taker_fee
+        # entry 0.50, exit 0.55, size=$20 → 40 contracts
+        result = net_profit_imbalance(0.50, 0.55, 20.0, "polymarket")
+        # gross = 20 * 0.05 = $1.00
+        # entry_fee = 0.04 * 40 * 0.5 * 0.5 = $0.40
+        # exit_fee  = 0.04 * 40 * 0.55 * 0.45 = $0.396
+        # gas      = ~negligible
+        # net      ≈ 1.00 - 0.40 - 0.396 = ~$0.20
+        # Buggy net would have been ≈ 1.00 - 0.01 - 0.0099 = ~$0.98
+        assert result < 0.5, f"Imbalance net ${result:.3f} too high — fee likely under-counted"
+        assert result > 0.0
+        # Sanity: fee for 40 contracts at 0.50 is exactly 4x larger than 10 contracts at 0.50
+        assert polymarket_taker_fee(0.50, 40) == pytest.approx(0.04 * 40 * 0.25)
+
+    def test_imbalance_gemini_uses_canonical_formula(self):
+        """Gemini imbalance must use the P*(1-P) formula, not min(P, 1-P).
+        At P=0.5 they differ by 2x."""
+        from fees import net_profit_imbalance, gemini_fee
+        # entry 0.50, exit 0.50 (no price change → loss = pure fees)
+        result = net_profit_imbalance(0.50, 0.50, 20.0, "gemini")
+        # contracts = 40
+        # Canonical fee per contract at 0.50: rate * 0.5 * 0.5, ceiled to cent
+        # Buggy fee per dollar at 0.50: min(0.5, 0.5) * rate = rate * 0.5
+        # Result must match canonical, not buggy
+        expected_entry_fee = gemini_fee(0.50, contracts=40)
+        expected_exit_fee = gemini_fee(0.50, contracts=40)
+        expected = 0.0 - expected_entry_fee - expected_exit_fee
+        assert result == pytest.approx(expected, abs=0.01)
+
+    def test_news_snipe_polymarket_fee_scales_with_contracts(self):
+        from fees import net_profit_news_snipe
+        # $50 at 0.40 → 125 contracts. Fee should be ~125x single-contract.
+        result_size_50 = net_profit_news_snipe(0.40, 0.40, 50.0, "polymarket")
+        result_size_1 = net_profit_news_snipe(0.40, 0.40, 1.0, "polymarket")
+        # Pure fee scenario (no price change). Loss must scale roughly linearly with size.
+        # If size_50 is only ~5x size_1 instead of ~50x, the fee bug is back.
+        ratio = result_size_50 / result_size_1
+        assert 30 < ratio < 80, f"Fee should scale ~50x with size, got {ratio}x"
+
+    def test_correlated_polymarket_fee_scales_with_contracts(self):
+        from fees import net_profit_correlated
+        # Pure fee scenario: no convergence, both legs flat.
+        result_50 = net_profit_correlated(0.40, 0.40, 0.60, 0.60, 50.0, "polymarket", "polymarket")
+        result_1 = net_profit_correlated(0.40, 0.40, 0.60, 0.60, 1.0, "polymarket", "polymarket")
+        ratio = result_50 / result_1
+        # Both losses, ratio of 50.0 / 1.0 trade should be near 50
+        assert 30 < ratio < 80, f"Correlated fees should scale ~50x with size, got {ratio}x"
+
+    def test_time_decay_polymarket_fee_scales_with_contracts(self):
+        from fees import net_profit_time_decay
+        # Buy 0.90, settle 1.0, with size $50 → 55 contracts
+        result_50 = net_profit_time_decay(0.90, 1.0, 50.0, "polymarket")
+        result_1 = net_profit_time_decay(0.90, 1.0, 1.0, "polymarket")
+        # Both should be positive (winning bet at 0.90 settling at 1.0).
+        # Net should scale roughly linearly with size.
+        ratio = result_50 / result_1
+        assert 40 < ratio < 60, f"Time decay net should scale ~50x with size, got {ratio}x"

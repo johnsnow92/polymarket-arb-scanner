@@ -1149,36 +1149,36 @@ def net_profit_imbalance(
     if size <= 0:
         return 0.0
 
+    # `size` is dollars; one contract pays $1 and costs `price` dollars,
+    # so contracts = size / price. Fee functions expect contract counts.
+    contracts = max(1, int(size / entry_price)) if entry_price > 0 else 1
+
     if platform == "polymarket":
-        # Polymarket: both entry and exit pay taker fee at trade time
-        # Fee formula: POLYMARKET_DEFAULT_TAKER_RATE * size * price * (1 - price)
-        entry_fee = polymarket_taker_fee(entry_price, contracts=1) * size
-        exit_fee = polymarket_taker_fee(exit_price, contracts=1) * size
+        entry_fee = polymarket_taker_fee(entry_price, contracts=contracts)
+        exit_fee = polymarket_taker_fee(exit_price, contracts=contracts)
         gas = POLYGON_GAS_ESTIMATE * 2  # Two Polygon transactions
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee - gas
 
     elif platform == "kalshi":
-        # Kalshi: both entry and exit pay taker fee
-        # Fee formula: ceil(0.07 * price * (1 - price)) per contract in cents
-        entry_fee = kalshi_taker_fee(entry_price, contracts=1) * size
-        exit_fee = kalshi_taker_fee(exit_price, contracts=1) * size
+        entry_fee = kalshi_taker_fee(entry_price, contracts=contracts)
+        exit_fee = kalshi_taker_fee(exit_price, contracts=contracts)
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
     elif platform == "gemini":
-        # Gemini: 5% taker fee (or GEMINI_TAKER_RATE if defined)
-        # Fee = min(price, 1 - price) * fee_rate
-        entry_fee = min(entry_price, 1.0 - entry_price) * GEMINI_TAKER_RATE * size
-        exit_fee = min(exit_price, 1.0 - exit_price) * GEMINI_TAKER_RATE * size
+        # Use canonical gemini_fee (rate * P * (1-P) per contract, ceiled to cent),
+        # NOT the legacy min(P, 1-P) formula.
+        entry_fee = gemini_fee(entry_price, contracts=contracts)
+        exit_fee = gemini_fee(exit_price, contracts=contracts)
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
     else:
-        # Default: use conservative taker fee estimate (1%)
+        # Default: conservative taker fee estimate (1% of notional per side)
         fee_rate = 0.01
-        entry_fee = entry_price * fee_rate * size
-        exit_fee = exit_price * fee_rate * size
+        entry_fee = size * fee_rate
+        exit_fee = size * fee_rate
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
@@ -1214,36 +1214,32 @@ def net_profit_news_snipe(
     if size <= 0:
         return 0.0
 
+    contracts = max(1, int(size / entry_price)) if entry_price > 0 else 1
+
     if platform == "polymarket":
-        # Polymarket: both entry and exit pay taker fee at trade time
-        # Fee formula: POLYMARKET_DEFAULT_TAKER_RATE * size * price * (1 - price)
-        entry_fee = polymarket_taker_fee(entry_price, contracts=1) * size
-        exit_fee = polymarket_taker_fee(exit_price, contracts=1) * size
+        entry_fee = polymarket_taker_fee(entry_price, contracts=contracts)
+        exit_fee = polymarket_taker_fee(exit_price, contracts=contracts)
         gas = POLYGON_GAS_ESTIMATE * 2  # Two Polygon transactions (buy + sell)
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee - gas
 
     elif platform == "kalshi":
-        # Kalshi: both entry and exit pay taker fee
-        # Fee formula: ceil(0.07 * price * (1 - price)) per contract in cents
-        entry_fee = kalshi_taker_fee(entry_price, contracts=1) * size
-        exit_fee = kalshi_taker_fee(exit_price, contracts=1) * size
+        entry_fee = kalshi_taker_fee(entry_price, contracts=contracts)
+        exit_fee = kalshi_taker_fee(exit_price, contracts=contracts)
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
     elif platform == "gemini":
-        # Gemini: taker fee (default 5% or GEMINI_TAKER_RATE)
-        # Fee = price * (1 - price) * fee_rate per contract
-        entry_fee = gemini_fee(entry_price, GEMINI_TAKER_RATE, 1) * size
-        exit_fee = gemini_fee(exit_price, GEMINI_TAKER_RATE, 1) * size
+        entry_fee = gemini_fee(entry_price, contracts=contracts)
+        exit_fee = gemini_fee(exit_price, contracts=contracts)
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
     else:
-        # Default: use conservative taker fee estimate (2%)
+        # Default: conservative taker fee estimate (2% of notional per side)
         fee_rate = 0.02
-        entry_fee = entry_price * fee_rate * size
-        exit_fee = exit_price * fee_rate * size
+        entry_fee = size * fee_rate
+        exit_fee = size * fee_rate
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
@@ -1286,20 +1282,20 @@ def net_profit_correlated(
     long_gross = size * (long_exit_price - long_entry_price)
     long_entry_fee = 0.0
     long_exit_fee = 0.0
+    long_contracts = max(1, int(size / long_entry_price)) if long_entry_price > 0 else 1
 
     if platform_long == "polymarket":
-        long_entry_fee = polymarket_taker_fee(long_entry_price, 1) * size
-        long_exit_fee = polymarket_taker_fee(long_exit_price, 1) * size
+        long_entry_fee = polymarket_taker_fee(long_entry_price, contracts=long_contracts)
+        long_exit_fee = polymarket_taker_fee(long_exit_price, contracts=long_contracts)
     elif platform_long == "kalshi":
-        long_entry_fee = kalshi_taker_fee(long_entry_price, 1) * size
-        long_exit_fee = kalshi_taker_fee(long_exit_price, 1) * size
+        long_entry_fee = kalshi_taker_fee(long_entry_price, contracts=long_contracts)
+        long_exit_fee = kalshi_taker_fee(long_exit_price, contracts=long_contracts)
     elif platform_long == "gemini":
-        long_entry_fee = GEMINI_TAKER_RATE * long_entry_price * (1 - long_entry_price) * size
-        long_exit_fee = GEMINI_TAKER_RATE * long_exit_price * (1 - long_exit_price) * size
+        long_entry_fee = gemini_fee(long_entry_price, contracts=long_contracts)
+        long_exit_fee = gemini_fee(long_exit_price, contracts=long_contracts)
     else:
-        # Default: 2% fee estimate
-        long_entry_fee = long_entry_price * 0.02 * size
-        long_exit_fee = long_exit_price * 0.02 * size
+        long_entry_fee = size * 0.02
+        long_exit_fee = size * 0.02
 
     long_net = long_gross - long_entry_fee - long_exit_fee
 
@@ -1307,20 +1303,20 @@ def net_profit_correlated(
     short_gross = size * (short_entry_price - short_exit_price)
     short_entry_fee = 0.0
     short_exit_fee = 0.0
+    short_contracts = max(1, int(size / short_entry_price)) if short_entry_price > 0 else 1
 
     if platform_short == "polymarket":
-        short_entry_fee = polymarket_taker_fee(short_entry_price, 1) * size
-        short_exit_fee = polymarket_taker_fee(short_exit_price, 1) * size
+        short_entry_fee = polymarket_taker_fee(short_entry_price, contracts=short_contracts)
+        short_exit_fee = polymarket_taker_fee(short_exit_price, contracts=short_contracts)
     elif platform_short == "kalshi":
-        short_entry_fee = kalshi_taker_fee(short_entry_price, 1) * size
-        short_exit_fee = kalshi_taker_fee(short_exit_price, 1) * size
+        short_entry_fee = kalshi_taker_fee(short_entry_price, contracts=short_contracts)
+        short_exit_fee = kalshi_taker_fee(short_exit_price, contracts=short_contracts)
     elif platform_short == "gemini":
-        short_entry_fee = GEMINI_TAKER_RATE * short_entry_price * (1 - short_entry_price) * size
-        short_exit_fee = GEMINI_TAKER_RATE * short_exit_price * (1 - short_exit_price) * size
+        short_entry_fee = gemini_fee(short_entry_price, contracts=short_contracts)
+        short_exit_fee = gemini_fee(short_exit_price, contracts=short_contracts)
     else:
-        # Default: 2% fee estimate
-        short_entry_fee = short_entry_price * 0.02 * size
-        short_exit_fee = short_exit_price * 0.02 * size
+        short_entry_fee = size * 0.02
+        short_exit_fee = size * 0.02
 
     short_net = short_gross - short_entry_fee - short_exit_fee
 
@@ -1361,40 +1357,33 @@ def net_profit_time_decay(
     if size <= 0:
         return 0.0
 
+    contracts = max(1, int(size / entry_price)) if entry_price > 0 else 1
+
     if platform == "polymarket":
-        # Polymarket: entry pays taker fee at trade time
-        # Exit at settlement: no additional settlement fee in March 2026 model
-        # (settlement fee removed; only entry-time fee applies)
-        entry_fee = polymarket_taker_fee(entry_price, contracts=1) * size
-        # Exit at resolution: if exit_price = 1.0 (correct), no additional fees
-        # If exit_price = 0.0 (wrong), no additional fees (loss is already baked in)
+        # Entry-time taker fee only; settlement has no additional fee in March 2026 model.
+        entry_fee = polymarket_taker_fee(entry_price, contracts=contracts)
         exit_fee = 0.0
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
     elif platform == "kalshi":
-        # Kalshi: entry pays taker fee at trade time
-        # Exit at settlement: settlement may be automatic (no additional fee) or
-        # may require closing position (taker fee again)
-        # Conservative: estimate 1 taker fee for entry only
-        entry_fee = kalshi_taker_fee(entry_price, contracts=1) * size
-        exit_fee = 0.0  # Settlement is automatic; no explicit close-out
+        # Conservative: charge taker fee at entry only; settlement is automatic.
+        entry_fee = kalshi_taker_fee(entry_price, contracts=contracts)
+        exit_fee = 0.0
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
     elif platform == "gemini":
-        # Gemini: entry pays taker fee at trade time
-        # Exit: automatic settlement at resolution
-        entry_fee = gemini_fee(entry_price, GEMINI_TAKER_RATE, 1) * size
+        # Entry pays taker fee; exit is automatic settlement.
+        entry_fee = gemini_fee(entry_price, contracts=contracts)
         exit_fee = 0.0
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
 
     else:
-        # Default: use conservative taker fee estimate (1%)
-        # Entry pays taker fee; exit is free (settlement)
+        # Default: conservative 1% notional taker fee on entry only.
         fee_rate = 0.01
-        entry_fee = entry_price * fee_rate * size
+        entry_fee = size * fee_rate
         exit_fee = 0.0
         gross_profit = size * (exit_price - entry_price)
         net_profit = gross_profit - entry_fee - exit_fee
