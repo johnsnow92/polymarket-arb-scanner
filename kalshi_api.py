@@ -351,6 +351,13 @@ class KalshiClient:
         # Kalshi order book has "yes" and "no" sides
         yes_entries = orderbook.get("yes", [])
         no_entries = orderbook.get("no", [])
+        # SUSPECTED BUG: this function reads entries[0] and labels it
+        # "ask_size", but Kalshi's API returns BIDS only (sorted ascending,
+        # best=last per docs). entries[0] is the WORST bid, not an ask.
+        # Audit prints a WARNING when a real multi-entry book arrives so
+        # the actual sort order can be verified before fixing.
+        _audit_orderbook_sort_order(ticker, "yes", yes_entries)
+        _audit_orderbook_sort_order(ticker, "no", no_entries)
         if yes_entries:
             entry = yes_entries[0]
             if isinstance(entry, list) and len(entry) >= 2:
@@ -364,3 +371,50 @@ class KalshiClient:
             elif isinstance(entry, dict):
                 result["no_ask_size"] = int(entry.get("quantity", entry.get("size", 0)))
         return result
+
+
+# ---------------------------------------------------------------------------
+# Defensive sort-order audit for Kalshi orderbooks
+# ---------------------------------------------------------------------------
+# Per docs.kalshi.com canonical "Orderbook Responses" page, each side's array
+# contains BIDS only, sorted ASCENDING by price (best bid = entries[-1]).
+# However: (a) the codebase has historically read entries[0] as the "best
+# price" / "ask price" in several places, (b) Kalshi has two separate docs
+# pages with contradictory wording on sort order ("ascending, best=last" vs
+# "best to worst"), and (c) every existing test case uses single-entry
+# arrays so sort order has never been verified empirically.
+#
+# This auditor logs a WARNING the first time a multi-entry orderbook arrives,
+# capturing the actual entries so we can confirm or refute the assumed sort
+# order from real production data without having to babysit the bot.
+# ---------------------------------------------------------------------------
+
+_orderbook_sort_audit_logged = False
+
+
+def _audit_orderbook_sort_order(ticker: str, side: str, entries: list) -> None:
+    """Emit a one-time WARNING with a real multi-entry sample so we can
+    verify Kalshi's bid-only / ascending-sort assumption against live data.
+    Self-disables after the first multi-entry observation per process."""
+    global _orderbook_sort_audit_logged
+    if _orderbook_sort_audit_logged:
+        return
+    if not entries or len(entries) < 2:
+        return
+    try:
+        first = entries[0]
+        last = entries[-1]
+        first_price = float(first[0]) if isinstance(first, list) else float(first.get("price", 0))
+        last_price = float(last[0]) if isinstance(last, list) else float(last.get("price", 0))
+        if first_price == last_price:
+            return
+        sort_dir = "ASCENDING (best=last)" if last_price > first_price else "DESCENDING (best=first)"
+        logger.warning(
+            "KALSHI_ORDERBOOK_SORT_AUDIT ticker=%s side=%s n=%d first=%.2f last=%.2f -> %s. "
+            "If this contradicts the assumption used by callers, fix BEFORE "
+            "trusting Kalshi arb revalidation or get_order_book_depth.",
+            ticker, side, len(entries), first_price, last_price, sort_dir,
+        )
+        _orderbook_sort_audit_logged = True
+    except (KeyError, ValueError, TypeError, IndexError) as e:
+        logger.debug("Orderbook sort audit skipped (parse error): %s", e)

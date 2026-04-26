@@ -169,6 +169,8 @@ class PartialFillHedger:
         # price. The best bid (highest price someone will pay to take our
         # side) is therefore the LAST element. Selling into entries[-1]
         # minimizes the spread loss on the hedge.
+        from kalshi_api import _audit_orderbook_sort_order
+        _audit_orderbook_sort_order("hedge", side, entries)
         entry = entries[-1]
         if entry is None:
             return False

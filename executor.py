@@ -812,6 +812,14 @@ class ArbitrageExecutor:
         no_entries = orderbook.get("no", [])
         if not yes_entries or not no_entries:
             raise _RevalidationAPIError(f"empty order book entries for Kalshi {ticker}")
+        # SUSPECTED BUG: Kalshi orderbook returns BIDS only. entries[0] is the
+        # worst (lowest) bid, not an ask. Reading it as the YES/NO price for
+        # arb math would mean every market looks like a free arb. Audit logs
+        # a WARNING the first time real multi-entry data arrives so the sort
+        # assumption can be verified.
+        from kalshi_api import _audit_orderbook_sort_order
+        _audit_orderbook_sort_order(ticker, "yes", yes_entries)
+        _audit_orderbook_sort_order(ticker, "no", no_entries)
         y_entry = yes_entries[0]
         n_entry = no_entries[0]
         k_yes = float(y_entry[0]) / 100 if isinstance(y_entry, list) else float(y_entry.get("price", 0)) / 100
@@ -857,6 +865,8 @@ class ArbitrageExecutor:
             yes_entries = orderbook.get("yes", [])
             if not yes_entries:
                 raise _RevalidationAPIError(f"empty yes entries for Kalshi {ticker}")
+            from kalshi_api import _audit_orderbook_sort_order
+            _audit_orderbook_sort_order(ticker, "yes", yes_entries)
             entry = yes_entries[0]
             if isinstance(entry, list) and len(entry) >= 2:
                 price = float(entry[0]) / 100
