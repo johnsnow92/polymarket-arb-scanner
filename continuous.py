@@ -197,11 +197,45 @@ class OpportunityIndex:
         return keys
 
 
-def _calc_realized_pnl(db: TradeDB, pos: dict) -> float:
+_WINNING_SIDE_ALIASES = {
+    "yes": {"yes", "y", "buy", "back"},
+    "no": {"no", "n", "sell", "lay"},
+}
+
+
+def _leg_won(trade_side: str, winning_side: str) -> bool:
+    """Return True if a trade's side matches the resolved winning outcome.
+
+    Handles cross-platform side terminology: yes/no, buy/sell, back/lay,
+    and free-form outcome names (case-insensitive equality).
+    """
+    ts = (trade_side or "").lower()
+    ws = (winning_side or "").lower()
+    if not ts or not ws:
+        return False
+    if ts == ws:
+        return True
+    aliases = _WINNING_SIDE_ALIASES.get(ws)
+    return aliases is not None and ts in aliases
+
+
+def _calc_realized_pnl(db: TradeDB, pos: dict, winning_side: str | None = None) -> float:
     """Calculate realized P&L from actual fill prices in the trades table.
 
-    Realized P&L = payout ($1.00) - sum of actual fill costs.
-    Falls back to expected_pnl if no fill data available.
+    Args:
+        db: TradeDB instance.
+        pos: Position record.
+        winning_side: Resolved winning outcome (e.g. "yes", "no", or an outcome
+            name). When provided, per-leg payout is computed: winning legs pay
+            contracts * $1, losing legs pay $0. Required for directional
+            strategies (Imbalance, NewsSnipe, WhaleCopy, TimeDecay, etc.) —
+            without it, losing directional bets would falsely appear profitable.
+
+    Returns:
+        Realized P&L in USD. Falls back to expected_pnl when no trade data is
+        available. When winning_side is None, assumes an arbitrage payout of
+        $1 (correct for Binary/NegRisk/Cross/etc. where one side guaranteed
+        wins, INCORRECT for losing directional bets).
     """
     trades = db.get_trades_for_opportunity(pos["opportunity_id"])
     if not trades:
@@ -211,7 +245,21 @@ def _calc_realized_pnl(db: TradeDB, pos: dict) -> float:
     )
     if total_fill_cost <= 0:
         return pos.get("expected_pnl", 0)
-    return 1.0 - total_fill_cost
+
+    if winning_side is None:
+        # Arbitrage assumption: exactly one side pays $1 total payout.
+        return 1.0 - total_fill_cost
+
+    # Per-leg payout based on resolved outcome.
+    total_payout = 0.0
+    for t in trades:
+        if not _leg_won(t.get("side", ""), winning_side):
+            continue
+        fill = t.get("fill_price") or t["price"]
+        if fill > 0:
+            contracts = t["size"] / fill
+            total_payout += contracts  # $1 per winning contract
+    return total_payout - total_fill_cost
 
 
 def check_settlements(
@@ -265,7 +313,7 @@ def check_settlements(
                     market_data = data.get("market", data)
                     result = market_data.get("result", "")
                     if result:
-                        realized = _calc_realized_pnl(db, pos)
+                        realized = _calc_realized_pnl(db, pos, winning_side=result)
                         db.settle_position(pos["id"], realized_pnl=realized, status="settled")
                         settled += 1
             elif platform in ("polymarket", "cross"):
@@ -275,7 +323,11 @@ def check_settlements(
                     if resp and resp.status_code == 200:
                         pm_data = resp.json()
                         if pm_data.get("closed") or pm_data.get("resolvedOutcome"):
-                            realized = _calc_realized_pnl(db, pos)
+                            # "cross" positions are arbs (one side wins) — leave winning_side
+                            # unset so the legacy 1.0-cost formula applies. For pure-Polymarket
+                            # directional trades, pass the resolved outcome.
+                            ws = pm_data.get("resolvedOutcome") if platform == "polymarket" else None
+                            realized = _calc_realized_pnl(db, pos, winning_side=ws)
                             db.settle_position(pos["id"], realized_pnl=realized, status="settled")
                             settled += 1
                 except Exception as e:

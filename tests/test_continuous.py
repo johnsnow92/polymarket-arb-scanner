@@ -471,6 +471,57 @@ class TestCalcRealizedPnl:
         expected = 1.0 - (0.40 * 5.0 + 0.45 * 5.0)
         assert realized == pytest.approx(expected)
 
+    def test_directional_winning_yes_bet(self, db):
+        """Directional bet on YES that resolved YES: payout = contracts * $1.
+
+        $10 of size at fill 0.40 → 25 contracts. Payout = $25, cost = fill*size
+        = $4 (matching the existing accounting convention used by the arb
+        fallback). Net = +$21."""
+        opp_id = db.log_opportunity("Imbalance", "M", "", 0.40, 0.10, 0.25, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "yes", 0.40, 10.0, "filled", fill_price=0.40)
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos, winning_side="yes")
+        # contracts = 10/0.40 = 25; payout = 25; cost = 0.40*10 = 4; net = +21
+        assert realized == pytest.approx(21.0)
+
+    def test_directional_losing_yes_bet(self, db):
+        """Directional bet on YES that resolved NO: payout = $0, realized = -cost.
+
+        Regression for the bug where losing directional bets reported P&L of
+        `1.0 - cost` instead of properly accounting for $0 payout on the
+        losing leg."""
+        opp_id = db.log_opportunity("Imbalance", "M", "", 0.40, 0.10, 0.25, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "yes", 0.40, 10.0, "filled", fill_price=0.40)
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos, winning_side="no")
+        # YES leg lost; payout = 0; realized = -(0.40 * 10) = -4
+        assert realized == pytest.approx(-4.0)
+        # The buggy formula returned 1.0 - 4.0 = -3.0 — overstating P&L by $1.
+
+    def test_directional_handles_buy_alias_for_yes(self, db):
+        """Trade.side='BUY' should match winning_side='yes'."""
+        opp_id = db.log_opportunity("NewsSnipe", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.50, 5.0, "filled", fill_price=0.50)
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos, winning_side="yes")
+        # contracts = 5/0.50 = 10; payout = 10; cost = 0.50*5 = 2.5; net = +7.5
+        assert realized == pytest.approx(7.5)
+
+    def test_arbitrage_default_unchanged(self, db):
+        """Without winning_side, arb opps should still get the legacy 1.0-cost
+        payout — that formula is correct when one side guaranteed pays $1."""
+        opp_id = db.log_opportunity("Binary", "M", "", 0.85, 0.15, 0.176, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.40, 0.5, "filled", fill_price=0.41)
+        db.log_trade(opp_id, "polymarket", "BUY", 0.45, 0.5, "filled", fill_price=0.46)
+        db.create_position(opp_id, "m1", "polymarket", 0.15)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos)
+        expected = 1.0 - (0.41 * 0.5 + 0.46 * 0.5)
+        assert realized == pytest.approx(expected)
+
 
 # ---------------------------------------------------------------------------
 # Kalshi resolution sniping in continuous mode (INTEG-03)
