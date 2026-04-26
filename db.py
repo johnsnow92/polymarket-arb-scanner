@@ -128,6 +128,19 @@ class TradeDB:
         except sqlite3.OperationalError:
             logger.debug("Migration: reward_yield_usdc column already exists")
 
+        # Safe migration: add hedge identifier columns to partial_fills.
+        # Without these, _hedge_betfair/_smarkets/_sxbet/_matchbook/_gemini cannot
+        # locate the original market and silently fail every hedge attempt.
+        for col in (
+            "_market_id", "_selection_id", "_contract_id",
+            "_market_hash", "_runner_id", "_outcome_id", "_symbol",
+        ):
+            try:
+                self.conn.execute(f"ALTER TABLE partial_fills ADD COLUMN {col} TEXT")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                logger.debug("Migration: %s column already exists on partial_fills", col)
+
     def log_opportunity(
         self,
         opp_type: str,
@@ -393,15 +406,29 @@ class TradeDB:
         side: str,
         fill_price: float,
         size: float,
+        market_id: str | None = None,
+        selection_id: str | None = None,
+        contract_id: str | None = None,
+        market_hash: str | None = None,
+        runner_id: str | None = None,
+        outcome_id: str | None = None,
+        symbol: str | None = None,
     ) -> int | None:
-        """Log a partial fill for hedging. Returns partial_fill ID."""
+        """Log a partial fill for hedging. Returns partial_fill ID.
+
+        Platform-specific identifiers (market_id, selection_id, etc.) must be
+        persisted because the hedger needs them to place the opposing order on
+        Betfair, Smarkets, SX Bet, Matchbook, and Gemini.
+        """
         with self._lock:
             cur = self.conn.execute(
                 """INSERT INTO partial_fills
-                   (trade_id, opportunity_id, platform, token_id, side, fill_price, size, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (trade_id, opportunity_id, platform, token_id, side, fill_price, size, created_at,
+                    _market_id, _selection_id, _contract_id, _market_hash, _runner_id, _outcome_id, _symbol)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (trade_id, opportunity_id, platform, token_id, side, fill_price, size,
-                 datetime.now(timezone.utc).isoformat()),
+                 datetime.now(timezone.utc).isoformat(),
+                 market_id, selection_id, contract_id, market_hash, runner_id, outcome_id, symbol),
             )
             self.conn.commit()
             return cur.lastrowid

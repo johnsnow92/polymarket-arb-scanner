@@ -559,3 +559,105 @@ class TestHedgerErrorHandling:
                 # Verify both were executed
                 assert mock_pm.place_order.called
                 assert mock_kalshi.place_order.called
+
+
+# ---------------------------------------------------------------------------
+# Hedge identifier round-trip through DB (regression for the schema-mismatch
+# bug where Betfair/Smarkets/SX Bet/Matchbook hedges silently failed because
+# market_id/selection_id/etc were never persisted to partial_fills).
+# ---------------------------------------------------------------------------
+
+class TestHedgeIdentifierRoundTrip:
+    def test_betfair_identifiers_survive_db_roundtrip(self, PartialFillHedger, db):
+        """queue_hedge -> DB -> get_pending_partial_fills -> _attempt_hedge must
+        preserve _market_id and _selection_id so Betfair can place the LAY."""
+        opp_id = db.log_opportunity("CrossBetfairKalshi", "Mkt", "{}", 0.95, 0.05, 0.05, 100, "execute")
+        trade_id = db.log_trade(opp_id, "betfair", "BACK", 0.40, 5.0, "filled", 0.40, "bet_xyz")
+
+        mock_bf = MagicMock()
+        mock_bf.authenticated = True
+        mock_bf.place_orders.return_value = {
+            "status": "SUCCESS",
+            "instructionReports": [{"betId": "hedge_bet_1"}],
+        }
+        hedger = PartialFillHedger(betfair_client=mock_bf, db=db)
+
+        hedger.queue_hedge(
+            trade_id=trade_id, platform="betfair", token_id="bf_tok",
+            side="BACK", fill_price=0.40, size=5.0, opportunity_id=opp_id,
+            market_id="bf_market_1", selection_id="bf_sel_1",
+        )
+
+        pending = db.get_pending_partial_fills()
+        assert len(pending) == 1
+        pf = pending[0]
+        assert pf["_market_id"] == "bf_market_1"
+        assert pf["_selection_id"] == "bf_sel_1"
+
+        result = hedger._attempt_hedge(pf)
+        assert result is True
+        mock_bf.place_orders.assert_called_once()
+        assert mock_bf.place_orders.call_args[0][0] == "bf_market_1"
+
+    def test_smarkets_identifiers_survive_db_roundtrip(self, PartialFillHedger, db):
+        opp_id = db.log_opportunity("CrossSmarketsKalshi", "Mkt", "{}", 0.95, 0.05, 0.05, 100, "execute")
+        trade_id = db.log_trade(opp_id, "smarkets", "BACK", 0.40, 5.0, "filled", 0.40, "sm_xyz")
+
+        mock_sm = MagicMock()
+        mock_sm.authenticated = True
+        mock_sm.place_order.return_value = {"id": "hedge_sm_1"}
+        hedger = PartialFillHedger(smarkets_client=mock_sm, db=db)
+
+        hedger.queue_hedge(
+            trade_id=trade_id, platform="smarkets", token_id="sm_tok",
+            side="BACK", fill_price=0.40, size=5.0, opportunity_id=opp_id,
+            market_id="sm_m1", contract_id="sm_c1",
+        )
+
+        pending = db.get_pending_partial_fills()
+        pf = pending[0]
+        assert pf["_market_id"] == "sm_m1"
+        assert pf["_contract_id"] == "sm_c1"
+        assert hedger._attempt_hedge(pf) is True
+
+    def test_sxbet_identifiers_survive_db_roundtrip(self, PartialFillHedger, db):
+        opp_id = db.log_opportunity("CrossSXBetKalshi", "Mkt", "{}", 0.95, 0.05, 0.05, 100, "execute")
+        trade_id = db.log_trade(opp_id, "sxbet", "BACK", 0.40, 5.0, "filled", 0.40, "sx_xyz")
+
+        mock_sx = MagicMock()
+        mock_sx.authenticated = True
+        mock_sx.place_order.return_value = {"orderHash": "hedge_sx_1"}
+        hedger = PartialFillHedger(sxbet_client=mock_sx, db=db)
+
+        hedger.queue_hedge(
+            trade_id=trade_id, platform="sxbet", token_id="sx_tok",
+            side="BACK", fill_price=0.40, size=5.0, opportunity_id=opp_id,
+            market_hash="0xabc", outcome_id="o1",
+        )
+
+        pending = db.get_pending_partial_fills()
+        pf = pending[0]
+        assert pf["_market_hash"] == "0xabc"
+        assert pf["_outcome_id"] == "o1"
+        assert hedger._attempt_hedge(pf) is True
+
+    def test_matchbook_identifiers_survive_db_roundtrip(self, PartialFillHedger, db):
+        opp_id = db.log_opportunity("CrossMatchbookKalshi", "Mkt", "{}", 0.95, 0.05, 0.05, 100, "execute")
+        trade_id = db.log_trade(opp_id, "matchbook", "back", 0.40, 5.0, "filled", 0.40, "mb_xyz")
+
+        mock_mb = MagicMock()
+        mock_mb.authenticated = True
+        mock_mb.place_order.return_value = {"id": "hedge_mb_1"}
+        hedger = PartialFillHedger(matchbook_client=mock_mb, db=db)
+
+        hedger.queue_hedge(
+            trade_id=trade_id, platform="matchbook", token_id="mb_tok",
+            side="back", fill_price=0.40, size=5.0, opportunity_id=opp_id,
+            market_id="mb_m1", runner_id="r1",
+        )
+
+        pending = db.get_pending_partial_fills()
+        pf = pending[0]
+        assert pf["_market_id"] == "mb_m1"
+        assert pf["_runner_id"] == "r1"
+        assert hedger._attempt_hedge(pf) is True

@@ -44,8 +44,19 @@ class PartialFillHedger:
         fill_price: float,
         size: float,
         opportunity_id: int,
+        market_id: str | None = None,
+        selection_id: str | None = None,
+        contract_id: str | None = None,
+        market_hash: str | None = None,
+        runner_id: str | None = None,
+        outcome_id: str | None = None,
+        symbol: str | None = None,
     ):
-        """Record a partial fill for hedging."""
+        """Record a partial fill for hedging.
+
+        Platform-specific identifiers must be passed through so Betfair,
+        Smarkets, SX Bet, Matchbook, and Gemini hedges can locate the market.
+        """
         if self.db:
             self.db.log_partial_fill(
                 trade_id=trade_id,
@@ -55,6 +66,13 @@ class PartialFillHedger:
                 side=side,
                 fill_price=fill_price,
                 size=size,
+                market_id=market_id,
+                selection_id=selection_id,
+                contract_id=contract_id,
+                market_hash=market_hash,
+                runner_id=runner_id,
+                outcome_id=outcome_id,
+                symbol=symbol,
             )
             logger.info("Queued hedge for trade #%d on %s (fill=$%.3f)", trade_id, platform, fill_price)
 
@@ -225,7 +243,7 @@ class PartialFillHedger:
         """Hedge a Gemini position by selling at market (IOC at worst ask)."""
         if not self.gemini_client or not self.gemini_client.authenticated:
             return False
-        symbol = pf.get("token_id", "")
+        symbol = pf.get("_symbol") or pf.get("token_id", "")
         if not symbol:
             return False
         # Fetch current order book to get best bid

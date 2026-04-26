@@ -2218,6 +2218,7 @@ class ArbitrageExecutor:
                             slippage = fill_price - leg.get("price", 0) if fill_price else 0
                             self.db.update_trade_status(trade_id, "filled", fill_price,
                                                         slippage=slippage)
+                            leg["_fill_price"] = fill_price
                             results[idx] = True
                             logger.info(f"Leg {idx+1} FILLED: {leg['platform']} order={order_id}")
                         else:
@@ -2239,6 +2240,7 @@ class ArbitrageExecutor:
                         slippage = fill_price - leg.get("price", 0) if fill_price else 0
                         self.db.update_trade_status(trade_id, "filled", fill_price,
                                                     slippage=slippage)
+                        leg["_fill_price"] = fill_price
                         results[i] = True
                         logger.info(f"Leg {i+1} FILLED: {leg['platform']} order={order_id}")
                     else:
@@ -2324,7 +2326,9 @@ class ArbitrageExecutor:
                 )
                 for i, leg in enumerate(legs):
                     if results.get(i):
-                        fill_price = leg.get("price", 0)
+                        # Use actual fill price from the executor; fall back to limit
+                        # only if poller couldn't return one (should not happen post-fix).
+                        fill_price = leg.get("_fill_price") or leg.get("price", 0)
                         hedger.queue_hedge(
                             trade_id=leg.get("_trade_id"),
                             platform=leg["platform"],
@@ -2333,6 +2337,13 @@ class ArbitrageExecutor:
                             fill_price=fill_price,
                             size=size,
                             opportunity_id=opp_id,
+                            market_id=leg.get("_market_id"),
+                            selection_id=leg.get("_selection_id"),
+                            contract_id=leg.get("_contract_id"),
+                            market_hash=leg.get("_market_hash"),
+                            runner_id=leg.get("_runner_id"),
+                            outcome_id=leg.get("_outcome_id"),
+                            symbol=leg.get("symbol"),
                         )
                         # Attempt immediate hedge
                         hedger.process_pending_hedges()
@@ -2470,7 +2481,7 @@ class ArbitrageExecutor:
                 )
                 for i, leg in enumerate(legs):
                     if results.get(i):
-                        fill_price = leg.get("price", 0)
+                        fill_price = leg.get("_fill_price") or leg.get("price", 0)
                         hedger.queue_hedge(
                             trade_id=leg.get("_trade_id"),
                             platform=leg["platform"],
@@ -2479,6 +2490,13 @@ class ArbitrageExecutor:
                             fill_price=fill_price,
                             size=size,
                             opportunity_id=opp_id,
+                            market_id=leg.get("_market_id"),
+                            selection_id=leg.get("_selection_id"),
+                            contract_id=leg.get("_contract_id"),
+                            market_hash=leg.get("_market_hash"),
+                            runner_id=leg.get("_runner_id"),
+                            outcome_id=leg.get("_outcome_id"),
+                            symbol=leg.get("symbol"),
                         )
                 hedger.process_pending_hedges()
             self._notify_trade(opportunity, legs, size, success=False)
