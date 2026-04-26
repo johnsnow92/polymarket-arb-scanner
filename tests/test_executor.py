@@ -2369,3 +2369,57 @@ class TestMakerRouting:
         assert call_count == 1, (
             f"Expected exactly 1 order attempt (maker only), got {call_count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# _derive_position_platform: position.platform must reflect the legs' actual
+# exchanges so check_settlements dispatches to the right API. Previously,
+# anything that wasn't "Kalshi*" or "Cross*" was stamped "polymarket",
+# silently misclassifying Betfair/Gemini/IBKR/Matchbook/Smarkets/SXBet
+# positions and preventing them from ever settling.
+# ---------------------------------------------------------------------------
+
+class TestDerivePositionPlatform:
+    def test_single_polymarket_leg(self):
+        from executor import _derive_position_platform
+        legs = [{"platform": "polymarket"}]
+        assert _derive_position_platform(legs) == "polymarket"
+
+    def test_multi_leg_same_platform_kalshi(self):
+        from executor import _derive_position_platform
+        legs = [{"platform": "kalshi"}, {"platform": "kalshi"}]
+        assert _derive_position_platform(legs) == "kalshi"
+
+    def test_multi_leg_same_platform_betfair_back_lay(self):
+        """A BetfairBackLay opp with two Betfair legs must map to 'betfair',
+        not 'polymarket' (regression for the Kalshi/Cross-only string match)."""
+        from executor import _derive_position_platform
+        legs = [{"platform": "betfair"}, {"platform": "betfair"}]
+        assert _derive_position_platform(legs) == "betfair"
+
+    def test_directional_gemini(self):
+        from executor import _derive_position_platform
+        assert _derive_position_platform([{"platform": "gemini"}]) == "gemini"
+
+    def test_directional_ibkr(self):
+        from executor import _derive_position_platform
+        assert _derive_position_platform([{"platform": "ibkr"}]) == "ibkr"
+
+    def test_directional_matchbook_smarkets_sxbet(self):
+        from executor import _derive_position_platform
+        for plat in ("matchbook", "smarkets", "sxbet"):
+            assert _derive_position_platform([{"platform": plat}]) == plat
+
+    def test_cross_platform_polymarket_kalshi(self):
+        from executor import _derive_position_platform
+        legs = [{"platform": "polymarket"}, {"platform": "kalshi"}]
+        assert _derive_position_platform(legs) == "cross"
+
+    def test_cross_platform_three_exchanges(self):
+        from executor import _derive_position_platform
+        legs = [{"platform": "polymarket"}, {"platform": "kalshi"}, {"platform": "betfair"}]
+        assert _derive_position_platform(legs) == "cross"
+
+    def test_empty_legs_returns_unknown(self):
+        from executor import _derive_position_platform
+        assert _derive_position_platform([]) == "unknown"

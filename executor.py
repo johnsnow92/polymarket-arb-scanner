@@ -84,6 +84,22 @@ def _make_idempotency_key(market_id: str, side: str, price: float, extra: str = 
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def _derive_position_platform(legs: list[dict]) -> str:
+    """Pick the platform label for a settled position from its legs.
+
+    If every leg targets the same exchange, store that exchange so settlement
+    checks dispatch to the right API. If legs span multiple exchanges, store
+    "cross" — settlement code already special-cases that. Falls back to
+    "unknown" only when legs is empty (should not happen post-execution).
+    """
+    platforms = {leg.get("platform") for leg in legs if leg.get("platform")}
+    if not platforms:
+        return "unknown"
+    if len(platforms) == 1:
+        return next(iter(platforms))
+    return "cross"
+
+
 class ArbitrageExecutor:
     """Executes arbitrage trades with risk controls, dry-run, and semi/full-auto modes."""
 
@@ -2264,14 +2280,12 @@ class ArbitrageExecutor:
         # Check if all legs succeeded
         all_filled = len(results) == len(legs) and all(results.values())
         if all_filled:
-            # Create position in DB for lifecycle tracking
+            # Create position in DB for lifecycle tracking.
+            # Derive platform from legs themselves so settlement checks dispatch
+            # to the right API regardless of opp_type string.
             market = opportunity.get("market", "Unknown")
             opp_type = opportunity.get("type", "")
-            platform = "polymarket"
-            if "Kalshi" in opp_type:
-                platform = "kalshi"
-            elif "Cross" in opp_type:
-                platform = "cross"
+            platform = _derive_position_platform(legs)
             self.db.create_position(
                 opportunity_id=opp_id,
                 market_identifier=market,
@@ -2451,12 +2465,7 @@ class ArbitrageExecutor:
         all_filled = len(results) == len(legs) and all(results.values())
         if all_filled:
             market = opportunity.get("market", "Unknown")
-            opp_type = opportunity.get("type", "")
-            platform = "polymarket"
-            if "Kalshi" in opp_type:
-                platform = "kalshi"
-            elif "Cross" in opp_type:
-                platform = "cross"
+            platform = _derive_position_platform(legs)
             self.db.create_position(
                 opportunity_id=opp_id,
                 market_identifier=market,
