@@ -165,8 +165,11 @@ class PartialFillHedger:
         entries = orderbook.get(side, [])
         if not entries:
             return False
-        # Best bid for our side
-        entry = entries[-1] if entries else None  # Last entry = best bid (lowest)
+        # Kalshi orderbook entries for each side are BIDS sorted ascending by
+        # price. The best bid (highest price someone will pay to take our
+        # side) is therefore the LAST element. Selling into entries[-1]
+        # minimizes the spread loss on the hedge.
+        entry = entries[-1]
         if entry is None:
             return False
         bid = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
