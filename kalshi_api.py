@@ -337,40 +337,169 @@ class KalshiClient:
         return False
 
     def get_order_book_depth(self, ticker: str) -> dict | None:
-        """Fetch order book and extract best bid/ask depth for a market.
+        """Fetch order book and return depth available at the best ask on each side.
 
-        Returns dict with yes_ask_size, no_ask_size (number of contracts
-        available at best price), or None on failure.
+        Kalshi orderbooks are BIDS only. yes_ask_size = depth of the best NO bid
+        (because a NO bid at $0.96 = a YES ask at $0.04 with the same size).
+        no_ask_size = depth of the best YES bid by symmetry.
+
+        Returns:
+            {"yes_ask_size": int, "no_ask_size": int} or None on fetch failure.
         """
         book = self.fetch_order_book(ticker)
         if not book:
             return None
+        # Audit BEFORE normalization so we see the raw shape Kalshi sent.
+        _audit_raw_orderbook(ticker, book)
+        parsed = parse_orderbook(book)
+        yes_ask = best_yes_ask(parsed)  # derived from best NO bid
+        no_ask = best_no_ask(parsed)    # derived from best YES bid
+        return {
+            "yes_ask_size": int(yes_ask[1]) if yes_ask else 0,
+            "no_ask_size": int(no_ask[1]) if no_ask else 0,
+        }
 
-        result = {"yes_ask_size": 0, "no_ask_size": 0}
-        orderbook = book.get("orderbook", book)
-        # Kalshi order book has "yes" and "no" sides
-        yes_entries = orderbook.get("yes", [])
-        no_entries = orderbook.get("no", [])
-        # SUSPECTED BUG: this function reads entries[0] and labels it
-        # "ask_size", but Kalshi's API returns BIDS only (sorted ascending,
-        # best=last per docs). entries[0] is the WORST bid, not an ask.
-        # Audit prints a WARNING when a real multi-entry book arrives so
-        # the actual sort order can be verified before fixing.
-        _audit_orderbook_sort_order(ticker, "yes", yes_entries)
-        _audit_orderbook_sort_order(ticker, "no", no_entries)
-        if yes_entries:
-            entry = yes_entries[0]
-            if isinstance(entry, list) and len(entry) >= 2:
-                result["yes_ask_size"] = int(entry[1])
-            elif isinstance(entry, dict):
-                result["yes_ask_size"] = int(entry.get("quantity", entry.get("size", 0)))
-        if no_entries:
-            entry = no_entries[0]
-            if isinstance(entry, list) and len(entry) >= 2:
-                result["no_ask_size"] = int(entry[1])
-            elif isinstance(entry, dict):
-                result["no_ask_size"] = int(entry.get("quantity", entry.get("size", 0)))
-        return result
+
+# ---------------------------------------------------------------------------
+# Orderbook schema layer
+# ---------------------------------------------------------------------------
+# Single source of truth for parsing Kalshi's orderbook response. All callers
+# that read orderbook prices/depth go through these helpers — no consumer
+# parses the raw dict directly.
+#
+# Current (2026) API shape:
+#   {"orderbook_fp": {"yes_dollars": [["0.0100", "33348.00"], ...],
+#                     "no_dollars":  [["0.0100", "33348.00"], ...]}}
+# - yes_dollars / no_dollars are BIDS only.
+# - Sorted ASCENDING by price; best bid = entries[-1].
+# - Prices are dollar strings ("0.4200" = $0.42).
+# - Quantities are fixed-point dollar strings ("13.00" = 13 contracts).
+#
+# Legacy fallback (kept for resilience if Kalshi reverts):
+#   {"orderbook": {"yes": [[price_cents_int, qty_int], ...],
+#                  "no":  [[...], ...]}}
+#
+# Important: Kalshi orderbooks contain BIDS only. To compute the YES ask price
+# (what you pay to BUY YES), invert the best NO bid: yes_ask = 1.0 - best_no_bid.
+# Likewise no_ask = 1.0 - best_yes_bid. The four best_* helpers handle this so
+# callers never have to remember which side derives from which.
+# ---------------------------------------------------------------------------
+
+
+def parse_orderbook(book: dict | None) -> dict:
+    """Normalize a Kalshi orderbook response to a stable shape.
+
+    Args:
+        book: Raw response from GET /markets/{ticker}/orderbook, or None.
+
+    Returns:
+        {
+          "yes_bids": [(price_float, qty_float), ...],  # ASCENDING
+          "no_bids":  [(price_float, qty_float), ...],  # ASCENDING
+        }
+        Empty arrays on either side are valid. Returns empty bids on both
+        sides if input is None / malformed.
+    """
+    empty = {"yes_bids": [], "no_bids": []}
+    if not book or not isinstance(book, dict):
+        return empty
+
+    # Current schema: orderbook_fp with dollar strings
+    fp = book.get("orderbook_fp")
+    if isinstance(fp, dict):
+        return {
+            "yes_bids": _parse_dollar_entries(fp.get("yes_dollars") or []),
+            "no_bids":  _parse_dollar_entries(fp.get("no_dollars") or []),
+        }
+
+    # Legacy schema: orderbook with cent integers
+    legacy = book.get("orderbook")
+    if isinstance(legacy, dict):
+        return {
+            "yes_bids": _parse_cent_entries(legacy.get("yes") or []),
+            "no_bids":  _parse_cent_entries(legacy.get("no") or []),
+        }
+
+    # Some endpoints return the orderbook at the top level
+    if "yes_dollars" in book or "no_dollars" in book:
+        return {
+            "yes_bids": _parse_dollar_entries(book.get("yes_dollars") or []),
+            "no_bids":  _parse_dollar_entries(book.get("no_dollars") or []),
+        }
+    if "yes" in book or "no" in book:
+        return {
+            "yes_bids": _parse_cent_entries(book.get("yes") or []),
+            "no_bids":  _parse_cent_entries(book.get("no") or []),
+        }
+    return empty
+
+
+def _parse_dollar_entries(entries: list) -> list[tuple[float, float]]:
+    """Parse [[price_str_dollars, qty_str], ...] entries into floats."""
+    out = []
+    for e in entries:
+        try:
+            if isinstance(e, list) and len(e) >= 2:
+                out.append((float(e[0]), float(e[1])))
+            elif isinstance(e, dict):
+                price = float(e.get("price", 0))
+                qty = float(e.get("quantity", e.get("size", 0)))
+                out.append((price, qty))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _parse_cent_entries(entries: list) -> list[tuple[float, float]]:
+    """Parse legacy [[price_cents_int, qty_int], ...] entries into dollar floats."""
+    out = []
+    for e in entries:
+        try:
+            if isinstance(e, list) and len(e) >= 2:
+                out.append((float(e[0]) / 100.0, float(e[1])))
+            elif isinstance(e, dict):
+                # Cents schema dicts may use "price" in cents
+                price = float(e.get("price", 0)) / 100.0
+                qty = float(e.get("quantity", e.get("size", 0)))
+                out.append((price, qty))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def best_yes_bid(parsed: dict) -> tuple[float, float] | None:
+    """Best price someone is willing to pay for YES, with depth at that price.
+    For SELLING YES (e.g. a hedge), this is the price you'll receive."""
+    bids = parsed.get("yes_bids") or []
+    return bids[-1] if bids else None
+
+
+def best_no_bid(parsed: dict) -> tuple[float, float] | None:
+    """Best price someone is willing to pay for NO, with depth at that price.
+    For SELLING NO, this is the price you'll receive."""
+    bids = parsed.get("no_bids") or []
+    return bids[-1] if bids else None
+
+
+def best_yes_ask(parsed: dict) -> tuple[float, float] | None:
+    """Best price someone can BUY YES at. Derived from best NO bid:
+    yes_ask = 1.0 - best_no_bid_price. Depth = depth at that NO bid.
+    Returns None if no NO bids exist (cannot derive)."""
+    nb = best_no_bid(parsed)
+    if nb is None:
+        return None
+    no_price, no_qty = nb
+    return (1.0 - no_price, no_qty)
+
+
+def best_no_ask(parsed: dict) -> tuple[float, float] | None:
+    """Best price someone can BUY NO at. Derived from best YES bid:
+    no_ask = 1.0 - best_yes_bid_price."""
+    yb = best_yes_bid(parsed)
+    if yb is None:
+        return None
+    yes_price, yes_qty = yb
+    return (1.0 - yes_price, yes_qty)
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +520,21 @@ class KalshiClient:
 # ---------------------------------------------------------------------------
 
 _orderbook_sort_audit_logged = False
+
+
+def _audit_raw_orderbook(ticker: str, book: dict) -> None:
+    """Convenience: audit both sides of a raw orderbook response."""
+    if not book:
+        return
+    fp = book.get("orderbook_fp")
+    if isinstance(fp, dict):
+        _audit_orderbook_sort_order(ticker, "yes_dollars", fp.get("yes_dollars") or [])
+        _audit_orderbook_sort_order(ticker, "no_dollars", fp.get("no_dollars") or [])
+        return
+    legacy = book.get("orderbook")
+    if isinstance(legacy, dict):
+        _audit_orderbook_sort_order(ticker, "yes", legacy.get("yes") or [])
+        _audit_orderbook_sort_order(ticker, "no", legacy.get("no") or [])
 
 
 def _audit_orderbook_sort_order(ticker: str, side: str, entries: list) -> None:

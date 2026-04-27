@@ -399,31 +399,39 @@ class TestKalshiFetchData:
 # ---------------------------------------------------------------------------
 
 class TestKalshiOrderBookDepth:
-    """get_order_book_depth with various entry formats."""
+    """get_order_book_depth derives ask sizes from the inverse-side bids.
 
-    def test_list_entries(self, client):
-        """Entries as [price, quantity] lists."""
+    Kalshi orderbooks contain BIDS only:
+      - yes_bids = bids on YES (someone wants to BUY YES)
+      - no_bids  = bids on NO (someone wants to BUY NO)
+    A NO bid at $0.45 is equivalent to a YES ask at $0.55 with the same size,
+    so yes_ask_size = best_no_bid.size and vice versa.
+    Sort order: ASCENDING; best bid is entries[-1].
+    """
+
+    def test_list_entries_legacy_cents(self, client):
+        """Legacy schema (cents-int): yes_ask_size derives from no_bids[-1]."""
+        # NO bid at 45¢ (size 80) -> YES ask = 1 - 0.45 = $0.55, depth 80
+        # YES bid at 55¢ (size 120) -> NO ask = $0.45, depth 120
         book = {"orderbook": {"yes": [[55, 120]], "no": [[45, 80]]}}
         with patch.object(client, "fetch_order_book", return_value=book):
             result = client.get_order_book_depth("TICK")
-        assert result["yes_ask_size"] == 120
-        assert result["no_ask_size"] == 80
+        assert result["yes_ask_size"] == 80
+        assert result["no_ask_size"] == 120
 
     def test_dict_entries_quantity_key(self, client):
-        """Entries as dicts with 'quantity' key."""
         book = {"orderbook": {"yes": [{"price": 55, "quantity": 50}], "no": [{"price": 45, "quantity": 30}]}}
         with patch.object(client, "fetch_order_book", return_value=book):
             result = client.get_order_book_depth("TICK")
-        assert result["yes_ask_size"] == 50
-        assert result["no_ask_size"] == 30
+        assert result["yes_ask_size"] == 30   # from no_bid depth
+        assert result["no_ask_size"] == 50    # from yes_bid depth
 
     def test_dict_entries_size_key(self, client):
-        """Entries as dicts with 'size' key (fallback)."""
         book = {"orderbook": {"yes": [{"price": 55, "size": 25}], "no": [{"price": 45, "size": 15}]}}
         with patch.object(client, "fetch_order_book", return_value=book):
             result = client.get_order_book_depth("TICK")
-        assert result["yes_ask_size"] == 25
-        assert result["no_ask_size"] == 15
+        assert result["yes_ask_size"] == 15
+        assert result["no_ask_size"] == 25
 
     def test_empty_book(self, client):
         """Empty order book sides return 0 sizes."""
@@ -434,7 +442,6 @@ class TestKalshiOrderBookDepth:
         assert result["no_ask_size"] == 0
 
     def test_returns_none_when_no_book(self, client):
-        """Returns None when fetch_order_book returns None."""
         with patch.object(client, "fetch_order_book", return_value=None):
             result = client.get_order_book_depth("TICK")
         assert result is None
@@ -444,5 +451,87 @@ class TestKalshiOrderBookDepth:
         book = {"yes": [[60, 200]], "no": [[40, 150]]}
         with patch.object(client, "fetch_order_book", return_value=book):
             result = client.get_order_book_depth("TICK")
-        assert result["yes_ask_size"] == 200
-        assert result["no_ask_size"] == 150
+        # yes_ask_size = no_bid depth (150), no_ask_size = yes_bid depth (200)
+        assert result["yes_ask_size"] == 150
+        assert result["no_ask_size"] == 200
+
+    def test_current_api_schema_dollars(self, client):
+        """Current Kalshi schema: orderbook_fp with dollar strings."""
+        book = {"orderbook_fp": {
+            "yes_dollars": [["0.4500", "100.00"], ["0.5500", "120.00"]],
+            "no_dollars":  [["0.3000", "50.00"],  ["0.4500", "80.00"]],
+        }}
+        with patch.object(client, "fetch_order_book", return_value=book):
+            result = client.get_order_book_depth("TICK")
+        # Ascending sort, best=last. yes_ask_size from best NO bid (size 80).
+        assert result["yes_ask_size"] == 80
+        assert result["no_ask_size"] == 120
+
+
+class TestParseOrderbook:
+    """parse_orderbook handles current and legacy schemas, returns ascending-sorted floats."""
+
+    def test_current_schema_dollar_strings(self):
+        from kalshi_api import parse_orderbook
+        book = {"orderbook_fp": {
+            "yes_dollars": [["0.0100", "5192.00"]],
+            "no_dollars":  [["0.0100", "33348.00"], ["0.9900", "9999.00"]],
+        }}
+        parsed = parse_orderbook(book)
+        assert parsed["yes_bids"] == [(0.01, 5192.0)]
+        assert parsed["no_bids"] == [(0.01, 33348.0), (0.99, 9999.0)]
+
+    def test_legacy_schema_cents(self):
+        from kalshi_api import parse_orderbook
+        book = {"orderbook": {"yes": [[55, 120]], "no": [[45, 80]]}}
+        parsed = parse_orderbook(book)
+        assert parsed["yes_bids"] == [(0.55, 120.0)]
+        assert parsed["no_bids"] == [(0.45, 80.0)]
+
+    def test_none_input(self):
+        from kalshi_api import parse_orderbook
+        assert parse_orderbook(None) == {"yes_bids": [], "no_bids": []}
+
+    def test_empty_book(self):
+        from kalshi_api import parse_orderbook
+        assert parse_orderbook({}) == {"yes_bids": [], "no_bids": []}
+
+    def test_real_btc_fixture_round_trip(self):
+        """Validate against the actual API response captured 2026-04-26."""
+        from pathlib import Path
+        import json
+        from kalshi_api import parse_orderbook, best_yes_bid, best_no_bid, best_yes_ask, best_no_ask
+        sample = json.loads(Path("tests/fixtures/kalshi_orderbook_two_sided.json").read_text())
+        parsed = parse_orderbook(sample["response"])
+        # Real data: 1 YES bid at $0.01, 26 NO bids ascending from $0.01 to $0.96
+        assert len(parsed["yes_bids"]) == 1
+        assert len(parsed["no_bids"]) == 26
+        # Sort order: ascending, best=last
+        prices = [p for p, _ in parsed["no_bids"]]
+        assert prices == sorted(prices), "no_bids must be sorted ascending"
+        # best_no_bid = (0.96, ...); best_yes_ask = 1 - 0.96 = 0.04
+        nb = best_no_bid(parsed)
+        assert nb is not None and nb[0] == pytest.approx(0.96)
+        ya = best_yes_ask(parsed)
+        assert ya is not None and ya[0] == pytest.approx(0.04)
+
+
+class TestBestAskBidHelpers:
+    def test_best_yes_ask_when_no_no_bids(self):
+        from kalshi_api import best_yes_ask
+        assert best_yes_ask({"yes_bids": [(0.5, 100)], "no_bids": []}) is None
+
+    def test_best_no_ask_when_no_yes_bids(self):
+        from kalshi_api import best_no_ask
+        assert best_no_ask({"yes_bids": [], "no_bids": [(0.5, 100)]}) is None
+
+    def test_best_bid_returns_last_element(self):
+        from kalshi_api import best_yes_bid
+        bids = [(0.10, 5.0), (0.20, 10.0), (0.30, 15.0)]
+        assert best_yes_bid({"yes_bids": bids, "no_bids": []}) == (0.30, 15.0)
+
+    def test_yes_ask_inverts_no_bid_price(self):
+        from kalshi_api import best_yes_ask
+        result = best_yes_ask({"yes_bids": [], "no_bids": [(0.40, 100.0)]})
+        assert result[0] == pytest.approx(0.60)
+        assert result[1] == 100.0

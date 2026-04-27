@@ -161,20 +161,15 @@ class PartialFillHedger:
         book = self.kalshi_client.fetch_order_book(ticker)
         if not book:
             return False
-        orderbook = book.get("orderbook", book)
-        entries = orderbook.get(side, [])
-        if not entries:
+        # Selling our YES position requires hitting the best YES bid (and
+        # symmetrically for NO). best_*_bid returns the highest bid + depth.
+        from kalshi_api import parse_orderbook, best_yes_bid, best_no_bid, _audit_raw_orderbook
+        _audit_raw_orderbook(ticker, book)
+        parsed = parse_orderbook(book)
+        bid_info = best_yes_bid(parsed) if side == "yes" else best_no_bid(parsed)
+        if bid_info is None:
             return False
-        # Kalshi orderbook entries for each side are BIDS sorted ascending by
-        # price. The best bid (highest price someone will pay to take our
-        # side) is therefore the LAST element. Selling into entries[-1]
-        # minimizes the spread loss on the hedge.
-        from kalshi_api import _audit_orderbook_sort_order
-        _audit_orderbook_sort_order("hedge", side, entries)
-        entry = entries[-1]
-        if entry is None:
-            return False
-        bid = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
+        bid = bid_info[0]
         if bid <= 0:
             return False
         loss = fill_price - bid

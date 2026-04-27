@@ -759,16 +759,16 @@ class ArbitrageExecutor:
                 book = self.kalshi_client.fetch_order_book(kalshi_ticker)
                 if not book:
                     raise _RevalidationAPIError("failed to fetch Kalshi order book for cross")
-                # Parse Kalshi order book for best prices
-                orderbook = book.get("orderbook", book)
-                yes_entries = orderbook.get("yes", [])
-                no_entries = orderbook.get("no", [])
-                if yes_entries:
-                    entry = yes_entries[0]
-                    k_yes = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
-                if no_entries:
-                    entry = no_entries[0]
-                    k_no = float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
+                from kalshi_api import parse_orderbook, best_yes_ask, best_no_ask, _audit_raw_orderbook
+                _audit_raw_orderbook(kalshi_ticker, book)
+                parsed = parse_orderbook(book)
+                # For arb: use the best ASK on each side (what we'd pay to buy).
+                yes_ask = best_yes_ask(parsed)
+                no_ask = best_no_ask(parsed)
+                if yes_ask is not None:
+                    k_yes = yes_ask[0]
+                if no_ask is not None:
+                    k_no = no_ask[0]
 
         if pm_yes is None or pm_no is None or k_yes is None or k_no is None:
             raise _RevalidationAPIError("incomplete prices after re-fetch for cross")
@@ -807,23 +807,17 @@ class ArbitrageExecutor:
         book = self.kalshi_client.fetch_order_book(ticker)
         if not book:
             raise _RevalidationAPIError(f"failed to fetch Kalshi order book for {ticker}")
-        orderbook = book.get("orderbook", book)
-        yes_entries = orderbook.get("yes", [])
-        no_entries = orderbook.get("no", [])
-        if not yes_entries or not no_entries:
-            raise _RevalidationAPIError(f"empty order book entries for Kalshi {ticker}")
-        # SUSPECTED BUG: Kalshi orderbook returns BIDS only. entries[0] is the
-        # worst (lowest) bid, not an ask. Reading it as the YES/NO price for
-        # arb math would mean every market looks like a free arb. Audit logs
-        # a WARNING the first time real multi-entry data arrives so the sort
-        # assumption can be verified.
-        from kalshi_api import _audit_orderbook_sort_order
-        _audit_orderbook_sort_order(ticker, "yes", yes_entries)
-        _audit_orderbook_sort_order(ticker, "no", no_entries)
-        y_entry = yes_entries[0]
-        n_entry = no_entries[0]
-        k_yes = float(y_entry[0]) / 100 if isinstance(y_entry, list) else float(y_entry.get("price", 0)) / 100
-        k_no = float(n_entry[0]) / 100 if isinstance(n_entry, list) else float(n_entry.get("price", 0)) / 100
+        from kalshi_api import parse_orderbook, best_yes_ask, best_no_ask, _audit_raw_orderbook
+        _audit_raw_orderbook(ticker, book)
+        parsed = parse_orderbook(book)
+        # YES ask derives from best NO bid (and vice versa); both must exist
+        # to validate a binary arbitrage.
+        yes_ask = best_yes_ask(parsed)
+        no_ask = best_no_ask(parsed)
+        if yes_ask is None or no_ask is None:
+            raise _RevalidationAPIError(f"missing ask side(s) for Kalshi {ticker}")
+        k_yes = yes_ask[0]
+        k_no = no_ask[0]
 
         result = net_profit_kalshi_binary(k_yes, k_no)
         reval_profit = result["net_profit"]
@@ -861,21 +855,13 @@ class ArbitrageExecutor:
             book = self.kalshi_client.fetch_order_book(ticker)
             if not book:
                 raise _RevalidationAPIError(f"failed to fetch Kalshi order book for {ticker}")
-            orderbook = book.get("orderbook", book)
-            yes_entries = orderbook.get("yes", [])
-            if not yes_entries:
-                raise _RevalidationAPIError(f"empty yes entries for Kalshi {ticker}")
-            from kalshi_api import _audit_orderbook_sort_order
-            _audit_orderbook_sort_order(ticker, "yes", yes_entries)
-            entry = yes_entries[0]
-            if isinstance(entry, list) and len(entry) >= 2:
-                price = float(entry[0]) / 100
-                leg_depth = int(entry[1])
-            elif isinstance(entry, dict):
-                price = float(entry.get("price", 0)) / 100
-                leg_depth = int(entry.get("quantity", entry.get("size", 0)))
-            else:
-                raise _RevalidationAPIError(f"malformed yes entry for Kalshi {ticker}")
+            from kalshi_api import parse_orderbook, best_yes_ask, _audit_raw_orderbook
+            _audit_raw_orderbook(ticker, book)
+            parsed = parse_orderbook(book)
+            yes_ask = best_yes_ask(parsed)
+            if yes_ask is None:
+                raise _RevalidationAPIError(f"no YES ask available for Kalshi {ticker}")
+            price, leg_depth = yes_ask[0], int(yes_ask[1])
             # Pre-trade depth gate: refuse to trade thin legs that will
             # cause fill_or_kill_insufficient_resting_volume rejections
             # and unhedgeable partial fills.
@@ -996,18 +982,10 @@ class ArbitrageExecutor:
                     try:
                         book = self.kalshi_client.fetch_order_book(ticker)
                         if book:
-                            orderbook = book.get("orderbook", book)
-                            yes_entries = orderbook.get("yes", [])
-                            if yes_entries:
-                                entry = yes_entries[0]
-                                if isinstance(entry, list) and len(entry) >= 2:
-                                    leg_depth = int(entry[1])
-                                elif isinstance(entry, dict):
-                                    leg_depth = int(entry.get("quantity", entry.get("size", 0)))
-                                else:
-                                    leg_depth = 0
-                            else:
-                                leg_depth = 0
+                            from kalshi_api import parse_orderbook, best_yes_ask, _audit_raw_orderbook
+                            _audit_raw_orderbook(ticker, book)
+                            yes_ask = best_yes_ask(parse_orderbook(book))
+                            leg_depth = int(yes_ask[1]) if yes_ask else 0
                             if leg_depth < min_depth:
                                 logger.info(
                                     "MultiCross depth gate: %s leg_depth=%d < min=%d, rejecting",
@@ -1183,11 +1161,13 @@ class ArbitrageExecutor:
                     return cached[f"{side}_price"]
                 book = self.kalshi_client.fetch_order_book(ticker)
                 if book:
-                    orderbook = book.get("orderbook", book)
-                    entries = orderbook.get(side, [])
-                    if entries:
-                        entry = entries[0]
-                        return float(entry[0]) / 100 if isinstance(entry, list) else float(entry.get("price", 0)) / 100
+                    from kalshi_api import parse_orderbook, best_yes_ask, best_no_ask, _audit_raw_orderbook
+                    _audit_raw_orderbook(ticker, book)
+                    parsed = parse_orderbook(book)
+                    # Caller wants the price for trading at this side — use ASK.
+                    ask = best_yes_ask(parsed) if side == "yes" else best_no_ask(parsed)
+                    if ask is not None:
+                        return ask[0]
         elif platform == "gemini":
             event_id = opp.get("_gm_event_id", "")
             if event_id and self.gemini_client:

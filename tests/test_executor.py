@@ -1621,7 +1621,11 @@ class TestRevalidateKalshiMulti:
         assert result is False  # ROI 0.5% < 2%, API error rejected
 
     def test_fails_when_profit_degrades(self, executor):
-        """KalshiMulti revalidation fails when profit drops below threshold."""
+        """KalshiMulti revalidation fails when profit drops below threshold.
+
+        Schema note: YES ask = 1 - best_no_bid_price. To simulate a YES ask
+        of $0.50 with depth 100, the NO side needs a bid at $0.50 with size 100.
+        """
         opp = {
             "type": "KalshiMultiOutcome",
             "net_profit": 0.10,
@@ -1630,8 +1634,8 @@ class TestRevalidateKalshiMulti:
         }
         mock_book = {
             "orderbook": {
-                "yes": [["50", "100"]],
-                "no": [],
+                "yes": [],
+                "no": [[50, 100]],  # NO bid @ $0.50 -> YES ask = $0.50, depth 100
             }
         }
         executor.kalshi_client.fetch_order_book.return_value = mock_book
