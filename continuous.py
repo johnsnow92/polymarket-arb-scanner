@@ -539,6 +539,44 @@ def _execution_priority(opp: dict) -> float:
     return weight * efficiency
 
 
+class _StageTimer:
+    """Context manager that records the elapsed wall-clock time of a scan stage.
+
+    Usage::
+
+        timings: dict[str, float] = {}
+        with _StageTimer("fetch", timings):
+            ...do work...
+        # timings["fetch"] now holds elapsed seconds
+    """
+
+    __slots__ = ("name", "timings", "_start")
+
+    def __init__(self, name: str, timings: dict):
+        self.name = name
+        self.timings = timings
+        self._start = 0.0
+
+    def __enter__(self):
+        self._start = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.timings[self.name] = time.time() - self._start
+        # Don't suppress exceptions
+        return False
+
+
+def _format_stage_timings(timings: dict, total: float) -> str:
+    """Render stage timings as a single sortable summary line."""
+    parts = [f"total={total:.1f}s"]
+    # Sort by elapsed desc so the bottleneck is first
+    for name, elapsed in sorted(timings.items(), key=lambda kv: -kv[1]):
+        pct = (elapsed / total * 100) if total > 0 else 0
+        parts.append(f"{name}={elapsed:.1f}s({pct:.0f}%)")
+    return " ".join(parts)
+
+
 def _check_platform_balance(executor, opportunities, notifier, scan_count):
     """Check platform capital allocation and alert on imbalance.
 
@@ -974,6 +1012,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             logger.info("=" * 80)
 
             _scan_start = time.time()
+            _stage_timings: dict[str, float] = {}
 
             # Daily reset for metrics and alert state
             nonlocal _last_daily_reset_date
@@ -994,58 +1033,61 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 poly_events = None
                 kalshi_data = None
 
-                fetch_futures = {}
-                with ThreadPoolExecutor(max_workers=3) as pool:
-                    if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "gemini", "ibkr", "triangular"):
-                        fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
-                    if args.mode in ("all", "negrisk", "multi-cross"):
-                        fetch_futures["poly_events"] = pool.submit(fetch_events)
-                    if args.mode in ("all", "kalshi", "cross", "spread", "multi-cross") and kalshi_client:
-                        fetch_futures["kalshi_data"] = pool.submit(_fetch_kalshi_data, kalshi_client)
+                with _StageTimer("fetch", _stage_timings):
+                    fetch_futures = {}
+                    with ThreadPoolExecutor(max_workers=3) as pool:
+                        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "gemini", "ibkr", "triangular"):
+                            fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
+                        if args.mode in ("all", "negrisk", "multi-cross"):
+                            fetch_futures["poly_events"] = pool.submit(fetch_events)
+                        if args.mode in ("all", "kalshi", "cross", "spread", "multi-cross") and kalshi_client:
+                            fetch_futures["kalshi_data"] = pool.submit(_fetch_kalshi_data, kalshi_client)
 
-                    for key, future in fetch_futures.items():
-                        try:
-                            result = future.result()
-                            if key == "poly_markets":
-                                poly_markets = result or []
-                            elif key == "poly_events":
-                                poly_events = result
-                            elif key == "kalshi_data":
-                                kalshi_data = result
-                        except Exception as e:
-                            logger.error("Failed to fetch %s: %s", key, e)
+                        for key, future in fetch_futures.items():
+                            try:
+                                result = future.result()
+                                if key == "poly_markets":
+                                    poly_markets = result or []
+                                elif key == "poly_events":
+                                    poly_events = result
+                                elif key == "kalshi_data":
+                                    kalshi_data = result
+                            except Exception as e:
+                                logger.error("Failed to fetch %s: %s", key, e)
 
                 all_opportunities = []
 
                 # Stage 2: Run scans in parallel
-                scan_futures = {}
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    if args.mode in ("all", "binary") and poly_markets:
-                        scan_futures["binary"] = pool.submit(
-                            scan_binary_internal, poly_markets, min_profit,
-                            price_cache=price_cache)
-                    if args.mode in ("all", "negrisk") and poly_events:
-                        scan_futures["negrisk"] = pool.submit(
-                            scan_negrisk_internal, poly_events, min_profit,
-                            price_cache=price_cache)
-                    if args.mode in ("all", "kalshi") and kalshi_client:
-                        scan_futures["kalshi_binary"] = pool.submit(
-                            scan_kalshi_binary, kalshi_client, min_profit, kalshi_data=kalshi_data)
-                        # KalshiMulti kill-switch: disable for thin multi-outcome markets
-                        # that cause Fill-or-Kill partial fills (no exit liquidity for hedge)
-                        if config.KALSHI_MULTI_ENABLED:
-                            scan_futures["kalshi_multi"] = pool.submit(
-                                scan_kalshi_multi, kalshi_client, min_profit, kalshi_data=kalshi_data)
+                with _StageTimer("scan_parallel", _stage_timings):
+                    scan_futures = {}
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        if args.mode in ("all", "binary") and poly_markets:
+                            scan_futures["binary"] = pool.submit(
+                                scan_binary_internal, poly_markets, min_profit,
+                                price_cache=price_cache)
+                        if args.mode in ("all", "negrisk") and poly_events:
+                            scan_futures["negrisk"] = pool.submit(
+                                scan_negrisk_internal, poly_events, min_profit,
+                                price_cache=price_cache)
+                        if args.mode in ("all", "kalshi") and kalshi_client:
+                            scan_futures["kalshi_binary"] = pool.submit(
+                                scan_kalshi_binary, kalshi_client, min_profit, kalshi_data=kalshi_data)
+                            # KalshiMulti kill-switch: disable for thin multi-outcome markets
+                            # that cause Fill-or-Kill partial fills (no exit liquidity for hedge)
+                            if config.KALSHI_MULTI_ENABLED:
+                                scan_futures["kalshi_multi"] = pool.submit(
+                                    scan_kalshi_multi, kalshi_client, min_profit, kalshi_data=kalshi_data)
 
-                    for key, future in scan_futures.items():
-                        try:
-                            opps = future.result()
-                            all_opportunities.extend(opps)
-                        except Exception as e:
-                            logger.error("Scan %s failed: %s", key, e)
+                        for key, future in scan_futures.items():
+                            try:
+                                opps = future.result()
+                                all_opportunities.extend(opps)
+                            except Exception as e:
+                                logger.error("Scan %s failed: %s", key, e)
 
                 # Stage 3: Cross-platform scans (need data from above)
                 kalshi_events_preloaded = kalshi_data[0] if kalshi_data else None
+                _stage3_start = time.time()
 
                 if args.mode in ("all", "cross"):
                     cross_opps = scan_cross_platform(
@@ -1085,6 +1127,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         price_cache=price_cache,
                     )
                     all_opportunities.extend(cross_all_opps)
+
+                _stage_timings["cross"] = time.time() - _stage3_start
+                _stage4_start = time.time()
 
                 # Stage 4: Platform-specific scans (spread, betfair, etc.)
                 if args.mode in ("all", "spread"):
@@ -1137,6 +1182,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     if ibkr:
                         ibkr_binary = scan_ibkr_binary(ibkr, min_profit)
                         all_opportunities.extend(ibkr_binary)
+
+                _stage_timings["per_exchange"] = time.time() - _stage4_start
+                _stage5_start = time.time()
 
                 if args.mode in ("all", "event") and event_monitor:
                     platform_markets_for_event = {}
@@ -1514,6 +1562,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
                 all_opportunities.sort(key=_execution_priority, reverse=True)
 
+                _stage_timings["advanced"] = time.time() - _stage5_start
+                _stage_display_start = time.time()
+
                 if args.limit:
                     all_opportunities = all_opportunities[:args.limit]
 
@@ -1856,6 +1907,21 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 logger.error("Scan failed: %s\n%s", e, traceback.format_exc())
                 if _metrics:
                     _metrics.inc("scans_total", {"status": "failed"})
+
+            # Stage timing summary — sorted desc by elapsed so the bottleneck is first.
+            # Read this in production logs to identify which stage is dominating
+            # the scan cycle (target: total <2 min for arb-quality reaction time).
+            try:
+                _scan_total = time.time() - _scan_start
+                _stage_timings.setdefault("display_exec", time.time() - _stage_display_start)
+                logger.info(
+                    "Scan #%d stage timings — %s",
+                    scan_count,
+                    _format_stage_timings(_stage_timings, _scan_total),
+                )
+            except Exception:
+                # Never let instrumentation break the scan loop
+                logger.exception("Stage-timing summary failed (non-fatal)")
 
             # Wait for next scan interval or shutdown
             logger.info("Next scan in %ds (Ctrl+C to stop)...", rescan_interval)
