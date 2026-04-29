@@ -168,6 +168,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
 
     # Stage 3: Cross-platform scans (need data from stages above)
     kalshi_events_preloaded = kalshi_data[0] if kalshi_data else None
+    kalshi_markets_preloaded = kalshi_data[1] if kalshi_data else None
 
     if args.mode in ("all", "cross"):
         logger.info("--- Cross-Platform Scan (Polymarket vs Kalshi) ---")
@@ -175,6 +176,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             poly_markets, kalshi_client, min_profit,
             min_confidence=args.min_confidence,
             kalshi_events_preloaded=kalshi_events_preloaded,
+            kalshi_markets_by_event=kalshi_markets_preloaded,
         )
         all_opportunities.extend(cross_opps)
         logger.info("Found %d cross-platform opportunities.", len(cross_opps))
