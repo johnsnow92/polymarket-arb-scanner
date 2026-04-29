@@ -8,7 +8,13 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Mock external APIs before importing the module under test
+# Mock external APIs before importing the module under test, but save and
+# restore so other test files (e.g. test_polymarket_api) which need the
+# real module are not poisoned by a leftover MagicMock in sys.modules.
+# pytest collects all test modules before running any, so module-level
+# pollution here would survive into earlier-alphabetical test files.
+_saved_polymarket_api = sys.modules.get("polymarket_api")
+_saved_polygonscan_api = sys.modules.get("polygonscan_api")
 _mock_polymarket_api = MagicMock()
 _mock_polygonscan_api = MagicMock()
 sys.modules["polymarket_api"] = _mock_polymarket_api
@@ -21,6 +27,16 @@ from scans.whale_copy import (
     POLYMARKET_CLOB_ADDRESS,
 )
 from fees import net_profit_whale_copy
+
+# Restore originals so earlier-alphabetical test files are not affected.
+if _saved_polymarket_api is not None:
+    sys.modules["polymarket_api"] = _saved_polymarket_api
+else:
+    sys.modules.pop("polymarket_api", None)
+if _saved_polygonscan_api is not None:
+    sys.modules["polygonscan_api"] = _saved_polygonscan_api
+else:
+    sys.modules.pop("polygonscan_api", None)
 
 
 @pytest.fixture(autouse=True)

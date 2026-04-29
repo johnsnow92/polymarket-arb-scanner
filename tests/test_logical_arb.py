@@ -8,11 +8,20 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Mock external APIs before importing the module under test
+# Mock external APIs before importing the module under test, but save and
+# restore so that later test files (e.g. test_polymarket_api) which need
+# the real module are not poisoned by a leftover MagicMock in sys.modules.
+_saved_polymarket_api = sys.modules.get("polymarket_api")
 sys.modules["polymarket_api"] = MagicMock()
 
 # Also need to mock helpers since logical_arb imports it
 from scans import helpers
+
+# Restore original module so other test files are not affected.
+if _saved_polymarket_api is not None:
+    sys.modules["polymarket_api"] = _saved_polymarket_api
+else:
+    sys.modules.pop("polymarket_api", None)
 
 # Patch _extract_token_ids in helpers
 def mock_extract_token_ids(market: dict) -> list:
