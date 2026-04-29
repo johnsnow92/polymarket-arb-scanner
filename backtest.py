@@ -379,17 +379,21 @@ def _suggest_min_roi(result: BacktestResult) -> float:
     - win_rate > 0.7: lower by 10% (safe to capture more opportunities)
     - win_rate < 0.5: raise by 20% (be more selective)
     - Otherwise: keep current value unchanged.
-    Clamped to [0.001, 0.05].
+    Soft-clamped to [0.001, 0.05]: the clamp must never *reverse* the
+    direction of the recommendation. Relaxing must never raise the
+    threshold above current; tightening must never lower it below.
     """
     import config as _config
     current = _config.MIN_NET_ROI
     if result.win_rate > 0.7:
         suggested = current * 0.90
+        clamped = max(0.001, min(0.05, suggested))
+        return min(clamped, current)
     elif result.win_rate < 0.5:
         suggested = current * 1.20 if current > 0 else 0.005
-    else:
-        suggested = current
-    return max(0.001, min(0.05, suggested))
+        clamped = max(0.001, min(0.05, suggested))
+        return max(clamped, current)
+    return current
 
 
 def _suggest_fuzzy_threshold(result: BacktestResult) -> int:
