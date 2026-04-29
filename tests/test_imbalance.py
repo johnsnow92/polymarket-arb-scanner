@@ -7,7 +7,10 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Mock external APIs before importing the module under test
+# Mock external APIs before importing the module under test, but save and
+# restore so that later tests (e.g. test_polymarket_api) which need the real
+# module are not poisoned by a leftover MagicMock in sys.modules.
+_saved_polymarket_api = sys.modules.get("polymarket_api")
 sys.modules["polymarket_api"] = MagicMock()
 
 from scans.imbalance import (
@@ -15,6 +18,12 @@ from scans.imbalance import (
     _refine_imbalance_with_clob,
     scan_imbalance,
 )
+
+# Restore original module so other test files are not affected.
+if _saved_polymarket_api is not None:
+    sys.modules["polymarket_api"] = _saved_polymarket_api
+else:
+    sys.modules.pop("polymarket_api", None)
 
 
 @pytest.fixture(autouse=True)

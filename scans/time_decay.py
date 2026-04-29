@@ -187,7 +187,7 @@ def _refine_time_decay_with_prices(
         # For now, use the stored _hours_to_expiry as a proxy
         # In practice, executor would re-fetch current prices and times
         if opp.get("_hours_to_expiry", 0) < 1.0:
-            logger.debug("TimeDecay refined: %s expired (<%1h remaining)", market_key)
+            logger.debug("TimeDecay refined: %s expired (<1h remaining)", market_key)
             continue
 
         # Re-check current price hasn't risen above threshold

@@ -8,8 +8,11 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Mock external modules before importing the module under test
-sys.modules["signal_aggregator"] = MagicMock()
+# scans.time_decay does not import signal_aggregator at module level — it
+# only receives it as a function parameter — so no module mocking is needed.
+# Previously this file injected `sys.modules["signal_aggregator"] = MagicMock()`,
+# which polluted sys.modules for any later test that did
+# `from signal_aggregator import SignalAggregator` (e.g. test_new_strategies).
 
 from scans.time_decay import (
     scan_time_decay,

@@ -305,6 +305,12 @@ class TestMultiCrossExecutor:
                 {"platform": "polymarket", "price": 0.25, "_token_id": "tok_c"},
             ],
         }
+        # The MultiCross revalidation path now includes a per-leg Kalshi
+        # depth gate (kill-switch for the FOK partial-fill trap added in
+        # commit 3017193). This test isolates the profit-threshold logic,
+        # so disable the depth gate by returning no orderbook for the
+        # Kalshi leg — the gate falls through when book is falsy.
+        executor.kalshi_client.fetch_order_book.return_value = None
         with patch("executor.net_profit_multi_cross", return_value={
             "gross_spread": 0.10, "fees": 0.005, "net_profit": 0.095,
         }):

@@ -83,31 +83,50 @@ class TestSXBetLogin:
 # ---------------------------------------------------------------------------
 
 class TestSXBetMarketPrice:
-    """get_market_price — extracts YES/NO from order book via _request."""
+    """get_market_price — extracts YES/NO from /orders response.
+
+    SX Bet has no dedicated orderbook endpoint. get_market_price calls
+    GET /orders?marketHashes={hash} and parses raw orders. Each order has:
+      - percentageOdds: 18-decimal int (e.g. "65000000000000000000" = 0.65)
+      - isMakerBettingOutcomeOne: True for YES side, False for NO side
+    Best YES = highest YES-side prob; best NO = highest NO-side prob.
+    """
+
+    @staticmethod
+    def _order(prob: float, is_outcome_one: bool) -> dict:
+        """Build a raw SX Bet order at the given probability and side."""
+        return {
+            "percentageOdds": str(int(prob * 100 * 10**18)),
+            "isMakerBettingOutcomeOne": is_outcome_one,
+            "totalBetSize": "0",
+            "fillAmount": "0",
+        }
 
     def test_prices_from_bids_and_asks(self, client):
-        orderbook = {
-            "bids": [{"price": "0.65"}],
-            "asks": [{"price": "0.70"}],
-        }
-        with patch.object(client, "_request", return_value=orderbook):
+        orders_resp = {"data": [
+            self._order(0.65, is_outcome_one=True),   # YES at 0.65
+            self._order(0.30, is_outcome_one=False),  # NO at 0.30
+        ]}
+        with patch.object(client, "_request", return_value=orders_resp):
             yes, no = client.get_market_price({"marketHash": "0xabc"})
-        assert yes == 0.65
+        assert yes == pytest.approx(0.65)
         assert no == pytest.approx(0.30)
 
     def test_bid_only_infers_no(self, client):
-        orderbook = {"bids": [{"price": "0.60"}], "asks": []}
-        with patch.object(client, "_request", return_value=orderbook):
+        # Only YES-side orders → no_price inferred as 1 - yes_price
+        orders_resp = {"data": [self._order(0.60, is_outcome_one=True)]}
+        with patch.object(client, "_request", return_value=orders_resp):
             yes, no = client.get_market_price({"marketHash": "0xabc"})
-        assert yes == 0.60
+        assert yes == pytest.approx(0.60)
         assert no == pytest.approx(0.40)
 
     def test_ask_only_infers_yes(self, client):
-        orderbook = {"bids": [], "asks": [{"price": "0.80"}]}
-        with patch.object(client, "_request", return_value=orderbook):
+        # Only NO-side orders → yes_price inferred as 1 - no_price
+        orders_resp = {"data": [self._order(0.80, is_outcome_one=False)]}
+        with patch.object(client, "_request", return_value=orders_resp):
             yes, no = client.get_market_price({"marketHash": "0xabc"})
-        assert no == pytest.approx(0.20)
-        assert yes == pytest.approx(0.80)
+        assert no == pytest.approx(0.80)
+        assert yes == pytest.approx(0.20)
 
     def test_empty_market_hash_returns_none(self, client):
         yes, no = client.get_market_price({"marketHash": ""})
@@ -180,40 +199,56 @@ class TestSXBetFetchData:
     """fetch_all_markets, list_runners, get_orderbook, get_market_status."""
 
     def test_fetch_all_markets_iterates_sports(self, client):
-        sports_resp = {"data": [{"sportId": 1}, {"sportId": 2}]}
-        markets_s1 = {"data": [{"marketHash": "0xa"}]}
-        markets_s2 = {"data": [{"marketHash": "0xb"}, {"marketHash": "0xc"}]}
+        # New API: GET /markets/active with paginationKey/nextKey, dedup on
+        # marketHash. The response wraps markets in data.markets and returns
+        # data.nextKey for pagination.
+        page1 = {"data": {
+            "markets": [{"marketHash": "0xa"}, {"marketHash": "0xb"}],
+            "nextKey": "page2",
+        }}
+        page2 = {"data": {
+            "markets": [
+                {"marketHash": "0xb"},  # duplicate — should dedupe
+                {"marketHash": "0xc"},
+            ],
+            "nextKey": None,
+        }}
+
+        responses = [page1, page2]
 
         def mock_request(method, endpoint, params=None, json_data=None):
-            if endpoint == "/sports":
-                return sports_resp
-            if params and params.get("sportId") == 1:
-                return markets_s1
-            if params and params.get("sportId") == 2:
-                return markets_s2
-            return None
+            return responses.pop(0) if responses else None
 
         with patch.object(client, "_request", side_effect=mock_request):
             result = client.fetch_all_markets()
         assert len(result) == 3
-        assert result[0]["_sport"]["sportId"] == 1
+        assert [m["marketHash"] for m in result] == ["0xa", "0xb", "0xc"]
 
     def test_fetch_all_markets_no_sports(self, client):
         with patch.object(client, "_request", return_value=None):
             assert client.fetch_all_markets() == []
 
     def test_list_runners(self, client):
-        with patch.object(client, "_request", return_value={"data": [{"id": "r1"}]}):
-            assert client.list_runners("0xabc") == [{"id": "r1"}]
+        # SX Bet binary markets have synthetic outcome names baked in;
+        # list_runners no longer hits the API.
+        assert client.list_runners("0xabc") == [
+            {"name": "Outcome 1"},
+            {"name": "Outcome 2"},
+        ]
 
     def test_list_runners_empty(self, client):
+        # Same hardcoded outcomes regardless of network response.
         with patch.object(client, "_request", return_value=None):
-            assert client.list_runners("0xabc") == []
+            assert client.list_runners("0xabc") == [
+                {"name": "Outcome 1"},
+                {"name": "Outcome 2"},
+            ]
 
     def test_get_orderbook(self, client):
-        book = {"bids": [], "asks": []}
-        with patch.object(client, "_request", return_value=book):
-            assert client.get_orderbook("0xabc") == book
+        # New get_orderbook hits /orders and parses raw orders into
+        # bids/asks. Empty orders list yields an empty book.
+        with patch.object(client, "_request", return_value={"data": []}):
+            assert client.get_orderbook("0xabc") == {"bids": [], "asks": []}
 
     def test_get_market_status(self, client):
         with patch.object(client, "_request", return_value={"status": "active"}):

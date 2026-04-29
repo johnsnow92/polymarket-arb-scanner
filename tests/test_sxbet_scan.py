@@ -88,9 +88,12 @@ class TestSXBetBackAllScan:
                 ],
             }
         ]
-        mock_client.get_orderbook.return_value = {
-            "bids": [{"price": 0.25, "size": 100}],
-            "asks": [{"price": 0.30, "size": 100}],
+        # Scan now uses batch orderbook fetching (commit 8f98555).
+        mock_client.get_orderbooks_batch.return_value = {
+            "0xabc123": {
+                "bids": [{"price": 0.25, "size": 100}],
+                "asks": [{"price": 0.30, "size": 100}],
+            }
         }
 
         opps = scan_sxbet_backall(mock_client, min_profit=0.001)
@@ -115,9 +118,11 @@ class TestSXBetBackAllScan:
                 ],
             }
         ]
-        mock_client.get_orderbook.return_value = {
-            "bids": [{"price": 0.60, "size": 100}],
-            "asks": [],
+        mock_client.get_orderbooks_batch.return_value = {
+            "0xabc123": {
+                "bids": [{"price": 0.60, "size": 100}],
+                "asks": [],
+            }
         }
 
         opps = scan_sxbet_backall(mock_client, min_profit=0.001)
@@ -170,10 +175,12 @@ class TestSXBetBackLayScan:
                 "_sport": {"label": "Politics"},
             }
         ]
-        # Crossed: bid (0.50) > ask (0.30)
-        mock_client.get_orderbook.return_value = {
-            "bids": [{"price": 0.50, "size": 50}],
-            "asks": [{"price": 0.30, "size": 50}],
+        # Crossed: bid (0.50) > ask (0.30). Scan now uses batch fetch.
+        mock_client.get_orderbooks_batch.return_value = {
+            "0xabc123": {
+                "bids": [{"price": 0.50, "size": 50}],
+                "asks": [{"price": 0.30, "size": 50}],
+            }
         }
 
         opps = scan_sxbet_backlay(mock_client, min_profit=0.001)
@@ -192,9 +199,11 @@ class TestSXBetBackLayScan:
             {"marketHash": "0xabc123", "title": "Winner"}
         ]
         # Normal: bid (0.30) < ask (0.50) -> no cross
-        mock_client.get_orderbook.return_value = {
-            "bids": [{"price": 0.30, "size": 50}],
-            "asks": [{"price": 0.50, "size": 50}],
+        mock_client.get_orderbooks_batch.return_value = {
+            "0xabc123": {
+                "bids": [{"price": 0.30, "size": 50}],
+                "asks": [{"price": 0.50, "size": 50}],
+            }
         }
 
         opps = scan_sxbet_backlay(mock_client, min_profit=0.001)
@@ -208,9 +217,8 @@ class TestSXBetBackLayScan:
         mock_client.fetch_all_markets.return_value = [
             {"marketHash": "0xabc123", "title": "Winner"}
         ]
-        mock_client.get_orderbook.return_value = {
-            "bids": [],
-            "asks": [],
+        mock_client.get_orderbooks_batch.return_value = {
+            "0xabc123": {"bids": [], "asks": []}
         }
 
         opps = scan_sxbet_backlay(mock_client, min_profit=0.001)
