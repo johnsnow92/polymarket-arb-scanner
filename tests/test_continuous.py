@@ -37,7 +37,7 @@ sys.modules["dashboard"] = mock_dashboard
 sys.modules["display"] = MagicMock()
 sys.modules["recovery"] = MagicMock()
 
-from continuous import OpportunityIndex, _recalc_profit, _get_market_lock, _calc_realized_pnl
+from continuous import OpportunityIndex, _recalc_profit, _get_market_lock, _calc_realized_pnl, _StageTimer, _format_stage_timings
 from db import TradeDB
 
 # Restore original modules so other test files are not affected
@@ -51,6 +51,36 @@ for _mod_name in _modules_to_mock:
 # ---------------------------------------------------------------------------
 # OpportunityIndex — rebuild and lookup
 # ---------------------------------------------------------------------------
+
+
+class TestStageTimer:
+    """_StageTimer + _format_stage_timings — scan-cycle profiling helpers."""
+
+    def test_records_elapsed(self):
+        timings: dict = {}
+        with _StageTimer("foo", timings):
+            time.sleep(0.01)
+        assert "foo" in timings
+        assert timings["foo"] >= 0.01
+
+    def test_records_on_exception(self):
+        """Timer must record elapsed even when the wrapped block raises."""
+        timings: dict = {}
+        with pytest.raises(RuntimeError):
+            with _StageTimer("bar", timings):
+                raise RuntimeError("kaboom")
+        assert "bar" in timings
+
+    def test_format_sorts_descending(self):
+        out = _format_stage_timings({"a": 1.0, "b": 5.0, "c": 0.5}, total=10.0)
+        # Bottleneck (highest elapsed) appears first after total
+        assert out.startswith("total=10.0s b=5.0s")
+        assert "a=1.0s" in out and "c=0.5s" in out
+
+    def test_format_handles_zero_total(self):
+        # Should not raise even when total is 0 (e.g. all stages skipped)
+        out = _format_stage_timings({"x": 0.0}, total=0.0)
+        assert "0%" in out
 
 
 class TestOpportunityIndexRebuild:
