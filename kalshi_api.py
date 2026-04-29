@@ -173,13 +173,23 @@ class KalshiClient:
             logger.warning("Kalshi request failed (%s %s): %s", method, path, e)
             return None
 
-    def fetch_all_events(self, limit: int = 200, max_pages: int = 50) -> list[dict]:
-        """Fetch all active events from Kalshi with cursor pagination."""
+    def fetch_all_events(self, limit: int = 200, max_pages: int = 50,
+                         with_nested_markets: bool = True) -> list[dict]:
+        """Fetch all active events from Kalshi with cursor pagination.
+
+        When *with_nested_markets* is True (default), each event in the
+        response carries a ``markets`` array — eliminating the need for
+        N follow-up ``/markets?event_ticker=…`` calls. This is the
+        single biggest scan-cycle latency win available without
+        switching to WebSocket-driven evaluation.
+        """
         all_events = []
         cursor = None
 
         for _ in range(max_pages):
             params = {"limit": limit, "status": "open"}
+            if with_nested_markets:
+                params["with_nested_markets"] = "true"
             if cursor:
                 params["cursor"] = cursor
 

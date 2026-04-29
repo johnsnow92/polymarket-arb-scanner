@@ -29,7 +29,14 @@ def mock_external_modules():
 # ---------------------------------------------------------------------------
 
 class TestFetchKalshiData:
+    def _reset_cache(self):
+        import scans.kalshi as sk
+        with sk._kalshi_data_cache_lock:
+            sk._kalshi_data_cache["ts"] = 0.0
+            sk._kalshi_data_cache["value"] = None
+
     def test_returns_empty_without_client(self):
+        self._reset_cache()
         from scans.kalshi import _fetch_kalshi_data
         events, by_event, titles = _fetch_kalshi_data(None)
         assert events == []
@@ -37,11 +44,91 @@ class TestFetchKalshiData:
         assert titles == {}
 
     def test_returns_empty_when_no_events(self):
+        self._reset_cache()
         from scans.kalshi import _fetch_kalshi_data
         client = MagicMock()
         client.fetch_all_events.return_value = []
         events, by_event, titles = _fetch_kalshi_data(client)
         assert events == []
+
+    def test_uses_nested_markets_when_present(self):
+        """Events with nested ``markets`` arrays must NOT trigger _parallel_fetch_kalshi."""
+        self._reset_cache()
+        from scans.kalshi import _fetch_kalshi_data
+
+        client = MagicMock()
+        client.fetch_all_events.return_value = [
+            {"event_ticker": "E1", "title": "Event 1",
+             "markets": [{"ticker": "M1A"}, {"ticker": "M1B"}]},
+            {"event_ticker": "E2", "title": "Event 2",
+             "markets": [{"ticker": "M2A"}]},
+        ]
+
+        with patch("scans.kalshi._parallel_fetch_kalshi") as mock_parallel:
+            events, by_event, titles = _fetch_kalshi_data(client)
+
+        assert mock_parallel.call_count == 0, "must not fall back to per-event REST"
+        assert by_event == {
+            "E1": [{"ticker": "M1A"}, {"ticker": "M1B"}],
+            "E2": [{"ticker": "M2A"}],
+        }
+        assert titles == {"E1": "Event 1", "E2": "Event 2"}
+
+    def test_falls_back_to_parallel_fetch_when_no_nested_markets(self):
+        """Events lacking ``markets`` field still work via legacy REST path."""
+        self._reset_cache()
+        from scans.kalshi import _fetch_kalshi_data
+
+        client = MagicMock()
+        client.fetch_all_events.return_value = [
+            {"event_ticker": "E1", "title": "Event 1"},  # no markets field
+        ]
+        with patch("scans.kalshi._parallel_fetch_kalshi", return_value={"E1": [{"ticker": "MX"}]}) as mock_parallel:
+            events, by_event, titles = _fetch_kalshi_data(client)
+
+        assert mock_parallel.call_count == 1
+        assert by_event == {"E1": [{"ticker": "MX"}]}
+
+    def test_cache_hit_skips_api_within_ttl(self):
+        """Second call within TTL returns cached value without re-calling fetch_all_events."""
+        self._reset_cache()
+        import scans.kalshi as sk
+        from scans.kalshi import _fetch_kalshi_data
+
+        client = MagicMock()
+        client.fetch_all_events.return_value = [
+            {"event_ticker": "E1", "title": "T", "markets": [{"ticker": "MA"}]},
+        ]
+        # First call populates cache
+        _fetch_kalshi_data(client)
+        first_calls = client.fetch_all_events.call_count
+        # Force long TTL so the second call hits cache
+        original_ttl = sk._KALSHI_DATA_CACHE_TTL
+        sk._KALSHI_DATA_CACHE_TTL = 3600
+        try:
+            _fetch_kalshi_data(client)
+        finally:
+            sk._KALSHI_DATA_CACHE_TTL = original_ttl
+        assert client.fetch_all_events.call_count == first_calls, "cache hit must not re-call API"
+
+    def test_cache_expires_after_ttl(self):
+        """After TTL elapses, cache is bypassed and fetch_all_events runs again."""
+        self._reset_cache()
+        import scans.kalshi as sk
+        from scans.kalshi import _fetch_kalshi_data
+
+        client = MagicMock()
+        client.fetch_all_events.return_value = [
+            {"event_ticker": "E1", "title": "T", "markets": []},
+        ]
+        original_ttl = sk._KALSHI_DATA_CACHE_TTL
+        sk._KALSHI_DATA_CACHE_TTL = 0  # treat any age as expired
+        try:
+            _fetch_kalshi_data(client)
+            _fetch_kalshi_data(client)
+        finally:
+            sk._KALSHI_DATA_CACHE_TTL = original_ttl
+        assert client.fetch_all_events.call_count == 2
 
 
 # ---------------------------------------------------------------------------

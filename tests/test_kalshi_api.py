@@ -366,6 +366,28 @@ class TestKalshiFetchData:
         assert result == []
 
     @patch("kalshi_api._rate_limit")
+    def test_fetch_all_events_passes_with_nested_markets_by_default(self, mock_rl, client):
+        """Default fetch_all_events sends with_nested_markets=true."""
+        client.session.request.return_value = _mock_response(200, {
+            "events": [{"event_ticker": "E1", "markets": [{"ticker": "M1"}]}],
+            "cursor": "",
+        })
+        client.fetch_all_events()
+        sent_params = client.session.request.call_args.kwargs["params"]
+        assert sent_params.get("with_nested_markets") == "true"
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_all_events_omits_with_nested_when_disabled(self, mock_rl, client):
+        """with_nested_markets=False omits the param entirely."""
+        client.session.request.return_value = _mock_response(200, {
+            "events": [{"event_ticker": "E1"}],
+            "cursor": "",
+        })
+        client.fetch_all_events(with_nested_markets=False)
+        sent_params = client.session.request.call_args.kwargs["params"]
+        assert "with_nested_markets" not in sent_params
+
+    @patch("kalshi_api._rate_limit")
     def test_fetch_markets_for_event_success(self, mock_rl, client):
         """Returns markets list for given event."""
         markets = [{"ticker": "M1"}, {"ticker": "M2"}]

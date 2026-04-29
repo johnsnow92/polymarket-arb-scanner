@@ -1,6 +1,9 @@
 """Kalshi-specific arbitrage scans (binary and multi-outcome)."""
 
 import logging
+import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kalshi_api import KalshiClient
@@ -10,25 +13,86 @@ from scans.helpers import _parallel_fetch_kalshi, _within_resolution_window, fil
 logger = logging.getLogger(__name__)
 
 
+# TTL cache for `_fetch_kalshi_data` — avoids re-pulling the full /events
+# payload on back-to-back scans. Default 60s; tune via env var.
+_KALSHI_DATA_CACHE_TTL = float(os.getenv("KALSHI_DATA_CACHE_TTL", "60"))
+_kalshi_data_cache: dict = {"ts": 0.0, "value": None}
+_kalshi_data_cache_lock = threading.Lock()
+
+
+def _split_nested_events(events: list[dict]) -> tuple[list[dict], dict]:
+    """Split events with nested ``markets`` field into (events_only, markets_by_event).
+
+    When `fetch_all_events(with_nested_markets=True)` is used (default), each
+    event already carries a ``markets`` array. This extracts those without
+    a second N-call REST round-trip. Events without nested markets are left
+    in the resulting list with an empty markets entry — the caller can fall
+    back to ``_parallel_fetch_kalshi`` for those if needed.
+    """
+    markets_by_event: dict = {}
+    for e in events:
+        ticker = e.get("event_ticker", "")
+        if not ticker:
+            continue
+        markets_by_event[ticker] = e.get("markets", []) or []
+    return events, markets_by_event
+
+
 def _fetch_kalshi_data(kalshi_client: KalshiClient) -> tuple[list[dict], dict, dict]:
     """Shared fetch: get all Kalshi events and their markets once.
 
     Returns (events, markets_by_event, event_titles).
+
+    Uses a process-wide TTL cache (``KALSHI_DATA_CACHE_TTL`` seconds, default 60).
+    Within the TTL window, returns the cached result without making any API
+    calls. After expiry, refreshes via a single `/events?with_nested_markets=true`
+    paginated call — eliminating the N-event-per-scan REST follow-ups that
+    previously dominated scan-cycle latency.
     """
     if not kalshi_client:
         return [], {}, {}
 
-    logger.info("Fetching all Kalshi events...")
+    now = time.time()
+    with _kalshi_data_cache_lock:
+        cached = _kalshi_data_cache.get("value")
+        cached_ts = _kalshi_data_cache.get("ts", 0.0)
+        if cached is not None and now - cached_ts < _KALSHI_DATA_CACHE_TTL:
+            logger.info(
+                "Kalshi data cache hit (age=%.1fs, TTL=%.0fs).",
+                now - cached_ts, _KALSHI_DATA_CACHE_TTL,
+            )
+            return cached
+
+    logger.info("Fetching all Kalshi events (with nested markets)...")
     events = kalshi_client.fetch_all_events()
     if not events:
         logger.warning("No Kalshi events fetched.")
         return [], {}, {}
 
-    logger.info("Fetched %d Kalshi events.", len(events))
-    tickers = [e.get("event_ticker", "") for e in events if e.get("event_ticker")]
-    markets_by_event = _parallel_fetch_kalshi(kalshi_client, tickers)
+    # If events came back with nested markets (default), build the lookup
+    # table directly. Fall back to per-event REST fetch only when the
+    # response is missing the embedded markets array.
+    has_nested = any("markets" in e for e in events)
+    if has_nested:
+        _, markets_by_event = _split_nested_events(events)
+        nested_market_count = sum(len(m) for m in markets_by_event.values())
+        logger.info(
+            "Fetched %d Kalshi events with %d nested markets (skipping per-event REST fetch).",
+            len(events), nested_market_count,
+        )
+    else:
+        logger.info("Fetched %d Kalshi events; falling back to per-event REST fetch.", len(events))
+        tickers = [e.get("event_ticker", "") for e in events if e.get("event_ticker")]
+        markets_by_event = _parallel_fetch_kalshi(kalshi_client, tickers)
+
     event_titles = {e.get("event_ticker", ""): e.get("title", "Unknown") for e in events}
-    return events, markets_by_event, event_titles
+    result = (events, markets_by_event, event_titles)
+
+    with _kalshi_data_cache_lock:
+        _kalshi_data_cache["ts"] = now
+        _kalshi_data_cache["value"] = result
+
+    return result
 
 
 def scan_kalshi_binary(
