@@ -1150,7 +1150,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         )
                         logger.info("CrossPairIndex active: %d pairs available for WS-driven evaluation", n_pairs)
                         if _metrics:
-                            _metrics.set("cross_pair_index_size", n_pairs)
+                            _metrics.set("cross_pair_index_size", value=n_pairs)
                     except Exception as exc:
                         logger.warning("CrossPairIndex rebuild failed (non-fatal): %s", exc, exc_info=True)
 
