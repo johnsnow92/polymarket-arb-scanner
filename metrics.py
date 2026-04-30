@@ -135,6 +135,14 @@ class MetricsCollector:
             "risk_rejections",
             "ws_messages_received",
             "ws_reconnections",
+            # Phase 2 (WS-driven Cross): counts how often the new event-driven
+            # path is being exercised. eval_attempts ticks every time a WS
+            # price update touches an indexed pair; eval_hits ticks when
+            # evaluate() returned a positive opp (ready to trade); triggers
+            # ticks when the opp made it onto the priority queue.
+            "cross_pair_eval_attempts",
+            "cross_pair_eval_hits",
+            "cross_pair_triggers",
         }
         self._gauge_names = {
             "active_positions",
@@ -142,6 +150,9 @@ class MetricsCollector:
             "scan_cycle_duration_seconds",
             "best_opportunity_roi",
             "ws_connected",
+            # Number of indexed Cross pairs available for WS-driven evaluation.
+            # Updated after every CrossPairIndex.rebuild call.
+            "cross_pair_index_size",
         }
         self._histogram_names = {
             "scan_duration_seconds",

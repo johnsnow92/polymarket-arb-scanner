@@ -771,11 +771,15 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             cross_min_profit = max(min_profit * _cross_pair_min_profit_factor,
                                    ws_trigger_threshold)
             for pair in cross_pair_index.lookup(platform, ticker):
+                if _metrics:
+                    _metrics.inc("cross_pair_eval_attempts")
                 opp = cross_pair_index.evaluate(
                     pair, price_cache, min_profit=cross_min_profit,
                 )
                 if not opp:
                     continue
+                if _metrics:
+                    _metrics.inc("cross_pair_eval_hits")
                 market_name = opp.get("market", "?")
                 logger.info(
                     "WS Cross trigger: %s profit=$%.4f (%s)",
@@ -789,6 +793,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     asyncio.run_coroutine_threadsafe(
                         _priority_queue.put((priority, seq, opp)), loop
                     )
+                    if _metrics:
+                        _metrics.inc("cross_pair_triggers")
                 except Exception as exc:
                     logger.debug("Cross priority push failed, skipping: %s", exc)
 
@@ -1143,6 +1149,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                             min_confidence=args.min_confidence,
                         )
                         logger.info("CrossPairIndex active: %d pairs available for WS-driven evaluation", n_pairs)
+                        if _metrics:
+                            _metrics.set("cross_pair_index_size", n_pairs)
                     except Exception as exc:
                         logger.warning("CrossPairIndex rebuild failed (non-fatal): %s", exc, exc_info=True)
 
