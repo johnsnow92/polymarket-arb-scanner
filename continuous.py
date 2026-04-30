@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import signal
 import threading
 import time
@@ -690,6 +691,16 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     _price_cache_lock = threading.Lock()
     _execution_semaphore = threading.Semaphore(CONFIG_MAX_CONCURRENT_WS_EXECUTIONS)
 
+    # Event-driven Cross detection (Phase 2): persistent pair index that
+    # turns every Polymarket / Kalshi WS price tick into an immediate
+    # Cross arb evaluation, instead of waiting for the next 16-min scan.
+    # Disabled via CROSS_PAIR_WS_ENABLED=false if it ever needs an
+    # emergency kill switch in production.
+    from cross_pair_index import CrossPairIndex
+    cross_pair_index = CrossPairIndex()
+    cross_pair_ws_enabled = os.getenv("CROSS_PAIR_WS_ENABLED", "true").lower() == "true"
+    _cross_pair_min_profit_factor = float(os.getenv("CROSS_PAIR_WS_MIN_PROFIT_FACTOR", "1.0"))
+
     # Initialize PriceTracker for stale price detection (Layer 2)
     _price_tracker = None
     try:
@@ -749,6 +760,38 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             if price_val is not None:
                 _market_maker.update_price(ticker, float(price_val))
 
+        nonlocal _seq_counter
+
+        # Event-driven Cross detection (Phase 2): turn this WS tick into
+        # an immediate Cross arb evaluation. Unlike opp_index below — which
+        # only re-checks opps the slow scan already found — this surfaces
+        # *new* Cross opps the moment a price moves into arb territory,
+        # bypassing the 16-min scan-cycle latency entirely.
+        if cross_pair_ws_enabled and ws_trigger_enabled:
+            cross_min_profit = max(min_profit * _cross_pair_min_profit_factor,
+                                   ws_trigger_threshold)
+            for pair in cross_pair_index.lookup(platform, ticker):
+                opp = cross_pair_index.evaluate(
+                    pair, price_cache, min_profit=cross_min_profit,
+                )
+                if not opp:
+                    continue
+                market_name = opp.get("market", "?")
+                logger.info(
+                    "WS Cross trigger: %s profit=$%.4f (%s)",
+                    market_name[:50], opp["net_profit"], opp["type"],
+                )
+                priority = -_execution_priority(opp)
+                seq = _seq_counter
+                _seq_counter += 1
+                try:
+                    loop = asyncio.get_event_loop()
+                    asyncio.run_coroutine_threadsafe(
+                        _priority_queue.put((priority, seq, opp)), loop
+                    )
+                except Exception as exc:
+                    logger.debug("Cross priority push failed, skipping: %s", exc)
+
         # Event-driven execution: check if this update affects a tracked opportunity
         if not ws_trigger_enabled:
             return
@@ -768,7 +811,6 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 market_name = opp.get("market", "?")
                 # Push to priority queue for ordered execution (OPTIMIZE-03)
                 # Time-sensitive opps (stale, resolution) get higher priority (lower value = dequeues first)
-                nonlocal _seq_counter
                 opp_copy = dict(opp)
                 opp_copy["net_profit"] = profit
                 priority = -_execution_priority(opp_copy)
@@ -1088,6 +1130,21 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 # Stage 3: Cross-platform scans (need data from above)
                 kalshi_events_preloaded = kalshi_data[0] if kalshi_data else None
                 _stage3_start = time.time()
+
+                # Rebuild the persistent CrossPairIndex used by on_price_update
+                # for event-driven Cross detection. Tying this rebuild to the
+                # scan cycle (vs a separate timer) reuses the data we just
+                # fetched for free; the WS handler then evaluates pairs on
+                # every tick without waiting for the 16-min cycle to find them.
+                if cross_pair_ws_enabled and poly_markets and kalshi_events_preloaded:
+                    try:
+                        n_pairs = cross_pair_index.rebuild(
+                            poly_markets, kalshi_events_preloaded,
+                            min_confidence=args.min_confidence,
+                        )
+                        logger.info("CrossPairIndex active: %d pairs available for WS-driven evaluation", n_pairs)
+                    except Exception as exc:
+                        logger.warning("CrossPairIndex rebuild failed (non-fatal): %s", exc, exc_info=True)
 
                 if args.mode in ("all", "cross"):
                     cross_opps = scan_cross_platform(
