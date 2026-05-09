@@ -485,6 +485,57 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             logger.warning("Convergence scan failed: %s", exc)
 
     # Market making (Layer 3) — generate pseudo-opportunities for display
+    # Strategy #9: re-score cached cross near-misses against current fees.
+    if args.mode == "fee-promo":
+        logger.info("--- Fee promotional arbitrage scan ---")
+        try:
+            from scans.fee_promo import scan_fee_promo
+            from near_miss_cache import get_global_cache
+            from config import reload_fee_rates, MIN_PROFIT_AMOUNT
+            changes = reload_fee_rates()
+            if changes:
+                logger.info("Fee rate deltas detected: %s", changes)
+            promo_opps = scan_fee_promo(
+                cache=get_global_cache(),
+                min_profit=MIN_PROFIT_AMOUNT,
+            )
+            all_opportunities.extend(promo_opps)
+            logger.info("Found %d fee-promo opportunities.", len(promo_opps))
+        except Exception as exc:
+            logger.warning("Fee-promo scan failed: %s", exc)
+
+    # Strategy #11: paired bid/ask quotes across two platforms.
+    if args.mode == "cross-mm":
+        logger.info("--- Cross-platform market making scan ---")
+        try:
+            from scans.cross_mm import scan_cross_mm
+            from config import (
+                CROSS_MM_MIN_SPREAD, CROSS_MM_QUOTE_SIZE, CROSS_MM_PLATFORMS,
+            )
+            from matcher import match_cross_platform
+            whitelist = tuple(p.strip() for p in CROSS_MM_PLATFORMS.split(",") if p.strip())
+            # Pair Polymarket binaries with Kalshi events (same input the
+            # cross-platform arb scan uses) and hand them to scan_cross_mm.
+            if poly_markets and kalshi_client and "polymarket" in whitelist and "kalshi" in whitelist:
+                kalshi_events = kalshi_client.fetch_all_events()
+                pairs = match_cross_platform(
+                    poly_markets, kalshi_events,
+                    platform_a="polymarket", platform_b="kalshi",
+                ) if kalshi_events else []
+                cross_mm_opps = scan_cross_mm(
+                    pairs,
+                    min_spread=CROSS_MM_MIN_SPREAD,
+                    quote_size=CROSS_MM_QUOTE_SIZE,
+                    platforms_whitelist=whitelist,
+                )
+                all_opportunities.extend(cross_mm_opps)
+                logger.info("Found %d cross-platform MM opportunities.",
+                            len(cross_mm_opps))
+            else:
+                logger.info("Cross-MM requires both Polymarket + Kalshi credentials")
+        except Exception as exc:
+            logger.warning("Cross-MM scan failed: %s", exc)
+
     if args.mode == "mm":
         logger.info("--- Market making scan ---")
         try:
@@ -912,9 +963,10 @@ def main():
                  "gemini", "ibkr", "event", "triangular", "multi-cross",
                  "stale", "resolution", "convergence", "mm", "rewards",
                  "imbalance", "news-snipe", "correlated", "time-decay",
-                 "logical-arb", "whale-copy"],
+                 "logical-arb", "whale-copy",
+                 "fee-promo", "cross-mm"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay",
+        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm",
     )
     parser.add_argument(
         "--min-profit",

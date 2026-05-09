@@ -90,6 +90,18 @@ class TradeDB:
                 resting_seconds INTEGER,
                 timestamp INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS transfers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                from_platform TEXT NOT NULL,
+                to_platform TEXT NOT NULL,
+                amount_usd REAL NOT NULL,
+                tx_hash TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                idempotency_key TEXT NOT NULL UNIQUE,
+                error TEXT
+            );
         """)
         self.conn.commit()
 
@@ -854,6 +866,83 @@ class TradeDB:
                  int(time.time())),
             )
             self.conn.commit()
+
+    # ---------------------------------------------------------------------
+    # Treasury / auto-rebalance audit (Strategy #18)
+    # ---------------------------------------------------------------------
+
+    def log_transfer(
+        self,
+        from_platform: str,
+        to_platform: str,
+        amount_usd: float,
+        idempotency_key: str,
+        status: str = "pending",
+        tx_hash: str | None = None,
+        error: str | None = None,
+    ) -> int | None:
+        """Insert a row into the transfers table.
+
+        Idempotency: ``idempotency_key`` has UNIQUE constraint, so a replayed
+        transfer raises ``sqlite3.IntegrityError``. The treasury layer catches
+        that and returns the existing row's id without re-executing.
+        """
+        with self._lock:
+            try:
+                cur = self.conn.execute(
+                    """INSERT INTO transfers
+                       (timestamp, from_platform, to_platform, amount_usd,
+                        tx_hash, status, idempotency_key, error)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        from_platform,
+                        to_platform,
+                        amount_usd,
+                        tx_hash,
+                        status,
+                        idempotency_key,
+                        error,
+                    ),
+                )
+                self.conn.commit()
+                return cur.lastrowid
+            except sqlite3.IntegrityError:
+                # Replay — return existing row id
+                row = self.conn.execute(
+                    "SELECT id FROM transfers WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                return row["id"] if row else None
+
+    def update_transfer(
+        self,
+        transfer_id: int,
+        status: str,
+        tx_hash: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Update transfer status (pending → succeeded / failed)."""
+        with self._lock:
+            self.conn.execute(
+                """UPDATE transfers SET status = ?, tx_hash = COALESCE(?, tx_hash),
+                                        error = COALESCE(?, error)
+                   WHERE id = ?""",
+                (status, tx_hash, error, transfer_id),
+            )
+            self.conn.commit()
+
+    def get_transfers_today(self) -> list[dict]:
+        """Return transfers initiated in the last 24h. Used for daily limits."""
+        cutoff = (datetime.now(timezone.utc).timestamp() - 86400)
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT * FROM transfers
+                   WHERE strftime('%s', timestamp) >= ?
+                   ORDER BY id DESC""",
+                (str(int(cutoff)),),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self):
         self.conn.close()

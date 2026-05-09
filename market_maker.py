@@ -312,6 +312,8 @@ class MarketMaker:
         max_total_exposure: float = DEFAULT_MAX_TOTAL_EXPOSURE,
         refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
         dry_run: bool = True,
+        hedger=None,
+        auto_hedge_enabled: bool = False,
     ):
         self.inventory = inventory or InventoryTracker(max_inventory, max_total_exposure)
         self.quote_engine = quote_engine or QuoteEngine(min_spread)
@@ -320,6 +322,10 @@ class MarketMaker:
         self.max_inventory = max_inventory
         self.refresh_interval = refresh_interval
         self.dry_run = dry_run
+        # Strategy #12: when auto_hedge_enabled, inventory breaches trigger
+        # PartialFillHedger.hedge_inventory() to sell back at best bid.
+        self.hedger = hedger
+        self.auto_hedge_enabled = auto_hedge_enabled
         self._running = False
         self._active_markets: dict[str, dict] = {}  # market_key -> market info
         self._lock = threading.Lock()
@@ -433,7 +439,8 @@ class MarketMaker:
         return new_quotes
 
     def on_fill(self, order_id: str, market_key: str, platform: str,
-                side: str, price: float, size: float) -> None:
+                side: str, price: float, size: float,
+                token_id: str = "", **identifiers) -> None:
         """Handle a fill event: update inventory, record fill, check hedging.
 
         Args:
@@ -443,6 +450,10 @@ class MarketMaker:
             side: "bid" or "ask".
             price: Fill price.
             size: Fill size in dollars.
+            token_id: Platform-specific token / ticker for the hedge sell-side.
+            **identifiers: Forwarded to PartialFillHedger.hedge_inventory
+                (market_id, selection_id, contract_id, market_hash, runner_id,
+                outcome_id, symbol).
         """
         # Update inventory
         delta = size if side == "bid" else -size
@@ -455,10 +466,30 @@ class MarketMaker:
                      platform, side, market_key, price, size,
                      self.inventory.get_position(market_key))
 
-        # Check if hedging is needed
-        if self.inventory.needs_hedge(market_key):
-            logger.warning("MM: inventory on %s exceeds 80%% of max — hedge needed",
-                           market_key)
+        # Strategy #12: trigger inventory hedge when over threshold and
+        # auto-hedging is enabled with a real hedger wired in. The next
+        # refresh_quotes cycle will automatically apply more aggressive
+        # inventory skew via QuoteEngine, so even without a successful
+        # hedge order the maker reduces directional exposure on its own.
+        if not self.inventory.needs_hedge(market_key):
+            return
+        logger.warning("MM: inventory on %s exceeds threshold — hedge needed",
+                       market_key)
+        if not self.auto_hedge_enabled or self.hedger is None:
+            return
+        try:
+            self.hedger.hedge_inventory(
+                market_key=market_key,
+                platform=platform,
+                side=side,
+                fill_price=price,
+                size=size,
+                token_id=token_id,
+                **identifiers,
+            )
+        except Exception as exc:
+            logger.exception("MM auto-hedge raised on %s/%s: %s",
+                             platform, market_key, exc)
 
     def generate_opportunities(self) -> list[dict]:
         """Generate market making pseudo-opportunities for the executor.
@@ -527,6 +558,250 @@ class MarketMaker:
             "positions": positions,
             "dry_run": self.dry_run,
         }
+
+
+# ---------------------------------------------------------------------------
+# CrossPlatformMaker (Strategy #11)
+# ---------------------------------------------------------------------------
+
+class CrossPlatformMaker:
+    """Posts opposing limit orders on two platforms for the same event.
+
+    Composes two InventoryTracker instances (one per platform), a single
+    QuoteEngine for each side, and a shared QuoteManager. When a leg fills
+    on one side, the other side is canceled and ``hedger.hedge_inventory``
+    is invoked so the residual exposure is squared off automatically.
+
+    The detection layer (``scans.cross_mm.scan_cross_mm``) emits
+    ``CrossPlatformMM`` opportunity dicts; this class owns the inventory
+    bookkeeping and one-sided-fill cleanup that comes after detection.
+    """
+
+    def __init__(
+        self,
+        inventory_a: InventoryTracker | None = None,
+        inventory_b: InventoryTracker | None = None,
+        quote_engine: QuoteEngine | None = None,
+        quote_manager: QuoteManager | None = None,
+        min_spread: float = DEFAULT_MIN_SPREAD,
+        quote_size: float = DEFAULT_QUOTE_SIZE,
+        max_inventory: float = DEFAULT_MAX_INVENTORY,
+        hedger=None,
+        auto_hedge_enabled: bool = False,
+        dry_run: bool = True,
+    ):
+        self.inventory_a = inventory_a or InventoryTracker(max_inventory)
+        self.inventory_b = inventory_b or InventoryTracker(max_inventory)
+        self.quote_engine = quote_engine or QuoteEngine(min_spread)
+        self.quote_manager = quote_manager or QuoteManager()
+        self.quote_size = quote_size
+        self.max_inventory = max_inventory
+        self.hedger = hedger
+        self.auto_hedge_enabled = auto_hedge_enabled
+        self.dry_run = dry_run
+        self._pairs: dict[str, dict] = {}
+        self._lock = threading.Lock()
+
+    def add_pair(
+        self,
+        market_key: str,
+        platform_a: str,
+        platform_b: str,
+        mid_a: float,
+        mid_b: float,
+        token_a: str = "",
+        token_b: str = "",
+    ) -> None:
+        """Register a matched cross-platform market pair."""
+        with self._lock:
+            self._pairs[market_key] = {
+                "platform_a": platform_a,
+                "platform_b": platform_b,
+                "mid_a": mid_a,
+                "mid_b": mid_b,
+                "token_a": token_a,
+                "token_b": token_b,
+                "last_update": time.time(),
+            }
+
+    def remove_pair(self, market_key: str) -> None:
+        """Stop quoting a paired market; cancel any open legs."""
+        self.quote_manager.cancel_all(market_key)
+        with self._lock:
+            self._pairs.pop(market_key, None)
+
+    def update_price(self, market_key: str, platform: str, mid_price: float) -> None:
+        """Update one side's mid price (e.g. from a WebSocket tick)."""
+        with self._lock:
+            pair = self._pairs.get(market_key)
+            if not pair:
+                return
+            if platform == pair["platform_a"]:
+                pair["mid_a"] = mid_price
+            elif platform == pair["platform_b"]:
+                pair["mid_b"] = mid_price
+            pair["last_update"] = time.time()
+
+    def refresh_quotes_paired(self, market_key: str = "",
+                              traders: dict | None = None) -> list[dict]:
+        """Cancel and repost both legs of every (or one) paired market.
+
+        Args:
+            market_key: Restrict to one pair; default refreshes all pairs.
+            traders: ``{platform: trader_client}`` for live order placement.
+                Pass ``None`` (default) for dry-run.
+        """
+        traders = traders or {}
+        with self._lock:
+            pairs = dict(self._pairs)
+        if market_key:
+            pairs = {k: v for k, v in pairs.items() if k == market_key}
+
+        new_quotes = []
+        for mk, pair in pairs.items():
+            # Inventory-aware quote on each side
+            inv_a = self.inventory_a.get_position(mk)
+            inv_b = self.inventory_b.get_position(mk)
+            quotes_a = self.quote_engine.calculate_quotes(
+                pair["mid_a"], inv_a, self.max_inventory)
+            quotes_b = self.quote_engine.calculate_quotes(
+                pair["mid_b"], inv_b, self.max_inventory)
+
+            self.quote_manager.cancel_all(mk)
+
+            trader_a = traders.get(pair["platform_a"]) if not self.dry_run else None
+            trader_b = traders.get(pair["platform_b"]) if not self.dry_run else None
+
+            if self.inventory_a.can_trade(mk, self.quote_size):
+                bid_a = self.quote_manager.place_quote(
+                    pair["platform_a"], mk, "bid", quotes_a["bid"],
+                    self.quote_size, trader=trader_a,
+                )
+                if bid_a:
+                    new_quotes.append({"order_id": bid_a, "platform": pair["platform_a"],
+                                       "side": "bid", "market": mk,
+                                       "price": quotes_a["bid"]})
+
+            if self.inventory_b.can_trade(mk, self.quote_size):
+                ask_b = self.quote_manager.place_quote(
+                    pair["platform_b"], mk, "ask", quotes_b["ask"],
+                    self.quote_size, trader=trader_b,
+                )
+                if ask_b:
+                    new_quotes.append({"order_id": ask_b, "platform": pair["platform_b"],
+                                       "side": "ask", "market": mk,
+                                       "price": quotes_b["ask"]})
+        if new_quotes:
+            logger.info("CrossPlatformMM refreshed %d legs across %d pairs",
+                        len(new_quotes), len(pairs))
+        return new_quotes
+
+    def on_fill(self, order_id: str, market_key: str, platform: str,
+                side: str, price: float, size: float,
+                token_id: str = "", **identifiers) -> None:
+        """Handle a fill: update side-specific inventory; cancel & hedge sibling.
+
+        When one leg fills the other side becomes a directional exposure.
+        We cancel the unfilled sibling immediately and route the filled
+        side through ``PartialFillHedger.hedge_inventory`` to sell back at
+        market when ``auto_hedge_enabled`` is set.
+        """
+        with self._lock:
+            pair = self._pairs.get(market_key)
+        if pair is None:
+            logger.warning("CrossPlatformMM fill on unknown pair %s", market_key)
+            return
+
+        if platform == pair["platform_a"]:
+            self.inventory_a.update(market_key, platform,
+                                    size if side == "bid" else -size)
+        elif platform == pair["platform_b"]:
+            self.inventory_b.update(market_key, platform,
+                                    size if side == "bid" else -size)
+
+        self.quote_manager.record_fill(order_id, size, price)
+
+        # Cancel the sibling leg so we don't accidentally double-fill
+        for other in self.quote_manager.get_active_orders(market_key):
+            if other["order_id"] != order_id:
+                self.quote_manager.cancel_quote(other["order_id"])
+
+        logger.info(
+            "CrossPlatformMM fill: %s %s %s @ %.4f ($%.2f) | inv_a=%.2f inv_b=%.2f",
+            platform, side, market_key, price, size,
+            self.inventory_a.get_position(market_key),
+            self.inventory_b.get_position(market_key),
+        )
+
+        if not self.auto_hedge_enabled or self.hedger is None:
+            return
+        try:
+            self.hedger.hedge_inventory(
+                market_key=market_key,
+                platform=platform,
+                side=side,
+                fill_price=price,
+                size=size,
+                token_id=token_id,
+                **identifiers,
+            )
+        except Exception as exc:
+            logger.exception("CrossPlatformMM auto-hedge raised on %s/%s: %s",
+                             platform, market_key, exc)
+
+    def generate_opportunities(self) -> list[dict]:
+        """Emit CrossPlatformMM opp dicts (matches scan_cross_mm format)."""
+        with self._lock:
+            pairs = dict(self._pairs)
+
+        opps = []
+        for mk, pair in pairs.items():
+            mid_a = pair["mid_a"]
+            mid_b = pair["mid_b"]
+            if not (0.01 < mid_a < 0.99) or not (0.01 < mid_b < 0.99):
+                continue
+            spread = abs(mid_b - mid_a)
+            if spread <= 0:
+                continue
+            buy_plat = pair["platform_a"] if mid_a < mid_b else pair["platform_b"]
+            sell_plat = pair["platform_b"] if mid_a < mid_b else pair["platform_a"]
+            buy_price = min(mid_a, mid_b)
+            sell_price = max(mid_a, mid_b)
+            est_profit = spread * self.quote_size
+
+            opps.append({
+                "type": "CrossPlatformMM",
+                "_layer": 3,
+                "market": mk,
+                "prices": (
+                    f"{buy_plat}_BID={buy_price:.4f} "
+                    f"{sell_plat}_ASK={sell_price:.4f}"
+                ),
+                "total_cost": f"${self.quote_size * 2:.2f}",
+                "net_profit": est_profit,
+                "net_roi": spread / max(buy_price, 0.01),
+                "_market_key": mk,
+                "_platform_a": buy_plat,
+                "_platform_b": sell_plat,
+                "_spread": spread,
+                "_leg_a": {
+                    "platform": buy_plat, "side": "BUY", "token": "yes",
+                    "price": buy_price, "size": self.quote_size,
+                    "_market_key": mk,
+                },
+                "_leg_b": {
+                    "platform": sell_plat, "side": "SELL", "token": "yes",
+                    "price": sell_price, "size": self.quote_size,
+                    "_market_key": mk,
+                },
+            })
+        return opps
+
+    def stop(self) -> None:
+        """Cancel all paired quotes."""
+        cancelled = self.quote_manager.cancel_all()
+        logger.info("CrossPlatformMM stopped: cancelled %d outstanding legs",
+                    cancelled)
 
 
 # ---------------------------------------------------------------------------

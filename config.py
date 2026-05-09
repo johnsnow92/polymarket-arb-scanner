@@ -179,8 +179,8 @@ STRATEGY_LAYERS: dict[str, int] = {
     "GeminiBinary": 1, "GeminiMulti": 1,
     "IBKRBinary": 1,
     "Spread": 1,
-    "StalePriceOpp": 2, "ResolutionSnipeOpp": 2,
-    "MarketMake": 3,
+    "StalePriceOpp": 2, "ResolutionSnipeOpp": 2, "FeePromo": 2,
+    "MarketMake": 3, "CrossPlatformMM": 3,
     "EventDivergence": 4, "ConvergenceOpp": 4,
 }
 
@@ -223,6 +223,69 @@ FILL_POLL_TIMEOUT = _env_float("FILL_POLL_TIMEOUT", "5.0")
 HEDGE_ENABLED = _env_bool("HEDGE_ENABLED", "true")
 HEDGE_MAX_ATTEMPTS = _env_int("HEDGE_MAX_ATTEMPTS", "5")
 HEDGE_MAX_SPREAD_LOSS_PCT = _env_float("HEDGE_MAX_SPREAD_LOSS_PCT", "0.15")
+
+# Inventory-hedged market making (Strategy #12).
+# When MM inventory on a market exceeds MM_HEDGE_THRESHOLD * max_inventory,
+# automatically attempt to sell back at the current best bid via the
+# existing PartialFillHedger platform dispatch.
+MM_AUTO_HEDGE_ENABLED = _env_bool("MM_AUTO_HEDGE_ENABLED", "false")
+MM_HEDGE_THRESHOLD = _env_float("MM_HEDGE_THRESHOLD", "0.8")
+
+# Auto-rebalancing / treasury (Strategy #18).
+# Programmatic transfers between Gemini and Polymarket (USDC on Polygon).
+# All other platforms are read-only and remain on the manual-rebalance path.
+AUTO_REBALANCE_ENABLED = _env_bool("AUTO_REBALANCE_ENABLED", "false")
+MAX_AUTO_TRANSFER_PER_DAY = _env_float("MAX_AUTO_TRANSFER_PER_DAY", "500.0")
+MIN_TRANSFER_AMOUNT = _env_float("MIN_TRANSFER_AMOUNT", "50.0")
+POLYMARKET_DEPOSIT_ADDRESS = os.getenv("POLYMARKET_DEPOSIT_ADDRESS", "")
+
+# Cross-platform market making (Strategy #11).
+# Posts opposing limit orders on two platforms for the same matched event.
+# When the spread `ask_high - bid_low - sum_fees` exceeds CROSS_MM_MIN_SPREAD,
+# the scan emits a CrossPlatformMM opp with both legs pre-built.
+CROSS_MM_ENABLED = _env_bool("CROSS_MM_ENABLED", "false")
+CROSS_MM_MIN_SPREAD = _env_float("CROSS_MM_MIN_SPREAD", "0.04")
+CROSS_MM_MAX_INVENTORY = _env_float("CROSS_MM_MAX_INVENTORY", "200.0")
+CROSS_MM_QUOTE_SIZE = _env_float("CROSS_MM_QUOTE_SIZE", "5.0")
+CROSS_MM_PLATFORMS = os.getenv("CROSS_MM_PLATFORMS", "polymarket,kalshi")
+
+# Fee promotional arbitrage (Strategy #9).
+# When enabled, cross-platform near-misses (within PROMO_NEAR_MISS_BAND of
+# MIN_NET_ROI) are captured into NearMissCache and re-scored when fee rates
+# drop. Calendar tracking warns when known promo windows are about to expire.
+FEE_PROMO_ENABLED = _env_bool("FEE_PROMO_ENABLED", "false")
+PROMO_NEAR_MISS_BAND = _env_float("PROMO_NEAR_MISS_BAND", "0.05")
+PROMO_WARNING_DAYS = _env_int("PROMO_WARNING_DAYS", "7")
+
+# Optional ISO-8601 dates marking the day after which each platform's
+# current promotional fee rate expires. Empty string = no known expiry.
+MATCHBOOK_PROMO_EXPIRES = os.getenv("MATCHBOOK_PROMO_EXPIRES", "")
+GEMINI_PROMO_EXPIRES = os.getenv("GEMINI_PROMO_EXPIRES", "")
+POLYMARKET_PROMO_EXPIRES = os.getenv("POLYMARKET_PROMO_EXPIRES", "")
+
+
+def get_promo_expiry(platform: str):
+    """Return the configured promo expiry date for a platform, or None.
+
+    Args:
+        platform: Platform name (matchbook, gemini, polymarket).
+
+    Returns:
+        A ``datetime.date`` if the env var is set and parses cleanly,
+        otherwise ``None``. Unknown platforms always return ``None``.
+    """
+    from datetime import date
+    raw = {
+        "matchbook": MATCHBOOK_PROMO_EXPIRES,
+        "gemini": GEMINI_PROMO_EXPIRES,
+        "polymarket": POLYMARKET_PROMO_EXPIRES,
+    }.get(platform.lower(), "")
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError:
+        return None
 
 # Betfair commission rate (2-5%, default 3% for moderate-volume users)
 BETFAIR_COMMISSION_RATE = _env_float("BETFAIR_COMMISSION_RATE", "0.03")

@@ -429,6 +429,14 @@ class ArbitrageExecutor:
                 reason = "signal_based"  # Signal-based — no stale mid-price to revalidate
             elif opp_type in ("StalePriceOpp", "ResolutionSnipeOpp", "ConvergenceOpp"):
                 reason = "signal_based"  # Signal/time-based — directional, no mid-price revalidation
+            elif opp_type == "FeePromo":
+                # Strategy #9: scan_fee_promo already re-scored using current
+                # fee globals at emit time. No further mid-price revalidation.
+                reason = "fee_reload"
+            elif opp_type == "CrossPlatformMM":
+                # Strategy #11: paired bid/ask quotes — refreshed by the MM
+                # engine, not subject to stale-mid revalidation.
+                reason = "mm_refreshed"
             elif opp_type == "MarketMake":
                 reason = "mm_refreshed"  # MM quotes are continuously refreshed by the MM engine
             elif opp_type == "PolymarketRewards":
@@ -1609,6 +1617,19 @@ class ArbitrageExecutor:
         elif opp_type == "MarketMake":
             # Layer 3: market making — bid+ask pair
             legs = self._build_mm_legs(opportunity, size)
+        elif opp_type == "FeePromo":
+            # Strategy #9: cached cross-platform near-miss that re-cleared
+            # MIN_NET_ROI after a fee rate drop. The opp dict carries the
+            # original PM_Y/K_N prices string and _platform_a/_platform_b,
+            # so the generic cross-all builder handles it cleanly.
+            legs = self._build_cross_all_legs(opportunity, size)
+        elif opp_type == "CrossPlatformMM":
+            # Strategy #11: paired bid/ask across two platforms. The scan
+            # pre-builds both legs as ``_leg_a`` / ``_leg_b`` so the executor
+            # just unpacks them.
+            leg_a = opportunity.get("_leg_a")
+            leg_b = opportunity.get("_leg_b")
+            legs = [leg for leg in (leg_a, leg_b) if leg]
         elif opp_type.startswith("Cross"):
             # Re-validate fee path if scan provided a hint (per user decision: confirm or override)
             fee_path = opportunity.get("_fee_path")

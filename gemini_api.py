@@ -561,6 +561,35 @@ class GeminiClient:
 
         return None
 
+    def withdraw_usdc(self, address: str, amount: float) -> dict | None:
+        """Withdraw USDC to an external address (Strategy #18).
+
+        Calls Gemini's ``/v1/withdraw/usdc`` endpoint. Caller is responsible
+        for verifying the destination address (e.g. the Polymarket proxy
+        wallet) and applying treasury risk gates upstream.
+
+        Args:
+            address: External wallet address to receive USDC.
+            amount: Amount in dollars (Gemini accepts a string).
+
+        Returns:
+            Gemini response dict (typically includes ``txHash`` and
+            ``destination``), or None on failure.
+        """
+        if not address:
+            logger.warning("withdraw_usdc called with empty destination address")
+            return None
+        if amount <= 0:
+            logger.warning("withdraw_usdc called with non-positive amount: %s",
+                           amount)
+            return None
+        payload = {
+            "address": address,
+            "amount": f"{amount:.6f}",
+        }
+        return self._private_request("/v1/withdraw/usdc",
+                                      payload_data=payload)
+
     def get_positions(self) -> list[dict]:
         """Get open prediction market positions.
 

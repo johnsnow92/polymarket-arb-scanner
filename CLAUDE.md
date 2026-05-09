@@ -42,10 +42,19 @@ Python CLI tool that scans for arbitrage opportunities across prediction markets
 *Layer 5 — Capital Optimization (multiplier):*
 - **Dynamic fee routing** — lowest-fee path selection for each opportunity
 - **Kelly criterion sizing** — optimal position sizing by strategy risk class
-- **Platform fund rebalancing** — capital allocation across platforms by opportunity flow
+- **Platform fund rebalancing** — capital allocation across platforms by opportunity flow. *Auto-execute corridor: Gemini ↔ Polymarket via USDC on Polygon only. The other six platforms expose read-only balance APIs and stay on the manual-rebalance path with weekly digests via `notifier.py`.*
 - **Latency optimization** — priority execution for time-sensitive opportunities
 - **Backtesting-driven tuning** — historical data to optimize all thresholds
 - **Spread detection** — Polymarket/Kalshi bid-ask spreads (existing, feeds into MM)
+
+All 20 strategies are first-class as of the May 2026 milestone (PR `claude/sad-euler-a029b1`). Each has a distinct opportunity type, scan or detection module, executor branch, feature flag, and test suite. Feature flags default to `false` so the new strategies are dormant until explicitly enabled:
+
+| Flag | Strategy | New module(s) |
+|---|---|---|
+| `MM_AUTO_HEDGE_ENABLED` | #12 inventory-hedged MM | `hedger.hedge_inventory()` + `MarketMaker.on_fill` wiring |
+| `FEE_PROMO_ENABLED` | #9 fee-promo arb | `near_miss_cache.py`, `scans/fee_promo.py`, `config.get_promo_expiry`, `notifier.notify_promo_warning` |
+| `CROSS_MM_ENABLED` | #11 cross-platform MM | `scans/cross_mm.py`, `market_maker.CrossPlatformMaker` |
+| `AUTO_REBALANCE_ENABLED` | #18 auto-rebalance | `treasury.py`, `gemini_api.withdraw_usdc`, `db.transfers` table, `POST /api/rebalance/execute` |
 
 
 ## Current Status
@@ -69,7 +78,8 @@ python scanner.py --continuous --interval 60
 
 # Specific modes: binary, negrisk, cross, kalshi, cross-all, spread,
 #   betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular,
-#   multi-cross, stale, resolution, convergence, mm
+#   multi-cross, stale, resolution, convergence, mm,
+#   fee-promo (Strategy #9), cross-mm (Strategy #11)
 python scanner.py --mode kalshi
 python scanner.py --mode cross-all
 python scanner.py --mode event        # Metaculus divergence signals

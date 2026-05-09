@@ -59,6 +59,48 @@ class WebhookNotifier:
         thread = threading.Thread(target=self._send, args=(qualifying,), daemon=True)
         thread.start()
 
+    def notify_promo_warning(self, platform: str, days_remaining: int,
+                             expiry_iso: str = ""):
+        """Send a fee-promo expiration warning (Strategy #9 calendar tracking).
+
+        Fired daily by ``continuous.py`` when ``config.get_promo_expiry``
+        returns a date within ``PROMO_WARNING_DAYS``.
+
+        Args:
+            platform: Platform whose promo is expiring (matchbook, gemini, polymarket).
+            days_remaining: Whole days until the promo ends. Negative if already past.
+            expiry_iso: ISO date string for the expiry, included in the message.
+        """
+        if not self.url:
+            return
+        msg = (
+            f"PROMO EXPIRY: {platform} fee promo ends in {days_remaining} day(s)"
+            + (f" ({expiry_iso})" if expiry_iso else "")
+            + " -- update fee env vars or rotate strategy mix."
+        )
+        if self._is_telegram:
+            thread = threading.Thread(
+                target=self._send_telegram, args=(f"⚠️ {msg}",), daemon=True)
+            thread.start()
+        elif self._is_callmebot:
+            thread = threading.Thread(
+                target=self._send_callmebot, args=(msg,), daemon=True)
+            thread.start()
+        else:
+            payload: dict = {
+                "event": "promo_warning",
+                "platform": platform,
+                "days_remaining": days_remaining,
+                "expiry": expiry_iso,
+                "message": msg,
+            }
+            if "hooks.slack.com" in self.url:
+                payload = {"text": f":warning: {msg}"}
+            elif "discord.com/api/webhooks" in self.url:
+                payload = {"content": f"⚠️ {msg}"}
+            thread = threading.Thread(target=self._send_raw, args=(payload,), daemon=True)
+            thread.start()
+
     def notify_partial_fill(self, trade_id: int, platform: str, market: str,
                             fill_price: float, status: str):
         """Send urgent notification about a partial fill event."""
