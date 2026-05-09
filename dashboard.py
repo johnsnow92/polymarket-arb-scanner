@@ -392,6 +392,7 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/pause": self._handle_pause_post,
             "/api/resume": self._handle_resume_post,
             "/api/purge": self._handle_purge_post,
+            "/api/rebalance/execute": self._handle_rebalance_execute,
         }
 
         handler_fn = post_routes.get(path)
@@ -826,6 +827,70 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_resume_post(self, body: bytes = b""):
         """POST /api/resume — disengage the kill switch."""
         _send_json(self, resume())
+
+    def _handle_rebalance_execute(self, body: bytes = b""):
+        """POST /api/rebalance/execute — programmatic fund transfer (Strategy #18).
+
+        Request body: {"from": "gemini", "to": "polymarket", "amount": 100.0,
+                       "idempotency_key": "<optional>"}
+
+        Only Gemini↔Polymarket corridors are supported. All other platforms
+        return 400 with an explanation. Risk gates (daily limit, kill switch,
+        min amount, feature flag) are enforced inside ``treasury.execute_transfer``.
+        """
+        try:
+            parsed = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            _send_json(self, {"error": "Invalid JSON"}, 400)
+            return
+
+        from_platform = (parsed.get("from") or "").lower()
+        to_platform = (parsed.get("to") or "").lower()
+        amount_raw = parsed.get("amount")
+        if not from_platform or not to_platform or amount_raw is None:
+            _send_json(self, {"error": "from, to, amount required"}, 400)
+            return
+        try:
+            amount = float(amount_raw)
+        except (TypeError, ValueError):
+            _send_json(self, {"error": "amount must be numeric"}, 400)
+            return
+
+        idempotency_key = parsed.get("idempotency_key")
+
+        # Lazy-build a TreasuryManager so the dashboard module imports stay
+        # cheap and the gemini client is only constructed when the endpoint
+        # is actually hit.
+        try:
+            from treasury import TreasuryManager
+            from gemini_api import GeminiClient
+            from db import TradeDB
+            import config as cfg
+            db = _get_db() or TradeDB()
+            gemini = None
+            try:
+                gemini = GeminiClient()
+            except Exception as exc:
+                logger.warning("Gemini client init failed: %s", exc)
+            tm = TreasuryManager(
+                db=db,
+                gemini_client=gemini,
+                kill_switch=lambda: state.scan_count >= 0 and is_paused(),
+                dry_run=cfg.DRY_RUN,
+            )
+            result = tm.execute_transfer(
+                from_platform=from_platform,
+                to_platform=to_platform,
+                amount_usd=amount,
+                idempotency_key=idempotency_key,
+            )
+        except Exception as exc:
+            logger.exception("Rebalance execute failed: %s", exc)
+            _send_json(self, {"ok": False, "error": str(exc)}, 500)
+            return
+
+        status_code = 200 if result.ok else 400
+        _send_json(self, result.to_dict(), status_code)
 
     def _handle_purge_post(self, body: bytes = b""):
         """POST /api/purge — delete all opportunities/trades for a given type.

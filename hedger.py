@@ -284,3 +284,73 @@ class PartialFillHedger:
             side=hedge_side, odds=decimal_odds, stake=round(size, 2),
         )
         return resp is not None
+
+    def hedge_inventory(
+        self,
+        market_key: str,
+        platform: str,
+        side: str,
+        fill_price: float,
+        size: float,
+        token_id: str = "",
+        **identifiers,
+    ) -> bool:
+        """Hedge an MM inventory imbalance by selling at current best bid.
+
+        Triggered by MarketMaker.on_fill when InventoryTracker.needs_hedge is True.
+        Reuses the same per-platform _hedge_* logic as partial-fill recovery,
+        plus a DB audit row in the partial_fills table flagged as
+        ``opportunity_id=-1`` so MM hedges remain queryable separately.
+
+        Args:
+            market_key: Market identifier (token_id, ticker, market hash, etc.).
+            platform: Platform that holds the over-position.
+            side: Side that was filled (we want to sell this exposure).
+            fill_price: Price the inventory was acquired at.
+            size: Size of the imbalance to hedge in dollars.
+            token_id: Polymarket / Gemini token symbol (if applicable).
+            **identifiers: Extra platform-specific keys forwarded to ``pf``
+                (``market_id``, ``selection_id``, ``contract_id``,
+                ``market_hash``, ``runner_id``, ``outcome_id``, ``symbol``).
+
+        Returns:
+            True if the hedge order placed successfully, False otherwise.
+        """
+        pf = {
+            "platform": platform,
+            "token_id": token_id or market_key,
+            "side": side,
+            "fill_price": fill_price,
+            "size": size,
+            "_market_id": identifiers.get("market_id", ""),
+            "_selection_id": identifiers.get("selection_id"),
+            "_contract_id": identifiers.get("contract_id", ""),
+            "_market_hash": identifiers.get("market_hash", ""),
+            "_runner_id": identifiers.get("runner_id", ""),
+            "_outcome_id": identifiers.get("outcome_id", ""),
+            "_symbol": identifiers.get("symbol", token_id or market_key),
+        }
+        success = self._attempt_hedge(pf)
+        logger.info(
+            "MM inventory hedge %s: %s %s %s size=$%.2f fill=$%.4f",
+            "OK" if success else "FAILED",
+            platform, side, market_key, size, fill_price,
+        )
+        if self.db:
+            self.db.log_partial_fill(
+                trade_id=0,
+                opportunity_id=-1,
+                platform=platform,
+                token_id=token_id or market_key,
+                side=side,
+                fill_price=fill_price,
+                size=size,
+                market_id=identifiers.get("market_id"),
+                selection_id=identifiers.get("selection_id"),
+                contract_id=identifiers.get("contract_id"),
+                market_hash=identifiers.get("market_hash"),
+                runner_id=identifiers.get("runner_id"),
+                outcome_id=identifiers.get("outcome_id"),
+                symbol=identifiers.get("symbol", token_id or market_key),
+            )
+        return success

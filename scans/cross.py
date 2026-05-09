@@ -20,6 +20,7 @@ from fees import (
     find_lowest_fee_path,
 )
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
+from near_miss_cache import get_global_cache
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,33 @@ def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min
                 min_profit, pm_yes, pm_no, k_yes, k_no,
                 result1["net_profit"], result2["net_profit"], best["fees"],
             )
+            # Strategy #9: capture near-misses for fee-promo re-scoring. The
+            # band is read at call time so config reloads take effect on the
+            # next scan without restart.
+            try:
+                from config import PROMO_NEAR_MISS_BAND
+                gap = min_profit - best["net_profit"]
+                if 0 <= gap <= PROMO_NEAR_MISS_BAND:
+                    if best == result1:
+                        side_a, side_b = "yes", "no"
+                        price_a, price_b = pm_yes, k_no
+                    else:
+                        side_a, side_b = "no", "yes"
+                        price_a, price_b = pm_no, k_yes
+                    near_miss_entry = {
+                        **opp,
+                        "_market_key": market_key,
+                        "_platform_a": "polymarket",
+                        "_platform_b": "kalshi",
+                        "_price_a": price_a,
+                        "_price_b": price_b,
+                        "_side_a": side_a,
+                        "_side_b": side_b,
+                        "net_profit": best["net_profit"],
+                    }
+                    get_global_cache().add(near_miss_entry, gap_to_threshold=gap)
+            except Exception as exc:
+                logger.debug("near-miss capture failed for %s: %s", market_key, exc)
 
     dropped = len(opportunities) - len(refined)
     if dropped:
