@@ -604,21 +604,51 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             except Exception as e:
                 logger.error("News snipe scan failed: %s", e)
 
-    # STRAT-06: Correlated Market Pairs
+    # STRAT-06: Correlated Market Pairs (manual seeds + PR E auto-detected)
     if args.mode in ("all", "correlated"):
-        from config import CORRELATED_ENABLED, CORRELATED_PAIRS, CORRELATION_DIVERGENCE_THRESHOLD
-        if CORRELATED_ENABLED and CORRELATED_PAIRS != "[]":
+        from config import (
+            CORRELATED_ENABLED, CORRELATED_PAIRS,
+            CORRELATION_DIVERGENCE_THRESHOLD,
+            CORRELATION_AUTO_DETECT_ENABLED,
+        )
+        # Manual pairs OR auto-detection enabled — either is enough to scan.
+        if CORRELATED_ENABLED and (
+            CORRELATED_PAIRS != "[]" or CORRELATION_AUTO_DETECT_ENABLED
+        ):
             logger.info("--- Correlated Market Pairs Scan ---")
             try:
-                from scans.correlated import scan_correlated, _load_correlated_pairs
+                from scans.correlated import (
+                    scan_correlated, _load_correlated_pairs,
+                    _refine_correlated_with_depth,
+                )
                 pairs = _load_correlated_pairs(CORRELATED_PAIRS)
+                auto_pairs: list[tuple[str, str]] = []
+                if CORRELATION_AUTO_DETECT_ENABLED:
+                    try:
+                        from correlation_tracker import load_auto_correlated_pairs
+                        from snapshot import SnapshotRecorder
+                        rec = SnapshotRecorder()
+                        auto_pairs = load_auto_correlated_pairs(rec)
+                        rec.close()
+                        logger.info(
+                            "Loaded %d auto-correlated pairs from cache",
+                            len(auto_pairs),
+                        )
+                    except Exception as e:
+                        logger.warning("Auto-correlation cache load failed: %s", e)
                 markets_by_key = {}
                 if poly_markets:
                     for mkt in poly_markets:
                         cid = mkt.get("condition_id", "")
                         if cid:
                             markets_by_key[cid] = mkt
-                corr_opps = scan_correlated(markets_by_key, pairs, min_spread=CORRELATION_DIVERGENCE_THRESHOLD)
+                corr_opps = scan_correlated(
+                    markets_by_key, pairs,
+                    min_spread=CORRELATION_DIVERGENCE_THRESHOLD,
+                    auto_pairs=auto_pairs,
+                )
+                # Stage 2: live CLOB validation.
+                corr_opps = _refine_correlated_with_depth(corr_opps)
                 all_opportunities.extend(corr_opps)
                 logger.info("Found %d correlated opportunities.", len(corr_opps))
             except Exception as e:

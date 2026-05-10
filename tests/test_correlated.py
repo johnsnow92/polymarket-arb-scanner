@@ -307,7 +307,27 @@ class TestDirectionality:
 # ---------------------------------------------------------------------------
 
 class TestRefinement:
-    """Test Stage 2 _refine_correlated_with_depth() validation."""
+    """Test Stage 2 _refine_correlated_with_depth() validation.
+
+    Post-PR-E: the refiner runs real CLOB checks. These tests inject a
+    fake fetch_clob to exercise the gates without network. Detailed
+    gate-by-gate coverage lives in tests/test_correlated_refiner.py;
+    these are the legacy regression tests, repurposed.
+    """
+
+    def _make_book(self, ask, bid, ask_size=100.0, bid_size=100.0):
+        return {
+            "yes_ask": ask, "yes_bid": bid,
+            "yes_ask_size": ask_size, "yes_bid_size": bid_size,
+            "no_ask": None, "no_bid": None,
+            "no_ask_size": 0, "no_bid_size": 0,
+        }
+
+    def _fetch_factory(self, books):
+        def fetch(market, _price_cache=None):
+            key = (market or {}).get("id")
+            return market, books.get(key)
+        return fetch
 
     def test_keeps_stable_spread(self):
         from scans.correlated import _refine_correlated_with_depth
@@ -318,29 +338,42 @@ class TestRefinement:
                 "spread": 0.12,
                 "_long_leg": "mkt_a",
                 "_short_leg": "mkt_b",
+                "_market_key_a": "mkt_a",
+                "_market_key_b": "mkt_b",
+                "_long_market": {"id": "mkt_a"},
+                "_short_market": {"id": "mkt_b"},
             }
         ]
-
-        refined = _refine_correlated_with_depth(opportunities, max_spread_collapse=0.20)
-
-        # Spread has not collapsed, so it should be kept
+        fetch = self._fetch_factory({
+            "mkt_a": self._make_book(ask=0.40, bid=0.39),
+            "mkt_b": self._make_book(ask=0.51, bid=0.50),
+        })
+        refined = _refine_correlated_with_depth(
+            opportunities, max_spread_collapse=0.50, min_liquidity=10,
+            fetch_clob=fetch,
+        )
+        # Spread held within tolerance and depth is sufficient.
         assert len(refined) == 1
         assert refined[0]["spread"] == 0.12
+        assert "_live_spread" in refined[0]
 
-    def test_accepts_all_opportunities_stage1(self):
-        """Stage 1 opportunities with sufficient spread are kept in Stage 2."""
+    def test_drops_when_no_clob_for_either_leg(self):
+        """Post-PR-E: opps without live CLOB data are dropped, not kept."""
         from scans.correlated import _refine_correlated_with_depth
 
         opportunities = [
-            {"type": "Correlated", "spread": 0.15, "_long_leg": "a", "_short_leg": "b"},
-            {"type": "Correlated", "spread": 0.20, "_long_leg": "c", "_short_leg": "d"},
-            {"type": "Correlated", "spread": 0.10, "_long_leg": "e", "_short_leg": "f"},
+            {
+                "type": "Correlated", "spread": 0.15,
+                "_long_leg": "a", "_short_leg": "b",
+                "_market_key_a": "a", "_market_key_b": "b",
+                "_long_market": {"id": "a"}, "_short_market": {"id": "b"},
+            },
         ]
-
-        refined = _refine_correlated_with_depth(opportunities)
-
-        # All pass Stage 1, all kept in Stage 2 (no actual CLOB depth check implemented)
-        assert len(refined) == 3
+        fetch = self._fetch_factory({})  # no books → both legs missing
+        refined = _refine_correlated_with_depth(
+            opportunities, fetch_clob=fetch,
+        )
+        assert refined == []
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +408,32 @@ class TestIntegration:
         assert opps[0]["type"] == "Correlated"
         assert opps[0]["spread"] > 0.10
 
-        # Stage 2
-        refined = _refine_correlated_with_depth(opps)
+        # Stage 2 — provide a fake CLOB fetcher so the refiner doesn't
+        # touch the network. Long leg (90k) buys at ask; short leg (100k)
+        # sells at bid. Both legs return ample depth and a live spread
+        # close to the Stage 1 detected spread.
+        def _fake_fetch(market, _price_cache=None):
+            mkt_id = (market or {}).get("id")
+            books = {
+                "bitcoin_90k": {
+                    "yes_ask": 0.51, "yes_bid": 0.50,
+                    "yes_ask_size": 200.0, "yes_bid_size": 200.0,
+                    "no_ask": None, "no_bid": None,
+                    "no_ask_size": 0, "no_bid_size": 0,
+                },
+                "bitcoin_100k": {
+                    "yes_ask": 0.76, "yes_bid": 0.74,
+                    "yes_ask_size": 200.0, "yes_bid_size": 200.0,
+                    "no_ask": None, "no_bid": None,
+                    "no_ask_size": 0, "no_bid_size": 0,
+                },
+            }
+            return market, books.get(mkt_id)
+
+        refined = _refine_correlated_with_depth(
+            opps, fetch_clob=_fake_fetch, min_liquidity=10,
+            max_spread_collapse=0.50,
+        )
         assert len(refined) == 1
         assert refined[0]["_long_leg"] == "bitcoin_90k"
         assert refined[0]["_short_leg"] == "bitcoin_100k"

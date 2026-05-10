@@ -438,6 +438,21 @@ CORRELATION_DIVERGENCE_THRESHOLD = _env_float("CORRELATION_DIVERGENCE_THRESHOLD"
 CORRELATED_MAX_TRADE_SIZE = _env_float("CORRELATED_MAX_TRADE_SIZE", "20.0")
 CORRELATED_MIN_SPREAD_COLLAPSE_THRESHOLD = _env_float("CORRELATED_MIN_SPREAD_COLLAPSE_THRESHOLD", "0.20")
 
+# PR E — auto-correlation detection (correlation_tracker.py)
+# When enabled, the tracker runs nightly over the last
+# CORRELATION_LOOKBACK_DAYS of snapshots, computes Pearson r between
+# every pair of markets, and caches pairs with |r| >=
+# CORRELATION_PEARSON_THRESHOLD for scan_correlated() to consume
+# alongside the manually-configured CORRELATED_PAIRS.
+CORRELATION_AUTO_DETECT_ENABLED = _env_bool("CORRELATION_AUTO_DETECT_ENABLED", "false")
+CORRELATION_PEARSON_THRESHOLD = _env_float("CORRELATION_PEARSON_THRESHOLD", "0.85")
+CORRELATION_LOOKBACK_DAYS = _env_int("CORRELATION_LOOKBACK_DAYS", "30")
+CORRELATION_MIN_SAMPLES = _env_int("CORRELATION_MIN_SAMPLES", "24")
+# Tracker refresh interval — default 24h, mirrors BACKTEST_RUN_INTERVAL.
+CORRELATION_TRACKER_INTERVAL = _env_float("CORRELATION_TRACKER_INTERVAL", "86400")
+# Bucket width (seconds) for the Pearson time-series grid. 1h default.
+CORRELATION_BUCKET_SECONDS = _env_int("CORRELATION_BUCKET_SECONDS", "3600")
+
 # STRAT-07: Time Decay Convergence
 TIME_DECAY_ENABLED = _env_bool("TIME_DECAY_ENABLED", "false")
 TIME_DECAY_MIN_HOURS_EXPIRY = int(os.getenv("TIME_DECAY_MIN_HOURS_EXPIRY", "48"))

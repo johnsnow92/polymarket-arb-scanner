@@ -46,6 +46,22 @@ class SnapshotRecorder:
 
             CREATE INDEX IF NOT EXISTS idx_snapshots_opp_type
                 ON price_snapshots(opp_type);
+
+            -- PR E: auto-detected correlated pairs cached by
+            -- correlation_tracker.py. ``pearson_r`` may be negative
+            -- (anti-correlated pairs are still copy-tradeable signals).
+            CREATE TABLE IF NOT EXISTS correlated_pairs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_a TEXT NOT NULL,
+                market_b TEXT NOT NULL,
+                pearson_r REAL NOT NULL,
+                sample_count INTEGER NOT NULL,
+                computed_at TEXT NOT NULL,
+                UNIQUE(market_a, market_b)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_correlated_computed
+                ON correlated_pairs(computed_at);
         """)
         # Add columns for Layer 2-4 strategy metadata (backward-compatible)
         for col, col_type in [
@@ -60,6 +76,64 @@ class SnapshotRecorder:
             except sqlite3.OperationalError:
                 pass  # Column already exists
         self.conn.commit()
+
+    # -----------------------------------------------------------------
+    # Correlated-pairs cache (PR E — auto-correlation detection)
+    # -----------------------------------------------------------------
+
+    def upsert_correlated_pairs(self, pairs: list[dict]) -> int:
+        """Replace the cached correlation set with ``pairs``.
+
+        Each entry must have ``market_a``, ``market_b``, ``pearson_r``,
+        ``sample_count``. ``computed_at`` is stamped server-side.
+
+        Always replaces the entire cache — passing an empty list (or one
+        whose entries all fail validation) clears the table so a stale
+        result never lingers after the source data disappears.
+
+        Returns the number of rows written.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        rows = []
+        for p in pairs or []:
+            a = str(p.get("market_a", ""))
+            b = str(p.get("market_b", ""))
+            if not a or not b or a == b:
+                continue
+            # Canonicalise the pair so (a,b) and (b,a) collapse.
+            a_canon, b_canon = sorted((a, b))
+            rows.append((
+                a_canon, b_canon,
+                float(p.get("pearson_r", 0.0)),
+                int(p.get("sample_count", 0)),
+                now,
+            ))
+        with self._lock:
+            self.conn.execute("DELETE FROM correlated_pairs")
+            if rows:
+                self.conn.executemany(
+                    """INSERT OR REPLACE INTO correlated_pairs
+                       (market_a, market_b, pearson_r, sample_count, computed_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    rows,
+                )
+            self.conn.commit()
+        return len(rows)
+
+    def get_correlated_pairs(
+        self,
+        min_abs_r: float = 0.0,
+    ) -> list[dict]:
+        """Return cached correlated pairs whose |pearson_r| >= ``min_abs_r``."""
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT market_a, market_b, pearson_r, sample_count, computed_at
+                   FROM correlated_pairs
+                   WHERE ABS(pearson_r) >= ?
+                   ORDER BY ABS(pearson_r) DESC""",
+                (float(min_abs_r),),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def record_snapshot(self, opportunities: list[dict]) -> int:
         """Record a batch of opportunity price snapshots.
