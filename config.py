@@ -428,6 +428,8 @@ FINNHUB_REQUEST_TIMEOUT = _env_float("FINNHUB_REQUEST_TIMEOUT", "10.0")
 NEWS_SNIPE_MAX_TRADE_SIZE = _env_float("NEWS_SNIPE_MAX_TRADE_SIZE", "25.0")
 NEWS_SNIPE_COOLDOWN = _env_float("NEWS_SNIPE_COOLDOWN", "30.0")
 NEWS_SNIPE_CONFIDENCE_THRESHOLD = _env_float("NEWS_SNIPE_CONFIDENCE_THRESHOLD", "0.5")
+# Stage 2 refiner: drop signals where the headline is older than this window.
+NEWS_SNIPE_MAX_AGE_MINUTES = _env_int("NEWS_SNIPE_MAX_AGE_MINUTES", "60")
 
 # STRAT-06: Correlated Market Pairs
 CORRELATED_ENABLED = _env_bool("CORRELATED_ENABLED", "false")
