@@ -902,6 +902,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     _last_fee_refresh = 0.0
     _last_backtest_run = 0.0
     _last_rebalance_digest = 0.0
+    _last_correlation_tracker_run = 0.0
 
     # Monotonic sequence counter for PriorityQueue tie-breaking (thread-safe via GIL for int ops)
     _seq_counter = 0
@@ -1876,6 +1877,37 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     except Exception as exc:
                         logger.debug("Rebalance digest failed: %s", exc)
                     _last_rebalance_digest = _now
+
+                # PR E: Auto-correlation tracker refresh (default 24h)
+                nonlocal _last_correlation_tracker_run
+                if (
+                    config.CORRELATION_AUTO_DETECT_ENABLED
+                    and _now - _last_correlation_tracker_run
+                        >= config.CORRELATION_TRACKER_INTERVAL
+                ):
+                    async def _run_correlation_tracker():
+                        try:
+                            loop = asyncio.get_event_loop()
+
+                            def _sync_run():
+                                from snapshot import SnapshotRecorder
+                                from correlation_tracker import (
+                                    run_correlation_tracker,
+                                )
+                                rec = SnapshotRecorder()
+                                try:
+                                    n = run_correlation_tracker(rec)
+                                    logger.info(
+                                        "correlation_tracker: cached %d "
+                                        "auto-correlated pairs", n,
+                                    )
+                                finally:
+                                    rec.close()
+                            await loop.run_in_executor(None, _sync_run)
+                        except Exception:
+                            logger.exception("correlation_tracker run failed")
+                    asyncio.ensure_future(_run_correlation_tracker())
+                    _last_correlation_tracker_run = _now
 
                 # MON-03: Per-strategy zero-opportunity period detection (30-minute windows)
                 if _alert_manager:
