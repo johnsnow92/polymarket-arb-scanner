@@ -2,20 +2,24 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Project name:** `arbgrid` (renamed 2026-05-09 from `polymarket-arb-scanner`). The new name reflects the project's actual scope — a grid of platforms × layers × strategies, not a Polymarket-only scanner. The GitHub repo and Railway service have been renamed; local clones may keep the old directory name without functional impact.
+
 ## Project Overview
 
-Python CLI tool that scans for arbitrage opportunities across prediction markets. Supports one-shot scans, continuous mode with WebSocket feeds, and automated trade execution. Deployed to Railway via GitHub integration.
+Python CLI tool (`arbgrid`) that scans for arbitrage and trading opportunities across prediction markets. Supports one-shot scans, continuous mode with WebSocket feeds, and automated trade execution. Deployed to Railway via GitHub integration.
 
-**Platforms**: Polymarket, Kalshi, Betfair, Smarkets, SX Bet, Matchbook, Gemini Predictions, IBKR ForecastEx (+ Metaculus as read-only signal source)
+**Platforms**: Polymarket, Kalshi, Betfair, Smarkets, SX Bet, Matchbook, Gemini Predictions, IBKR ForecastEx (+ Metaculus and Manifold as read-only signal sources)
+
+**Strategy framework:** see [`docs/strategy-framework-v2.md`](docs/strategy-framework-v2.md) for the canonical 29-strategy / 5-layer reconciliation. The summary block below is informative; the framework doc is authoritative.
 
 ## Project Scope
 
-- **What does "done" look like?** Profitable 24/7 automated trading bot on Railway — 20 strategies across 5 risk layers (pure arbitrage, near-arbitrage, market making, informed trading, capital optimization) operating across all 8 platforms. Full-stack: detection, execution, risk management, market making, monitoring, and backtesting — all production-grade and battle-tested.
+- **What does "done" look like?** Profitable 24/7 automated trading bot on Railway — **29 strategies across 5 risk layers** (pure arbitrage, near-arbitrage, market making + liquidity provision, informed/statistical edge, capital optimization) operating across all 8 platforms. Full-stack: detection, execution, risk management, market making, monitoring, and backtesting — all production-grade and battle-tested. Canonical strategy taxonomy lives in [`docs/strategy-framework-v2.md`](docs/strategy-framework-v2.md).
 - **How will you know it's working?** All three: (1) Net positive P&L in trades.db over a 7-day live trading period, (2) <5% false positive rate on detected opportunities (manually verified against platforms), (3) At least one profitable round-trip trade executed without human intervention.
 - **What is explicitly out of scope?** Public-facing product — no user accounts, SaaS interface, or selling access. This is a personal trading tool.
 - **Scope status:** Active
 
-**Strategies (20 across 5 layers)**:
+**Strategies (29 across 5 layers — see `docs/strategy-framework-v2.md` for full status table)**:
 
 *Layer 1 — Pure Arbitrage (risk-free):*
 - **Binary/NegRisk internal** — same-platform overround arbs on Polymarket, Kalshi, Gemini, IBKR
@@ -47,14 +51,22 @@ Python CLI tool that scans for arbitrage opportunities across prediction markets
 - **Backtesting-driven tuning** — historical data to optimize all thresholds
 - **Spread detection** — Polymarket/Kalshi bid-ask spreads (existing, feeds into MM)
 
-All 20 strategies are first-class as of the May 2026 milestone (PR `claude/sad-euler-a029b1`). Each has a distinct opportunity type, scan or detection module, executor branch, feature flag, and test suite. Feature flags default to `false` so the new strategies are dormant until explicitly enabled:
+All original-framework strategies (#1-#20) are first-class as of the May 2026 milestone (PR #10, commit `1e5087b`). The codebase additionally implements 9 strategies that grew beyond the original framework (#21 spread detection, #22-#23 liquidity rewards, #24-#29 Layer 4 informed-trading variants). Per the v2 framework status table:
 
-| Flag | Strategy | New module(s) |
+- **23 BUILT** — distinct opp type, scan/detection module, executor branch, tests
+- **5 PARTIAL** — #6 (SX Bet quarantined for unsigned-JSON bug), #18 (Gemini↔Polymarket auto-corridor only by design), #20 (#tuning-loop pending), #26-#28 (incomplete refiners)
+- **1 STUB** — #29 correlated pairs (TODO)
+
+Each first-class strategy has a feature flag defaulting to `false`. The four flags added in PR #10:
+
+| Flag | Strategy | Module(s) |
 |---|---|---|
 | `MM_AUTO_HEDGE_ENABLED` | #12 inventory-hedged MM | `hedger.hedge_inventory()` + `MarketMaker.on_fill` wiring |
 | `FEE_PROMO_ENABLED` | #9 fee-promo arb | `near_miss_cache.py`, `scans/fee_promo.py`, `config.get_promo_expiry`, `notifier.notify_promo_warning` |
 | `CROSS_MM_ENABLED` | #11 cross-platform MM | `scans/cross_mm.py`, `market_maker.CrossPlatformMaker` |
 | `AUTO_REBALANCE_ENABLED` | #18 auto-rebalance | `treasury.py`, `gemini_api.withdraw_usdc`, `db.transfers` table, `POST /api/rebalance/execute` |
+
+Remaining gaps and the build sequence to close them are documented in the v2 framework's Remediation Roadmap section.
 
 
 ## Current Status
@@ -101,7 +113,7 @@ pytest tests/test_fees.py -v
 pytest tests/test_executor.py::TestExecutor -v
 
 # Docker build (used by CI/CD)
-docker build -t polymarket-arb-scanner .
+docker build -t arbgrid .
 ```
 
 No linter or formatter configured. Style is enforced by convention only (see Code Style below).
@@ -172,7 +184,7 @@ Each `*_api.py` wraps a platform's REST API with auth, retries (`tenacity`), and
 - **Kalshi**: RSA-PSS signed headers (key file or base64)
 - **Betfair**: SSO login + API key
 - **Smarkets**: API key session
-- **SX Bet**: API key session
+- **SX Bet**: API key session — **READ-ONLY** (`place_order()` sends unsigned JSON; EIP-712 signing not yet implemented). `validate_config()` errors at startup if `sxbet` is in `ENABLED_EXECUTION_PLATFORMS` while `DRY_RUN=false`
 - **Matchbook**: Username/password session auth (0% commission on predictions)
 - **Gemini Predictions**: HMAC-SHA384 signed headers (API key + secret), 1% maker / 5% taker fees (`GEMINI_FEE_RATE`), full buy+sell
 - **IBKR ForecastEx**: TWS API via `ib_insync` (IB Gateway socket), BUY-only (no sell), LMT-only, $0.00 commission, 5s order rate limit
@@ -263,8 +275,8 @@ All env vars are defined in `config.py` with defaults. Key groups:
 - Risk: `DAILY_LOSS_LIMIT`, `MAX_OPEN_POSITIONS`, `MIN_LIQUIDITY`, `MIN_NET_ROI`
 - Dynamic fees: `DYNAMIC_FEE_ENABLED`, `POLYGON_RPC_URL`, `GAS_PRICE_CACHE_TTL`
 - Event monitor: `EVENT_MONITOR_ENABLED`, `EVENT_DIVERGENCE_THRESHOLD`
-- Tuning: `RESCAN_INTERVAL`, `WS_TRIGGER_THRESHOLD`, `WS_SUBSCRIPTION_LIMIT`, `FUZZY_MATCH_THRESHOLD`
-- Infra: `WEBHOOK_URL`, `DASHBOARD_PORT`, `DATA_DIR`, `LOG_LEVEL`, `LOG_FILE`
+- Tuning: `RESCAN_INTERVAL`, `WS_TRIGGER_THRESHOLD`, `WS_SUBSCRIPTION_LIMIT`, `FUZZY_MATCH_THRESHOLD`, `RESOLUTION_SNIPE_WINDOW_HOURS` (default `48`)
+- Infra: `WEBHOOK_URL`, `DASHBOARD_PORT`, `DASHBOARD_HOST` (default `127.0.0.1`; production must set `0.0.0.0` + `DASHBOARD_PASS`), `DASHBOARD_PASS`, `DATA_DIR`, `LOG_LEVEL`, `LOG_FILE`
 - Proxies: `POLYMARKET_PROXY_URL`, `KALSHI_PROXY_URL`
 
 ### Railway Production Configuration

@@ -3,6 +3,7 @@
 import logging
 import time
 
+from config import RESOLUTION_SNIPE_WINDOW_HOURS
 from .helpers import capital_efficiency_score
 
 logger = logging.getLogger(__name__)
@@ -110,8 +111,9 @@ def scan_resolution_snipes(
 def _is_near_resolution(market: dict) -> bool:
     """Check if a market is approaching resolution.
 
-    Looks for: close_time within 24 hours, status fields indicating
-    resolution, or high-volume recent trading indicating resolution imminent.
+    Looks for: close_time within ``RESOLUTION_SNIPE_WINDOW_HOURS`` (default
+    48h, env-configurable), status fields indicating resolution, or
+    high-volume recent trading indicating resolution imminent.
     """
     # Polymarket: check end_date_iso or close_time
     close_time = market.get("end_date_iso") or market.get("close_time")
@@ -129,7 +131,7 @@ def _is_near_resolution(market: dict) -> bool:
 
             now = datetime.now(timezone.utc)
             hours_until_close = (close_dt - now).total_seconds() / 3600
-            if 0 < hours_until_close < 48:
+            if 0 < hours_until_close < RESOLUTION_SNIPE_WINDOW_HOURS:
                 return True
         except (ValueError, TypeError, OverflowError):
             pass

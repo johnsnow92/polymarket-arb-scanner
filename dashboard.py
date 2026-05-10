@@ -934,6 +934,9 @@ class _Handler(BaseHTTPRequestHandler):
 def start_dashboard(port: int) -> HTTPServer | None:
     """Start the dashboard HTTP server on a background thread.
 
+    Bind interface is governed by config.DASHBOARD_HOST (default 127.0.0.1).
+    Production deploys must set DASHBOARD_HOST=0.0.0.0 + DASHBOARD_PASS.
+
     Args:
         port: TCP port to listen on. If 0 or negative, returns None.
 
@@ -943,12 +946,14 @@ def start_dashboard(port: int) -> HTTPServer | None:
     if port <= 0:
         return None
 
+    from config import DASHBOARD_HOST
     try:
-        server = HTTPServer(("0.0.0.0", port), _Handler)
+        server = HTTPServer((DASHBOARD_HOST, port), _Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        logger.info("Dashboard running on http://0.0.0.0:%d", port)
+        logger.info("Dashboard running on http://%s:%d", DASHBOARD_HOST, port)
         return server
     except OSError as e:
-        logger.warning("Failed to start dashboard on port %d: %s", port, e)
+        logger.warning("Failed to start dashboard on %s:%d: %s",
+                       DASHBOARD_HOST, port, e)
         return None

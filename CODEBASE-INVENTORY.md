@@ -1,6 +1,8 @@
-# Codebase Inventory — Polymarket Arb Scanner
+# Codebase Inventory — arbgrid
 
 > Generated 2026-04-12 by 10 parallel analysis agents. Covers every file, function, class, and cross-reference in the project.
+>
+> **Note (2026-05-09):** Project renamed from `polymarket-arb-scanner` to `arbgrid`. PR #10 added 4 new opportunity types (`FeePromo`, `CrossPlatformMM`, `transfers` audit) — this inventory pre-dates that work; refresh when convenient. Canonical strategy taxonomy is in [`docs/strategy-framework-v2.md`](docs/strategy-framework-v2.md).
 
 ---
 
