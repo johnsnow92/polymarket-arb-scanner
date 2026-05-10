@@ -657,6 +657,31 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             except Exception as e:
                 logger.error("Time decay scan failed: %s", e)
 
+    # STRAT-08: Whale Copy Trading (one-shot path; continuous.py has its own
+    # invocation that runs each scan cycle).
+    if args.mode in ("all", "whale-copy"):
+        from config import WHALE_COPY_ENABLED, WHALE_WALLETS, POLYGONSCAN_API_KEY
+        if WHALE_COPY_ENABLED and WHALE_WALLETS:
+            logger.info("--- Whale Copy Scan ---")
+            try:
+                from scans.whale_copy import scan_whale_copy
+                from polygonscan_api import PolygonscanClient
+                polygonscan = PolygonscanClient(api_key=POLYGONSCAN_API_KEY)
+                whale_opps = scan_whale_copy(
+                    whale_wallets=WHALE_WALLETS,
+                    polygonscan_client=polygonscan,
+                    last_block_cache=None,
+                )
+                all_opportunities.extend(whale_opps)
+                logger.info("Found %d whale copy opportunities.", len(whale_opps))
+            except Exception as e:
+                logger.error("Whale copy scan failed: %s", e)
+        else:
+            logger.debug(
+                "Whale copy: skipped (enabled=%s, wallets=%d)",
+                WHALE_COPY_ENABLED, len(WHALE_WALLETS),
+            )
+
     # Rewards scanning (Layer 3: liquidity rewards)
     if args.mode in ("all", "rewards") and CONFIG_REWARDS_ENABLED:
         logger.info("--- Rewards Scan ---")
