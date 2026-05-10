@@ -70,7 +70,11 @@ class TestRateLockExists:
 
     def test_rate_lock_is_mutually_exclusive(self):
         # Holding the lock should block a non-blocking acquire from another
-        # thread.
+        # thread. Earlier versions of this test compared
+        # ``acquired_concurrently == [False]``; on recent Python versions
+        # ``threading.Lock.acquire(blocking=False)`` returns the lock-state
+        # object rather than the literal ``False`` when blocking. Compare
+        # truthiness instead.
         acquired_concurrently = []
 
         def try_acquire():
@@ -81,7 +85,8 @@ class TestRateLockExists:
             t.start()
             t.join(timeout=2)
 
-        assert acquired_concurrently == [False]
+        assert len(acquired_concurrently) == 1
+        assert not acquired_concurrently[0]
 
     def test_min_request_interval_value(self):
         assert MIN_REQUEST_INTERVAL == 0.01
@@ -99,6 +104,20 @@ class TestRateLockExists:
 # remaining-interval duration, and updates _last_request_time afterwards.
 
 
+def _fake_time_module(time_values, sleep_mock):
+    """Build a fake replacement for the ``time`` module reference held by
+    polymarket_api. Replacing the whole module reference (instead of
+    patching ``polymarket_api.time.time`` directly) keeps the mock fully
+    scoped to the test — patching the sub-attribute mutated the real
+    ``time`` module's globals, which made the assertions race against
+    real wall-clock readings on shared CI runners.
+    """
+    fake = MagicMock()
+    fake.time = MagicMock(side_effect=lambda: next(time_values))
+    fake.sleep = sleep_mock
+    return fake
+
+
 class TestRateLimitSingleThread:
     def test_sleeps_when_called_too_quickly(self):
         """When _last_request_time is recent, _rate_limit must sleep for the
@@ -107,9 +126,10 @@ class TestRateLimitSingleThread:
         # t=100.003 — 3ms in, so we should sleep for the remaining 7ms.
         polymarket_api._last_request_time = 100.000
         time_values = iter([100.003, 100.010])
+        mock_sleep = MagicMock()
+        fake_time = _fake_time_module(time_values, mock_sleep)
 
-        with patch("polymarket_api.time.time", side_effect=lambda: next(time_values)) as _t, \
-             patch("polymarket_api.time.sleep") as mock_sleep:
+        with patch.object(polymarket_api, "time", fake_time):
             _rate_limit()
 
         assert mock_sleep.call_count == 1
@@ -122,9 +142,10 @@ class TestRateLimitSingleThread:
         """When the previous request was long ago, _rate_limit must not sleep."""
         polymarket_api._last_request_time = 100.000
         time_values = iter([100.500, 100.500])
+        mock_sleep = MagicMock()
+        fake_time = _fake_time_module(time_values, mock_sleep)
 
-        with patch("polymarket_api.time.time", side_effect=lambda: next(time_values)), \
-             patch("polymarket_api.time.sleep") as mock_sleep:
+        with patch.object(polymarket_api, "time", fake_time):
             _rate_limit()
 
         mock_sleep.assert_not_called()
@@ -152,31 +173,40 @@ class TestRateLimitMultiThread:
         section: each call observes a _last_request_time at least as recent
         as the previous call's update."""
         observed_last_times: list[float] = []
+        clock_lock = threading.Lock()
 
         # Counter advances by MIN_REQUEST_INTERVAL each time time.time() is
         # consulted, so every thread sees a strictly increasing clock.
         clock = [100.000]
 
         def fake_time():
-            clock[0] += MIN_REQUEST_INTERVAL
-            return clock[0]
+            with clock_lock:
+                clock[0] += MIN_REQUEST_INTERVAL
+                return clock[0]
 
         # We only want to verify ordering, not actually sleep.
         def fake_sleep(_):
             pass
 
+        fake_time_mod = MagicMock()
+        fake_time_mod.time = fake_time
+        fake_time_mod.sleep = fake_sleep
+
         def worker():
-            with patch("polymarket_api.time.time", side_effect=fake_time), \
-                 patch("polymarket_api.time.sleep", side_effect=fake_sleep):
-                _rate_limit()
-                observed_last_times.append(polymarket_api._last_request_time)
+            _rate_limit()
+            observed_last_times.append(polymarket_api._last_request_time)
 
         polymarket_api._last_request_time = 0
-        threads = [threading.Thread(target=worker) for _ in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5)
+        # Apply the time-module patch outside the worker so all threads
+        # share one consistent fake. Patching inside the worker thread
+        # creates a race where the patch may not apply by the time the
+        # worker calls _rate_limit() on a fast CI runner.
+        with patch.object(polymarket_api, "time", fake_time_mod):
+            threads = [threading.Thread(target=worker) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
 
         # Every thread must have seen a strictly increasing timestamp ≥
         # MIN_REQUEST_INTERVAL apart, proving they were serialised.
@@ -188,13 +218,22 @@ class TestRateLimitMultiThread:
     def test_total_time_scales_with_thread_count(self):
         """N concurrent _rate_limit calls must result in N total
         sleep-or-update cycles — i.e. each thread executes the critical
-        section exactly once and the lock prevents any from being skipped."""
+        section exactly once and the lock prevents any from being skipped.
+
+        Mirrors test_sleeps_when_called_too_quickly's pattern of swapping
+        the entire ``polymarket_api.time`` reference rather than patching
+        sub-attributes, so the mock is fully scoped to this test.
+        """
         sleep_calls: list[float] = []
         lock = threading.Lock()
         clock = [100.000]
 
         def fake_time():
             with lock:
+                # Each tick advances the clock by 1ms — each thread sees a
+                # fresh _last_request_time + 1ms when it enters the
+                # critical section, so it always finds the limiter "hot"
+                # and calls sleep before updating _last_request_time.
                 clock[0] += 0.001
                 return clock[0]
 
@@ -202,19 +241,21 @@ class TestRateLimitMultiThread:
             with lock:
                 sleep_calls.append(d)
 
+        fake_time_mod = MagicMock()
+        fake_time_mod.time = fake_time
+        fake_time_mod.sleep = fake_sleep
+
         polymarket_api._last_request_time = 100.000
 
-        def worker():
-            with patch("polymarket_api.time.time", side_effect=fake_time), \
-                 patch("polymarket_api.time.sleep", side_effect=fake_sleep):
-                _rate_limit()
-
-        num_threads = 5
-        threads = [threading.Thread(target=worker) for _ in range(num_threads)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5)
+        with patch.object(polymarket_api, "time", fake_time_mod):
+            num_threads = 5
+            threads = [
+                threading.Thread(target=_rate_limit) for _ in range(num_threads)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
 
         # Every thread that found the limiter "hot" should have called sleep.
         # At minimum, num_threads-1 calls would have to wait (one might have

@@ -557,7 +557,12 @@ BACKTEST_INITIAL_BALANCE = _env_float("BACKTEST_INITIAL_BALANCE", "1000.0")
 _dashboard_port_default = os.getenv("PORT", "0")
 DASHBOARD_PORT = _env_int("DASHBOARD_PORT", _dashboard_port_default)
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
-DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "")  # empty = no auth
+DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "")  # empty = no auth (loopback only)
+# Bind interface for the dashboard HTTP server. Default is loopback so
+# accidentally leaving DASHBOARD_PASS empty does not expose an unauth
+# server. Production deploys (Railway, Docker) must set both
+# DASHBOARD_HOST=0.0.0.0 and DASHBOARD_PASS=<secret>.
+DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_REFRESH_SECONDS = _env_int("DASHBOARD_REFRESH_SECONDS", "15")
 
 # ---------------------------------------------------------------------------
@@ -583,6 +588,10 @@ DEPTH_FETCH_WORKERS = _env_int("DEPTH_FETCH_WORKERS", "8")
 
 # Market title truncation length (for display and DB storage)
 MARKET_TITLE_MAX_LEN = _env_int("MARKET_TITLE_MAX_LEN", "60")
+
+# Resolution sniping — how close to settlement a market must be (in hours)
+# before _is_near_resolution() flags it as a candidate. Default 48h.
+RESOLUTION_SNIPE_WINDOW_HOURS = _env_float("RESOLUTION_SNIPE_WINDOW_HOURS", "48")
 
 # Dashboard query limits
 DASHBOARD_RECENT_TRADES_LIMIT = _env_int("DASHBOARD_RECENT_TRADES_LIMIT", "100")
@@ -811,10 +820,18 @@ def validate_config() -> list[str]:
         )
 
     # --- Dashboard checks ---
+    _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
     if DASHBOARD_PORT > 0 and not DASHBOARD_PASS:
+        if DASHBOARD_HOST not in _LOOPBACK_HOSTS:
+            raise ConfigError(
+                f"DASHBOARD_HOST={DASHBOARD_HOST!r} binds to a non-loopback "
+                f"interface but DASHBOARD_PASS is empty. Either set "
+                f"DASHBOARD_PASS to a strong secret or set DASHBOARD_HOST "
+                f"to 127.0.0.1 / localhost / ::1 for loopback-only access."
+            )
         warnings.append(
             "DASHBOARD_PORT is set but DASHBOARD_PASS is empty — "
-            "dashboard has no authentication"
+            "dashboard is loopback-only with no authentication"
         )
 
     # --- Platform whitelist validation ---
@@ -828,6 +845,18 @@ def validate_config() -> list[str]:
             f"ENABLED_EXECUTION_PLATFORMS contains unknown platforms: "
             f"{', '.join(sorted(unknown))}. "
             f"Valid: {', '.join(sorted(_VALID_PLATFORMS))}"
+        )
+
+    # SX Bet quarantine — place_order() sends unsigned JSON and is rejected by
+    # the API. Detection-only (DRY_RUN=true) is fine; live trading is not.
+    # Real fix is implementing EIP-712 signing — separate future PR.
+    if "sxbet" in ENABLED_EXECUTION_PLATFORMS and not DRY_RUN:
+        raise ConfigError(
+            "SX Bet is in ENABLED_EXECUTION_PLATFORMS with DRY_RUN=false, but "
+            "SX Bet trading is not yet implemented (place_order() sends "
+            "unsigned JSON; orders are rejected by the API). Either set "
+            "DRY_RUN=true for detection-only, or remove sxbet from "
+            "ENABLED_EXECUTION_PLATFORMS."
         )
 
     # --- Strategy-specific validation (Phase 8) ---
