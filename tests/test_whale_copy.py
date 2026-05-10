@@ -4,7 +4,7 @@ import sys
 import os
 import time
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 from eth_abi import encode as abi_encode
 from eth_utils import keccak
 
@@ -41,11 +41,14 @@ else:
     sys.modules.pop("polygonscan_api", None)
 
 
-@pytest.fixture(autouse=True)
-def cleanup_modules():
-    """Remove scans.whale_copy from sys.modules to prevent test pollution."""
-    yield
-    sys.modules.pop("scans.whale_copy", None)
+# Note: an autouse ``cleanup_modules`` fixture used to pop
+# ``scans.whale_copy`` from sys.modules between tests. It was removed in
+# PR D because (a) the polymarket_api / polygonscan_api MagicMocks are
+# already restored at module load (above), so there's no remaining
+# pollution to clean up, and (b) popping the module made
+# ``patch("scans.whale_copy....")`` race against re-imports — see the
+# stability note in tests/test_time_decay_refiner.py for the full
+# rationale.
 
 
 # Build a real fillOrder calldata fixture so _parse_clob_transaction's
@@ -171,6 +174,21 @@ class TestTransactionParsing:
 # ---------------------------------------------------------------------------
 
 
+# Stage 2 in PR D fetches a live CLOB ask via ``polymarket_api.fetch_order_book``.
+# Tests that exercise the full ``scan_whale_copy`` path patch the CLOB fetch
+# rather than the refiner itself — patching ``_refine_whale_copy_with_prices``
+# proved order-dependent under the full suite (other test files bind an early
+# reference to ``scan_whale_copy`` that the patch doesn't reach).
+_FAKE_BOOK = {
+    "best_ask": 0.41, "best_bid": 0.39,
+    "best_ask_size": 200.0, "best_bid_size": 200.0,
+}
+
+
+def _fake_fetch_order_book(_token_id):
+    return _FAKE_BOOK
+
+
 class TestScanStage1:
     """Test Stage 1: whale transaction polling."""
 
@@ -179,8 +197,9 @@ class TestScanStage1:
         client.get_latest_transactions.return_value = [
             _make_tx(hash_val="0xfound", to=POLYMARKET_CLOB_ADDRESS),
         ]
-        with patch("scans.whale_copy._refine_whale_copy_with_prices", side_effect=lambda x: x):
-            result = scan_whale_copy(["0xwhale1"], client)
+        result = scan_whale_copy(
+            ["0xwhale1"], client, fetch_order_book=_fake_fetch_order_book,
+        )
         assert len(result) == 1
         assert result[0]["_whale_tx_hash"] == "0xfound"
 
@@ -189,8 +208,9 @@ class TestScanStage1:
         client.get_latest_transactions.return_value = [
             _make_tx(),
         ]
-        with patch("scans.whale_copy._refine_whale_copy_with_prices", side_effect=lambda x: x):
-            result = scan_whale_copy(["0xwhale1"], client)
+        result = scan_whale_copy(
+            ["0xwhale1"], client, fetch_order_book=_fake_fetch_order_book,
+        )
         opp = result[0]
         for key in ["type", "market", "_whale_address", "_whale_tx_hash",
                      "_whale_timestamp", "_whale_block", "_market_key", "_layer"]:
@@ -211,8 +231,11 @@ class TestScanStage1:
             _make_tx(block="500", to=POLYMARKET_CLOB_ADDRESS),
         ]
         cache = {}
-        with patch("scans.whale_copy._refine_whale_copy_with_prices", side_effect=lambda x: x):
-            scan_whale_copy(["0xwhale1"], client, last_block_cache=cache)
+        scan_whale_copy(
+            ["0xwhale1"], client,
+            last_block_cache=cache,
+            fetch_order_book=_fake_fetch_order_book,
+        )
         assert cache["0xwhale1"] == 500
 
     def test_graceful_degradation_network_error(self):
@@ -227,8 +250,9 @@ class TestScanStage1:
             _make_tx(hash_val="0xclob", to=POLYMARKET_CLOB_ADDRESS),
             _make_tx(hash_val="0xother", to="0xSomeOtherContract"),
         ]
-        with patch("scans.whale_copy._refine_whale_copy_with_prices", side_effect=lambda x: x):
-            result = scan_whale_copy(["0xwhale1"], client)
+        result = scan_whale_copy(
+            ["0xwhale1"], client, fetch_order_book=_fake_fetch_order_book,
+        )
         assert len(result) == 1
         assert result[0]["_whale_tx_hash"] == "0xclob"
 
@@ -251,12 +275,30 @@ class TestRefinementStage2:
         assert len(result) == 0
 
     def test_keeps_fresh_trades(self):
+        # Post-PR-D: refiner needs decoded fields + a CLOB fetcher. Provide
+        # both so this legacy latency-only test still exercises the path.
         opp = {
             "type": "WhaleCopy",
             "_whale_timestamp": int(time.time()) - 5,  # 5s ago
-            "_market_key": "test",
+            "_market_key": "12345",
+            "_whale_method": "fillOrder",
+            "_whale_token_id": "12345",
+            "_whale_side": "BUY",
+            "_whale_price": 0.40,
+            "_whale_size": 5.0,
         }
-        result = _refine_whale_copy_with_prices([opp])
+        fake_book = {
+            "best_ask": 0.41,
+            "best_bid": 0.39,
+            "best_ask_size": 200.0,
+            "best_bid_size": 200.0,
+        }
+        result = _refine_whale_copy_with_prices(
+            [opp],
+            fetch_order_book=lambda _: fake_book,
+            min_liquidity=10.0,
+            max_trade_size=15.0,
+        )
         assert len(result) == 1
 
     def test_handles_empty_list(self):
