@@ -2,8 +2,9 @@
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .helpers import capital_efficiency_score
+from .helpers import capital_efficiency_score, _fetch_clob_for_market
 
 logger = logging.getLogger(__name__)
 
@@ -156,49 +157,149 @@ def _refine_time_decay_with_prices(
     opportunities: list[dict],
     current_prices: dict | None = None,
     current_time: float | None = None,
+    markets_by_key: dict | None = None,
+    signal_aggregator=None,
+    price_cache: dict | None = None,
+    min_consensus: float = 0.90,
 ) -> list[dict]:
-    """Stage 2: Re-validate time decay opportunities against current prices and time.
+    """Stage 2: Re-validate time decay opportunities against live data.
+
+    First-class refinement (PR B): re-fetch CLOB asks for the
+    Polymarket-side market, re-fetch the current consensus, and re-check
+    hours-to-expiry against the live ``resolutionSource.timestamp``. Falls
+    back to the legacy stored-price behaviour when ``markets_by_key`` is
+    not provided so existing call sites keep working.
 
     Drops opportunities where:
-    - Current price has risen significantly above buy_below_price (opportunity closed)
     - Hours to expiry has dropped below 1 hour (too late to enter)
+    - Live ask price >= target (no profitable convergence left)
+    - Live consensus has fallen below ``min_consensus`` (signal decayed)
+    - Sentiment has flipped (consensus side no longer matches Stage 1)
 
     Args:
         opportunities: List of opportunity dicts from Stage 1.
-        current_prices: Optional dict of market_key -> current_price.
+        current_prices: Legacy dict of market_key -> current_price.
         current_time: Optional current timestamp (defaults to time.time()).
+        markets_by_key: Optional dict of market_key -> market dict. When
+            provided, refiner re-fetches CLOB asks for each market in
+            parallel (mirrors the canonical pattern from
+            ``scans/cross.py:_refine_cross_with_clob``).
+        signal_aggregator: Optional aggregator with ``get_consensus()``
+            for live consensus refresh.
+        price_cache: Optional WS price cache passed through to
+            ``_fetch_clob_for_market``.
+        min_consensus: Minimum consensus to retain after refinement.
 
     Returns:
         Refined list of opportunities still meeting criteria.
     """
+    if not opportunities:
+        return opportunities
+
     if not current_prices:
         current_prices = {}
 
     if current_time is None:
         current_time = time.time()
 
-    refined = []
+    # Parallel CLOB ask refresh — only when markets_by_key is supplied.
+    clob_results: dict = {}
+    if markets_by_key:
+        fetch_tasks = {}
+        for opp in opportunities:
+            mk = opp.get("market_key")
+            market = markets_by_key.get(mk) if mk else None
+            if market is not None and mk not in fetch_tasks:
+                fetch_tasks[mk] = market
 
+        if fetch_tasks:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {
+                    pool.submit(_fetch_clob_for_market, m, price_cache): mk
+                    for mk, m in fetch_tasks.items()
+                }
+                for future in as_completed(futures):
+                    mk = futures[future]
+                    try:
+                        _, clob = future.result()
+                        clob_results[mk] = clob
+                    except Exception as e:
+                        logger.debug("TimeDecay CLOB fetch failed for %s: %s", mk, e)
+                        clob_results[mk] = None
+
+    refined: list[dict] = []
     for opp in opportunities:
         market_key = opp.get("market_key")
+        market = markets_by_key.get(market_key) if markets_by_key else None
 
-        # Re-check expiry time hasn't dropped below 1 hour
-        resolution_ts = None  # Would need to be passed in or stored in opp
-        # For now, use the stored _hours_to_expiry as a proxy
-        # In practice, executor would re-fetch current prices and times
-        if opp.get("_hours_to_expiry", 0) < 1.0:
-            logger.debug("TimeDecay refined: %s expired (<1h remaining)", market_key)
+        # Re-check hours-to-expiry from live resolution timestamp when available.
+        live_hours_left = opp.get("_hours_to_expiry", 0.0)
+        if market is not None:
+            resolution_ts = market.get("resolutionSource", {}).get("timestamp")
+            if isinstance(resolution_ts, (int, float)):
+                live_hours_left = (resolution_ts - current_time) / 3600.0
+                opp["_hours_to_expiry"] = live_hours_left
+
+        if live_hours_left < 1.0:
+            logger.debug("TimeDecay dropped: %s expired (<1h remaining)", market_key)
             continue
 
-        # Re-check current price hasn't risen above threshold
-        current_price = current_prices.get(market_key, opp.get("_current_price"))
-        if current_price is not None and current_price >= opp.get("_target_price", 0.95):
-            logger.debug("TimeDecay refined: %s price rise %.2f >= target %.2f",
-                        market_key, current_price, opp.get("_target_price"))
+        # Re-fetch live consensus if a signal aggregator is provided.
+        if signal_aggregator is not None and market_key:
+            try:
+                consensus_data = signal_aggregator.get_consensus(market_key)
+            except Exception as e:
+                logger.debug("TimeDecay consensus refresh failed for %s: %s", market_key, e)
+                consensus_data = None
+
+            if consensus_data is not None:
+                live_prob = (
+                    consensus_data.get("probability")
+                    if isinstance(consensus_data, dict)
+                    else consensus_data
+                )
+                if isinstance(live_prob, (int, float)):
+                    if live_prob < min_consensus:
+                        logger.debug("TimeDecay dropped: %s consensus %.2f < %.2f",
+                                    market_key, live_prob, min_consensus)
+                        continue
+                    live_side = "YES" if live_prob >= 0.50 else "NO"
+                    if opp.get("_consensus_side") and live_side != opp["_consensus_side"]:
+                        logger.debug("TimeDecay dropped: %s consensus side flipped %s->%s",
+                                    market_key, opp.get("_consensus_side"), live_side)
+                        continue
+                    opp["_consensus_prob"] = live_prob
+
+        # Live ask comparison from CLOB — falls back to current_prices/stored.
+        live_ask = None
+        clob = clob_results.get(market_key) if market_key else None
+        if clob:
+            consensus_side = opp.get("_consensus_side", "YES")
+            live_ask = clob.get("yes_ask") if consensus_side == "YES" else clob.get("no_ask")
+            if live_ask is None:
+                # Fall back to bid + 0.01 if ask is missing (matches cross.py)
+                bid_key = "yes_bid" if consensus_side == "YES" else "no_bid"
+                bid = clob.get(bid_key)
+                if bid is not None:
+                    live_ask = bid + 0.01
+                    opp["_partial_clob"] = True
+            if live_ask is not None:
+                opp["_current_price"] = live_ask
+                opp["_clob_depth"] = clob.get(
+                    "yes_ask_size" if consensus_side == "YES" else "no_ask_size", 0
+                ) or 0
+
+        if live_ask is None:
+            live_ask = current_prices.get(market_key, opp.get("_current_price"))
+
+        target_price = opp.get("_target_price", 0.95)
+        if live_ask is not None and live_ask >= target_price:
+            logger.debug("TimeDecay dropped: %s ask %.3f >= target %.3f",
+                        market_key, live_ask, target_price)
             continue
 
         refined.append(opp)
 
-    logger.info("TimeDecay refined: %d/%d still profitable at current prices",
+    logger.info("TimeDecay refined: %d/%d still profitable at live prices",
                 len(refined), len(opportunities))
     return refined

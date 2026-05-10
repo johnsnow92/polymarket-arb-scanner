@@ -2,7 +2,11 @@
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from thefuzz import fuzz
+
+from .helpers import _fetch_clob_for_market
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +152,8 @@ def extract_news_signals(
             if sentiment_result["sentiment"] is None:
                 continue
 
-            # Record signal
+            # Record signal — keep the headline timestamp so Stage 2 can
+            # drop signals older than NEWS_SNIPE_MAX_AGE_MINUTES.
             signal = {
                 "type": "NewsSnipe",
                 "market": market.get("question", ""),
@@ -156,6 +161,7 @@ def extract_news_signals(
                 "_sentiment": sentiment_result["sentiment"],
                 "_confidence": sentiment_result["confidence"],
                 "_market_key": market_key,
+                "_news_timestamp": headline.get("datetime"),
             }
             signals.append(signal)
             logger.info(
@@ -203,48 +209,137 @@ def _refine_news_with_confidence(
     opportunities: list[dict],
     confidence_floor: float = 0.5,
     cooldown_cache: dict | None = None,
+    markets_by_key: dict | None = None,
+    price_cache: dict | None = None,
+    max_age_minutes: int | None = None,
+    current_time: float | None = None,
 ) -> list[dict]:
-    """Stage 2: Refine news snipe opportunities by confidence threshold.
+    """Stage 2: First-class refinement of news snipe opportunities.
 
-    Filters out low-confidence matches and applies cooldown logic.
+    Filters in this order:
+    1. Confidence below floor (existing behaviour)
+    2. Cooldown active for this market (existing behaviour)
+    3. Headline staleness — drop if older than ``max_age_minutes``
+    4. CLOB ask already crossed — drop if the market has moved past the
+       sentiment direction (e.g. YES sentiment but ask already > 0.50, or
+       NO sentiment but ask already < 0.50). Reuses
+       ``scans.helpers._fetch_clob_for_market`` parallel pattern from
+       ``scans/cross.py:_refine_cross_with_clob``.
 
     Args:
-        opportunities: List of opportunities from stage 1.
-        confidence_floor: Minimum confidence to keep (default 0.5).
+        opportunities: Stage 1 signals.
+        confidence_floor: Minimum confidence to keep.
         cooldown_cache: Dict tracking market_key -> last_execution_time.
+        markets_by_key: Optional Polymarket market lookup. When supplied,
+            triggers parallel CLOB ask re-fetch.
+        price_cache: WS price cache passed through to the helper.
+        max_age_minutes: Optional override for staleness window
+            (defaults to ``config.NEWS_SNIPE_MAX_AGE_MINUTES``).
+        current_time: Optional fixed timestamp for deterministic tests.
 
     Returns:
         Refined list of opportunities.
     """
+    if not opportunities:
+        return opportunities
+
     if cooldown_cache is None:
         cooldown_cache = {}
 
-    refined = []
-    current_time = time.time()
+    if current_time is None:
+        current_time = time.time()
 
+    if max_age_minutes is None:
+        from config import NEWS_SNIPE_MAX_AGE_MINUTES
+        max_age_minutes = int(NEWS_SNIPE_MAX_AGE_MINUTES)
+    max_age_seconds = int(max_age_minutes) * 60
+
+    # Parallel CLOB fetch when markets are available.
+    clob_results: dict = {}
+    if markets_by_key:
+        fetch_tasks = {}
+        for opp in opportunities:
+            mk = opp.get("_market_key")
+            market = markets_by_key.get(mk) if mk else None
+            if market is not None and mk not in fetch_tasks:
+                fetch_tasks[mk] = market
+
+        if fetch_tasks:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {
+                    pool.submit(_fetch_clob_for_market, m, price_cache): mk
+                    for mk, m in fetch_tasks.items()
+                }
+                for future in as_completed(futures):
+                    mk = futures[future]
+                    try:
+                        _, clob = future.result()
+                        clob_results[mk] = clob
+                    except Exception as e:
+                        logger.debug("NewsSnipe CLOB fetch failed for %s: %s", mk, e)
+                        clob_results[mk] = None
+
+    refined: list[dict] = []
     for opp in opportunities:
         confidence = opp.get("_confidence", 0.0)
 
-        # Filter by confidence threshold
+        # 1. Confidence floor.
         if confidence < confidence_floor:
             logger.info(
-                "Rejected opportunity: confidence %.2f < %.2f threshold",
-                confidence,
-                confidence_floor,
+                "NewsSnipe dropped: confidence %.2f < %.2f floor",
+                confidence, confidence_floor,
             )
             continue
 
-        # Check cooldown
         market_key = opp.get("_market_key", "")
+
+        # 2. Cooldown.
         if market_key in cooldown_cache:
             if cooldown_cache[market_key] > current_time:
-                logger.info("Opportunity on cooldown: %s", market_key)
+                logger.info("NewsSnipe dropped: %s on cooldown", market_key)
+                continue
+
+        # 3. Headline freshness.
+        news_ts = opp.get("_news_timestamp")
+        if isinstance(news_ts, (int, float)) and news_ts > 0:
+            age_sec = current_time - float(news_ts)
+            if age_sec > max_age_seconds:
+                logger.info(
+                    "NewsSnipe dropped: %s headline age %.0fs > %ds (%.0f min cap)",
+                    market_key, age_sec, max_age_seconds, max_age_minutes,
+                )
+                continue
+
+        # 4. Live CLOB ask check — drop if the market has already priced in
+        #    the direction implied by the news sentiment.
+        clob = clob_results.get(market_key) if market_key else None
+        if clob:
+            sentiment = (opp.get("_sentiment") or "").upper()
+            yes_ask = clob.get("yes_ask")
+            no_ask = clob.get("no_ask")
+            opp["_clob_yes_ask"] = yes_ask
+            opp["_clob_no_ask"] = no_ask
+
+            # If YES sentiment but the YES ask is already >= 0.50, we'd be
+            # buying after the news has already moved the market. Same logic
+            # mirrored for NO. This is a coarse but informative gate.
+            if sentiment == "YES" and yes_ask is not None and yes_ask >= 0.50:
+                logger.info(
+                    "NewsSnipe dropped: %s YES sentiment but YES ask %.3f already >= 0.50",
+                    market_key, yes_ask,
+                )
+                continue
+            if sentiment == "NO" and no_ask is not None and no_ask >= 0.50:
+                logger.info(
+                    "NewsSnipe dropped: %s NO sentiment but NO ask %.3f already >= 0.50",
+                    market_key, no_ask,
+                )
                 continue
 
         refined.append(opp)
 
     logger.info(
-        "News refined: %d/%d opportunities passed confidence threshold",
+        "NewsSnipe refined: %d/%d opportunities passed all gates",
         len(refined),
         len(opportunities),
     )
