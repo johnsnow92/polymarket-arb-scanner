@@ -167,19 +167,21 @@ class TestSmarketsOrders:
 
     def test_place_order_conversion(self, client):
         """Price → basis points, quantity → cents in JSON body."""
-        client.session.post.return_value = MagicMock(
+        # PR G: place_order routes through session.request (was session.post)
+        # so 429 retries + circuit breaker apply.
+        client.session.request.return_value = MagicMock(
             status_code=200,
             json=lambda: {"order_id": "ord1"},
         )
         result = client.place_order("m1", "c1", "buy", 0.55, 10.0)
         assert result == {"order_id": "ord1"}
-        body = client.session.post.call_args.kwargs["json"]
+        body = client.session.request.call_args.kwargs["json"]
         assert body["price"] == "5500"      # 0.55 * 10000
         assert body["quantity"] == "1000"    # 10.0 * 100
 
     def test_place_order_failure(self, client):
         """Non-200/201 status returns None."""
-        client.session.post.return_value = MagicMock(
+        client.session.request.return_value = MagicMock(
             status_code=400, text="bad request",
         )
         assert client.place_order("m1", "c1", "buy", 0.5, 5) is None
@@ -194,13 +196,16 @@ class TestSmarketsOrders:
         assert result["state"] == "live"
 
     def test_cancel_order_success(self, client):
-        """204 response → True."""
-        client.session.delete.return_value = MagicMock(status_code=204)
+        """204 response → True. PR G: cancel_order routes through
+        session.request so circuit breaker applies."""
+        client.session.request.return_value = MagicMock(status_code=204)
         assert client.cancel_order("ord1") is True
 
     def test_cancel_order_failure(self, client):
         """404 response → False."""
-        client.session.delete.return_value = MagicMock(status_code=404)
+        client.session.request.return_value = MagicMock(
+            status_code=404, text="not found",
+        )
         assert client.cancel_order("ord1") is False
 
     def test_get_balance(self, client):

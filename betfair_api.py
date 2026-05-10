@@ -111,12 +111,23 @@ class BetfairClient:
         retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout, _RateLimitError)),
         reraise=True,
     )
-    def _request(self, endpoint: str, params: dict = None) -> dict | None:
+    def _request(
+        self,
+        endpoint: str,
+        params: dict | None = None,
+        body: dict | None = None,
+    ) -> dict | None:
         """Make an authenticated request to the Betfair Exchange API.
 
         Args:
             endpoint: API endpoint name (e.g. 'listEventTypes').
-            params: JSON-RPC filter parameters.
+            params: JSON-RPC filter parameters. Used only when ``body`` is
+                None — the helper wraps ``params`` as ``{"filter": params}``,
+                matching the Betfair Exchange list* convention.
+            body: Optional fully-formed JSON body. When supplied, it is sent
+                verbatim, bypassing the ``{"filter": ...}`` wrapper. Used by
+                non-list endpoints like placeOrders / cancelOrders that have
+                their own request schema.
 
         Returns:
             Response data or None on failure.
@@ -129,9 +140,10 @@ class BetfairClient:
             raise _RateLimitError("Circuit open -- betfair in backoff")
         _rate_limit()
         try:
+            payload = body if body is not None else {"filter": params or {}}
             resp = self.session.post(
                 f"{BETFAIR_EXCHANGE_URL}/{endpoint}/",
-                json={"filter": params or {}},
+                json=payload,
                 timeout=30,
             )
             if resp.status_code == 200:
@@ -247,6 +259,10 @@ class BetfairClient:
     def place_orders(self, market_id: str, instructions: list[dict]) -> dict | None:
         """Place orders on a Betfair market.
 
+        Routed through ``self._request`` so 429/timeout retries and the
+        rate-limit circuit breaker apply (PR G fix — previously this
+        method bypassed both via a direct ``self.session.post``).
+
         Args:
             market_id: Betfair market ID.
             instructions: List of order instruction dicts, each with:
@@ -256,34 +272,24 @@ class BetfairClient:
                 - limitOrder: {size, price, persistenceType}
 
         Returns:
-            Place orders response or None on failure.
+            Place orders response (with ``status='SUCCESS'``) or None on
+            failure (covers HTTP error, retried-out 429, or
+            non-SUCCESS status from a 200 response).
         """
-        if not self.authenticated:
-            logger.error("Betfair: must login before placing orders")
+        data = self._request(
+            "placeOrders",
+            body={"marketId": market_id, "instructions": instructions},
+        )
+        if not data:
             return None
-
-        _rate_limit()
-        try:
-            resp = self.session.post(
-                f"{BETFAIR_EXCHANGE_URL}/placeOrders/",
-                json={
-                    "marketId": market_id,
-                    "instructions": instructions,
-                },
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                status = data.get("status")
-                if status == "SUCCESS":
-                    return data
-                logger.error("Betfair place_orders failed: %s", data.get('errorCode', 'unknown'))
-                return None
-            logger.error("Betfair place_orders: %s %s", resp.status_code, resp.text[:200])
-            return None
-        except requests.RequestException as e:
-            logger.error("Betfair place_orders failed: %s", e)
-            return None
+        status = data.get("status")
+        if status == "SUCCESS":
+            return data
+        logger.error(
+            "Betfair place_orders non-SUCCESS: %s",
+            data.get("errorCode", "unknown"),
+        )
+        return None
 
     def get_current_orders(self) -> list[dict]:
         """Get all current unmatched orders.
