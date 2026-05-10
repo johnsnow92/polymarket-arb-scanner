@@ -3,6 +3,12 @@
 import logging
 import time
 
+from whale_copy_decoder import (
+    CalldataDecodeError,
+    decode_calldata,
+    extract_whale_trade,
+)
+
 logger = logging.getLogger(__name__)
 
 # Polymarket CLOB contract address on Polygon chain
@@ -20,9 +26,19 @@ WHALE_COPY_LATENCY_BUDGET_SECONDS = 30
 def _parse_clob_transaction(tx: dict, whale_address: str) -> dict | None:
     """Extract trade details from a CLOB contract transaction.
 
-    Converts a Polygonscan transaction dict into an opportunity dict.
-    Current implementation is simplified (MVP): decodes basic fields.
-    Full calldata parsing (extracting trade direction/size) deferred to Phase 10.
+    Decodes the transaction's calldata via ``whale_copy_decoder`` to surface
+    the whale's effective trade direction, token ID, size, and price for
+    every supported CTF Exchange method:
+
+    - ``fillOrder`` — populates ``_whale_side``, ``_whale_token_id``,
+      ``_whale_size``, ``_whale_price``, and ``_whale_role``.
+    - ``fillOrders`` / ``matchOrders`` — opportunity is tagged with
+      ``_whale_method`` and the raw decoded args; per-order extraction
+      is left to downstream consumers (the order list can be large).
+    - ``cancelOrder`` / ``cancelOrders`` — returns ``None`` (cancels are
+      not copy-tradeable signals).
+    - Calldata that doesn't match a known method — returns ``None``
+      (e.g. random ERC20 transfers misrouted to the contract).
 
     Args:
         tx: Transaction dict from Polygonscan with keys:
@@ -35,22 +51,79 @@ def _parse_clob_transaction(tx: dict, whale_address: str) -> dict | None:
         whale_address: The whale wallet address that initiated the trade.
 
     Returns:
-        Opportunity dict with type="WhaleCopy", or None if not a valid trade.
+        Opportunity dict with type="WhaleCopy", or None if not a valid
+        copy-tradeable signal.
     """
     # Verify this is a successful transaction (not a revert)
     if tx.get("isError") == "1":
         return None
 
-    return {
+    tx_hash = tx.get("hash")
+    base_opp: dict = {
         "type": "WhaleCopy",
-        "market": f"Whale trade from {whale_address[:8]}... at block {tx.get('blockNumber')}",
         "_whale_address": whale_address,
-        "_whale_tx_hash": tx.get("hash"),
+        "_whale_tx_hash": tx_hash,
         "_whale_timestamp": int(tx.get("timeStamp", 0)),
         "_whale_block": int(tx.get("blockNumber", 0)),
-        "_market_key": tx.get("hash"),  # Use tx hash as unique market key
+        "_market_key": tx_hash,  # tx hash is unique per CTF call
         "_layer": 4,
     }
+
+    raw_input = tx.get("input")
+    try:
+        decoded = decode_calldata(raw_input)
+    except CalldataDecodeError as e:
+        logger.debug("WhaleCopy: malformed calldata for tx %s: %s", tx_hash, e)
+        return None
+
+    if decoded is None:
+        # Calldata doesn't match any known CTF Exchange method — skip.
+        return None
+
+    method = decoded.get("method")
+    base_opp["_whale_method"] = method
+
+    if method in ("cancelOrder", "cancelOrders"):
+        # Cancels are not copy-tradeable; surface them only at debug level.
+        logger.debug("WhaleCopy: skipping %s tx %s", method, tx_hash)
+        return None
+
+    if method == "fillOrder":
+        trade = extract_whale_trade(decoded, whale_address)
+        if trade is None:
+            return None
+        base_opp.update({
+            "_whale_role": trade["whale_role"],
+            "_whale_side": trade["whale_side"],
+            "_whale_token_id": trade["token_id"],
+            "_whale_size": trade["token_amount"],
+            "_whale_price": trade["price"],
+            "_whale_counterparty": trade["maker_address"],
+            "_fill_amount_raw": trade["fill_amount_raw"],
+        })
+        base_opp["market"] = (
+            f"Whale {trade['whale_side']} token {trade['token_id'][:12]}... "
+            f"size={trade['token_amount']:.2f} @ {trade.get('price') or 0:.3f}"
+        )
+        # Use token_id as the market key so cross-platform pairing can match.
+        base_opp["_market_key"] = trade["token_id"]
+        return base_opp
+
+    # fillOrders / matchOrders — surface aggregate metadata for downstream
+    # callers to iterate. We do not collapse multi-order calls here because
+    # each maker order may target a different market.
+    args = decoded.get("args", {})
+    if method == "fillOrders":
+        order_count = len(args.get("orders", []))
+    else:  # matchOrders
+        order_count = len(args.get("makerOrders", [])) + 1
+    base_opp["_whale_order_count"] = order_count
+    base_opp["_decoded_args"] = args
+    base_opp["market"] = (
+        f"Whale {method} ({order_count} orders) from {whale_address[:8]}... "
+        f"at block {tx.get('blockNumber')}"
+    )
+    return base_opp
 
 
 def scan_whale_copy(

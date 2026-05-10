@@ -5,6 +5,8 @@ import os
 import time
 import pytest
 from unittest.mock import patch, MagicMock
+from eth_abi import encode as abi_encode
+from eth_utils import keccak
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -46,22 +48,70 @@ def cleanup_modules():
     sys.modules.pop("scans.whale_copy", None)
 
 
+# Build a real fillOrder calldata fixture so _parse_clob_transaction's
+# decoder produces a populated opportunity dict. Pre-PR-C tests just
+# stuffed "0x12345678" into ``input``; that no longer survives the
+# decoder, which correctly returns None for unknown selectors.
+_ORDER_TUPLE = (
+    "(uint256,address,address,address,uint256,uint256,"
+    "uint256,uint256,uint256,uint256,uint8,uint8,bytes)"
+)
+_FILL_ORDER_SIG = f"fillOrder({_ORDER_TUPLE},uint256)"
+_FILL_ORDER_SELECTOR = keccak(text=_FILL_ORDER_SIG)[:4]
+
+
+def _build_fillorder_calldata(
+    *,
+    maker: str = "0x" + "aa" * 20,
+    side: int = 1,  # SELL — whale (taker) will be inferred as BUY
+    token_id: int = 0xCAFEBABE,
+    maker_amount: int = 200_000_000,
+    taker_amount: int = 100_000_000,
+    fill_amount: int = 200_000_000,
+) -> str:
+    order = (
+        1,                              # salt
+        maker,                          # maker
+        maker,                          # signer
+        "0x" + "00" * 20,               # taker (zero = open)
+        token_id,
+        maker_amount,
+        taker_amount,
+        0,                              # expiration
+        0,                              # nonce
+        100,                            # feeRateBps
+        side,
+        0,                              # signatureType
+        b"",                            # signature
+    )
+    encoded_args = abi_encode([_ORDER_TUPLE, "uint256"], [order, fill_amount])
+    return "0x" + (_FILL_ORDER_SELECTOR + encoded_args).hex()
+
+
 def _make_tx(
     hash_val="0xabc123",
     block="100",
     timestamp=None,
     to=POLYMARKET_CLOB_ADDRESS,
     is_error="0",
+    input_data: str | None = None,
 ):
-    """Create a mock Polygonscan transaction dict."""
+    """Create a mock Polygonscan transaction dict.
+
+    By default the ``input`` field is a real fillOrder calldata fixture
+    so the decoder produces a populated opportunity. Pass ``input_data``
+    to override (e.g. unknown selector to test rejection).
+    """
     if timestamp is None:
         timestamp = str(int(time.time()))
+    if input_data is None:
+        input_data = _build_fillorder_calldata()
     return {
         "hash": hash_val,
         "blockNumber": block,
         "timeStamp": timestamp,
         "to": to,
-        "input": "0x12345678",
+        "input": input_data,
         "isError": is_error,
     }
 
@@ -88,10 +138,22 @@ class TestTransactionParsing:
         opp = _parse_clob_transaction(tx, "0xaddr")
         assert opp["_layer"] == 4
 
-    def test_market_key_is_tx_hash(self):
+    def test_market_key_is_decoded_token_id(self):
+        """Post-PR-C: when fillOrder decodes successfully, _market_key
+        is the token ID (so cross-platform pairing can match by market),
+        not the tx hash. Tx hash is still preserved as _whale_tx_hash."""
         tx = _make_tx(hash_val="0x999")
         opp = _parse_clob_transaction(tx, "0xaddr")
-        assert opp["_market_key"] == "0x999"
+        assert opp is not None
+        assert opp["_whale_tx_hash"] == "0x999"
+        assert opp["_market_key"] == str(0xCAFEBABE)
+        assert opp["_whale_token_id"] == str(0xCAFEBABE)
+
+    def test_returns_none_for_unknown_calldata(self):
+        """Calldata that doesn't match a known CTF method is not
+        a copy-tradeable signal — the decoder skips it cleanly."""
+        tx = _make_tx(input_data="0x12345678")
+        assert _parse_clob_transaction(tx, "0xaddr") is None
 
     def test_rejects_error_transactions(self):
         tx = _make_tx(is_error="1")
