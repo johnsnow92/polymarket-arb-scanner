@@ -9,15 +9,33 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Mock heavy upstream deps before importing the module under test.
-if "polymarket_api" not in sys.modules:
-    sys.modules["polymarket_api"] = MagicMock()
-sys.modules["polymarket_api"].get_binary_markets = lambda mkts: list(mkts) if mkts else []
+# Mock heavy upstream deps before importing the module under test, then
+# restore the original (or remove) so other test files (e.g.
+# test_polymarket_api) which need the real module are not poisoned by a
+# leftover MagicMock in sys.modules. pytest collects all test modules
+# before running any, so module-level pollution here would survive into
+# every later test file in the same run.
+_saved_polymarket_api = sys.modules.get("polymarket_api")
+_was_real_polymarket = _saved_polymarket_api is not None and not isinstance(
+    _saved_polymarket_api, MagicMock
+)
+if not _was_real_polymarket:
+    _mock_pm = MagicMock()
+    _mock_pm.get_binary_markets = lambda mkts: list(mkts) if mkts else []
+    sys.modules["polymarket_api"] = _mock_pm
 
 from cross_pair_index import (
     CrossPair, CrossPairIndex,
     _kalshi_price, _poly_ask_for_token, _read_cached_price,
 )
+
+# Restore originals so earlier-alphabetical test files are not affected.
+if _was_real_polymarket:
+    sys.modules["polymarket_api"] = _saved_polymarket_api  # type: ignore[assignment]
+elif _saved_polymarket_api is not None:
+    sys.modules["polymarket_api"] = _saved_polymarket_api  # type: ignore[assignment]
+else:
+    sys.modules.pop("polymarket_api", None)
 
 
 # ---------------------------------------------------------------------------
