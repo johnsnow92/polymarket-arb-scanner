@@ -53,8 +53,8 @@ Python CLI tool (`arbgrid`) that scans for arbitrage and trading opportunities a
 
 All original-framework strategies (#1-#20) are first-class as of the May 2026 milestone (PR #10, commit `1e5087b`). The codebase additionally implements 9 strategies that grew beyond the original framework (#21 spread detection, #22-#23 liquidity rewards, #24-#29 Layer 4 informed-trading variants). Per the v2 framework status table:
 
-- **23 BUILT** — distinct opp type, scan/detection module, executor branch, tests
-- **5 PARTIAL** — #6 (SX Bet quarantined for unsigned-JSON bug), #18 (Gemini↔Polymarket auto-corridor only by design), #20 (#tuning-loop pending), #26-#28 (incomplete refiners)
+- **22 BUILT** — distinct opp type, scan/detection module, executor branch, tests
+- **6 PARTIAL** — #6 (SX Bet quarantined for unsigned-JSON bug), #18 (Gemini↔Polymarket auto-corridor only by design), #20 (tuning-loop pending), #26-#28 (incomplete refiners)
 - **1 STUB** — #29 correlated pairs (TODO)
 
 Each first-class strategy has a feature flag defaulting to `false`. The four flags added in PR #10:
@@ -295,6 +295,10 @@ The following env vars should be set in Railway for production deployment (Railw
 
 **Dynamic Fees:**
 - `POLYGON_RPC_URL=https://polygon-rpc.com` — Polygon RPC for gas monitoring (or use Alchemy/Infura for reliability)
+
+**Dashboard (required as of PR #18):**
+- `DASHBOARD_HOST=0.0.0.0` — required for Railway's edge healthcheck to reach the container. Default in `config.py` is `127.0.0.1` (loopback) — without this override the healthcheck on `/healthz` will fail and Railway will mark the service down.
+- `DASHBOARD_PASS=<strong secret>` — required whenever `DASHBOARD_HOST` is non-loopback. `validate_config()` raises `ConfigError` at startup if the host is non-loopback and the password is empty.
 
 **Platform Credentials (all 8 trading platforms):**
 Already documented above. Ensure ALL platform credentials are set for full cross-platform coverage: `POLYMARKET_PRIVATE_KEY`, `KALSHI_API_KEY_ID`/`KALSHI_PRIVATE_KEY_PATH`, `BETFAIR_APP_KEY`/`BETFAIR_USERNAME`/`BETFAIR_PASSWORD`, `SMARKETS_API_KEY`, `SXBET_API_KEY`, `MATCHBOOK_USERNAME`/`MATCHBOOK_PASSWORD`, `GEMINI_API_KEY`/`GEMINI_API_SECRET`, `IBKR_HOST`/`IBKR_PORT`/`IBKR_CLIENT_ID`.

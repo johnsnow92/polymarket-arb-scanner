@@ -46,7 +46,7 @@ Not mathematically guaranteed, but probability of loss is very low (<5%).
 
 | # | Strategy | Status | Module | Notes |
 |---|----------|--------|--------|-------|
-| 7 | Resolution sniping | BUILT | `resolution.py` | Hardcoded 7-day resolution window (Low severity, Phase 1 fix) |
+| 7 | Resolution sniping | BUILT | `resolution.py` | Window configurable via `RESOLUTION_SNIPE_WINDOW_HOURS` (default 48h) as of PR #18 |
 | 8 | Stale price exploitation | BUILT | `stale.py` | Requires `--continuous` mode for real WS history |
 | 9 | Fee promotional arbitrage | **BUILT** ✱ | `scans/fee_promo.py` + `near_miss_cache.py` | **PR #10** — distinct `FeePromo` opp type, near-miss capture in `scans/cross.py:_refine_cross_with_clob`, calendar tracking via `*_PROMO_EXPIRES` env vars + `notifier.notify_promo_warning`. Default off (`FEE_PROMO_ENABLED=false`). |
 
@@ -108,15 +108,15 @@ Force multipliers that increase returns from all other layers.
 
 | Status | Count | Strategies |
 |--------|-------|------------|
-| BUILT | 23 | 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23, 24, 25 (22 listed; missing 1 — see below) |
-| PARTIAL | 5 | 6, 18, 20, 26, 27, 28 (six listed; #28 has High-severity sub-issue, see Group D) |
+| BUILT | 22 | 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23, 24, 25 |
+| PARTIAL | 6 | 6, 18, 20, 26, 27, 28 (#28 has High-severity sub-issue, see Group D) |
 | STUB | 1 | 29 |
 | NOT BUILT | 0 | — |
 | **Total** | **29** | |
 
-Layer breakdown unchanged: Layer 1 = 7, Layer 2 = 3, Layer 3 = 5, Layer 4 = 9, Layer 5 = 5.
+Layer breakdown: Layer 1 = 7 (1, 2, 3, 4, 5, 6, 21), Layer 2 = 3 (7, 8, 9), Layer 3 = 5 (10, 11, 12, 22, 23), Layer 4 = 9 (13, 14, 15, 24, 25, 26, 27, 28, 29), Layer 5 = 5 (16, 17, 18, 19, 20).
 
-Net change vs prior v2: +4 BUILT (#9, #11, #19 corrected, plus #18 lifted from NOT BUILT), −3 PARTIAL (#9, #11, #19 promoted), −1 NOT BUILT (#18 promoted to PARTIAL).
+Net change vs prior v2: +4 BUILT (#9, #11, #19 corrected, plus #18 lifted from NOT BUILT to PARTIAL is captured separately), −3 PARTIAL (#9, #11, #19 promoted), −1 NOT BUILT (#18 promoted to PARTIAL).
 
 ---
 
@@ -133,13 +133,13 @@ Grouped by remediation type. **Group A is now empty** — every original-framewo
 - **#29 Correlated pairs** (`correlated.py`) — TODO marker only
 
 **Group D — Platform / infrastructure issues affecting Layer 1**
-- **SX Bet `place_order()`** sends unsigned JSON — non-functional (High severity)
+- **SX Bet `place_order()`** sends unsigned JSON — non-functional (High severity). Live trading is now blocked by `validate_config()` (PR #18); EIP-712 signing is the real fix.
 - **Betfair / Smarkets** — some methods bypass rate limit / circuit breaker (Medium severity)
-- **Resolution sniping** — hardcoded 7-day window should be configurable
+- ~~Resolution sniping hardcoded 7-day window~~ — resolved in PR #18 via `RESOLUTION_SNIPE_WINDOW_HOURS` env var (default 48h)
 
 **Group E — Code health (not strategy gaps but block production confidence)**
 - Dashboard `innerHTML` XSS risk (`dashboard_ui.py`) — Medium
-- Hardcoded password in `run_dashboard.py` — flagged in original Phase A
+- ~~Hardcoded password in `run_dashboard.py`~~ — resolved (no default; `DASHBOARD_PASS` must come from env). PR #18 additionally added a `DASHBOARD_HOST` env var with loopback default and a `validate_config()` gate that raises `ConfigError` on non-loopback host + empty password.
 - No dedicated test files for `position_sizer.py`, `signal_aggregator.py`, `price_tracker.py`, `manifold_api.py`, `dashboard_ui.py`. Note: `market_maker.py` now has direct coverage via `tests/test_hedger_inventory.py` and `tests/test_cross_mm.py` from PR #10.
 
 **Group F — #20 backtesting tuning loop (only original-framework gap left)**
@@ -153,13 +153,13 @@ Grouped by remediation type. **Group A is now empty** — every original-framewo
 
 PR #10 (`feat(strategies): first-class coverage for #9, #11, #12, #18`) is in flight on branch `claude/sad-euler-a029b1`. The roadmap below assumes it merges first. The "v2 + rename" PR described in the Repo Rename section should rebase on top of PR #10's merge — otherwise the v2 status table will conflict with PR #10's CLAUDE.md scope updates.
 
-### Phase 1 — Quick wins (1 week)
+### Phase 1 — Quick wins (1 week) — DONE in PR #18
 
-Platform-specific fixes and a security item that don't depend on strategy decisions.
+Platform-specific fixes and a security item that don't depend on strategy decisions. All three landed in PR #18.
 
-1. **Fix or quarantine SX Bet** — fix `place_order()` signing OR remove SX Bet from `ENABLED_EXECUTION_PLATFORMS` defaults so it's detection-only and can't be accidentally enabled for live trading.
-2. **Make resolution-sniping window configurable** — env var `RESOLUTION_SNIPE_WINDOW_DAYS`, default 7.
-3. **Fix hardcoded password in `run_dashboard.py`** — outstanding from original Phase A.
+1. ✅ **Quarantine SX Bet** — `validate_config()` raises `ConfigError` when `sxbet` is in `ENABLED_EXECUTION_PLATFORMS` and `DRY_RUN=false`. Detection-only is still allowed. EIP-712 signing is the real fix and is a future PR.
+2. ✅ **Make resolution-sniping window configurable** — env var `RESOLUTION_SNIPE_WINDOW_HOURS`, default `48`. (Earlier draft said `_DAYS=7`; reconciled to match the implemented unit.)
+3. ✅ **Dashboard credential hardening** — `run_dashboard.py` hardcoded password was already removed before PR #18. PR #18 additionally added a `DASHBOARD_HOST` env var (default `127.0.0.1`, was hardcoded `0.0.0.0`) and a `validate_config()` gate that raises `ConfigError` when the host is non-loopback and `DASHBOARD_PASS` is empty.
 
 ### Phase 2 — Finish the four Layer 4 incomplete scans (3–5 weeks)
 

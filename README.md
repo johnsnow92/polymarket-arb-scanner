@@ -32,7 +32,7 @@ Python CLI that scans for arbitrage and trading opportunities across prediction 
 | 4 — Informed Trading | Event divergence, cross-platform convergence, multi-source signal aggregation | 9 |
 | 5 — Capital Optimization | Kelly sizing, fee routing, rebalancing, latency, backtesting-driven tuning | 6 |
 
-As of the May 2026 milestone: **23 BUILT**, **5 PARTIAL**, **1 STUB**. See the framework doc for what's pending.
+As of the May 2026 milestone: **22 BUILT**, **6 PARTIAL**, **1 STUB**. See the framework doc for what's pending.
 
 ## Quick Start
 
