@@ -31,8 +31,13 @@ COPY scripts/ ./scripts/
 # Create data directory for EFS mount (trades.db will live here)
 RUN mkdir -p /data
 
-# Health check via unauthenticated healthz endpoint
+# Health check via unauthenticated healthz endpoint.
+# Port resolution mirrors config.py: prefer DASHBOARD_PORT, fall back to Railway's
+# injected PORT, then to 8080. The previous probe only read DASHBOARD_PORT and
+# always fell through to 8080 on Railway (which sets PORT at runtime, not
+# DASHBOARD_PORT) — fine when Railway picked 8080, but masked deploy failures
+# whenever the injected port differed from the dashboard's actual bind port.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-  CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"DASHBOARD_PORT\",\"8080\")}/healthz')" || exit 1
+  CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ.get(\"DASHBOARD_PORT\") or os.environ.get(\"PORT\") or \"8080\"}/healthz')" || exit 1
 
 ENTRYPOINT ["python", "scanner.py", "--continuous"]
