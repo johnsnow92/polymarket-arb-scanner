@@ -93,18 +93,34 @@ class SmarketsClient:
         retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout, _RateLimitError)),
         reraise=True,
     )
-    def _request(self, method: str, endpoint: str, params: dict = None,
-                 json_data: dict = None) -> dict | None:
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        params: dict | None = None,
+        json_data: dict | None = None,
+        success_codes: tuple[int, ...] = (200,),
+        expect_json: bool = True,
+    ) -> dict | None:
         """Make an authenticated API request.
 
         Args:
-            method: HTTP method (GET, POST, etc.).
+            method: HTTP method (GET, POST, DELETE, etc.).
             endpoint: API path relative to base URL.
             params: Query parameters.
             json_data: JSON body payload.
+            success_codes: Status codes treated as success. Defaults to
+                (200,). POST endpoints that return 201 (place_order) or
+                DELETE endpoints that return 204 (cancel_order) widen
+                this. PR G — previously these bypassed the retry
+                decorator entirely.
+            expect_json: When False, return ``{}`` on success without
+                attempting ``resp.json()``. Used by DELETE 204 responses
+                that have no body.
 
         Returns:
-            Response JSON or None on failure.
+            Response JSON (or ``{}`` for non-JSON 2xx) on success, or
+            None on failure.
         """
         if not self.authenticated:
             logger.error("Smarkets: must login before making API calls")
@@ -117,9 +133,15 @@ class SmarketsClient:
             url = f"{SMARKETS_API_URL}{endpoint}"
             resp = self.session.request(method, url, params=params,
                                         json=json_data, timeout=30)
-            if resp.status_code == 200:
+            if resp.status_code in success_codes:
                 _circuit.record_success()
-                return resp.json()
+                if not expect_json:
+                    return {}
+                try:
+                    return resp.json()
+                except ValueError:
+                    # Empty body on a 2xx — treat as success but no payload.
+                    return {}
             if resp.status_code == 429:
                 logger.warning("Smarkets rate limited on %s %s, retrying...", method, endpoint)
                 raise _RateLimitError(f"Smarkets 429 on {method} {endpoint}")
@@ -255,6 +277,10 @@ class SmarketsClient:
                     price: float, quantity: float) -> dict | None:
         """Place an order on Smarkets.
 
+        Routed through ``self._request`` so 429 retries + circuit
+        breaker apply (PR G fix — previously bypassed both via direct
+        ``self.session.post``).
+
         Args:
             market_id: Smarkets market ID.
             contract_id: Contract/runner ID.
@@ -265,31 +291,19 @@ class SmarketsClient:
         Returns:
             Order response dict or None on failure.
         """
-        if not self.authenticated:
-            return None
-
-        _rate_limit()
-        try:
-            resp = self.session.post(
-                f"{SMARKETS_API_URL}/orders/",
-                json={
-                    "market_id": market_id,
-                    "contract_id": contract_id,
-                    "side": side,
-                    "price": str(int(price * 10000)),  # Smarkets uses basis points
-                    "quantity": str(int(quantity * 100)),  # In cents
-                    "type": "limit",
-                },
-                timeout=30,
-            )
-            if resp.status_code in (200, 201):
-                return resp.json()
-            logger.error("Smarkets place_order: %s %s",
-                         resp.status_code, resp.text[:200])
-            return None
-        except requests.RequestException as exc:
-            logger.error("Smarkets place_order failed: %s", exc)
-            return None
+        return self._request(
+            "POST",
+            "/orders/",
+            json_data={
+                "market_id": market_id,
+                "contract_id": contract_id,
+                "side": side,
+                "price": str(int(price * 10000)),  # Smarkets uses basis points
+                "quantity": str(int(quantity * 100)),  # In cents
+                "type": "limit",
+            },
+            success_codes=(200, 201),
+        )
 
     def get_balance(self) -> float | None:
         """Get available account balance.
@@ -331,21 +345,20 @@ class SmarketsClient:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an order.
 
+        Routed through ``self._request`` (PR G fix). Smarkets returns
+        204 on a successful DELETE so we widen ``success_codes`` and
+        skip JSON decoding.
+
         Args:
             order_id: Smarkets order ID.
 
         Returns:
             True if cancellation succeeded.
         """
-        if not self.authenticated:
-            return False
-        _rate_limit()
-        try:
-            resp = self.session.delete(
-                f"{SMARKETS_API_URL}/orders/{order_id}/",
-                timeout=30,
-            )
-            return resp.status_code in (200, 204)
-        except requests.RequestException as exc:
-            logger.warning("Smarkets cancel_order failed: %s", exc)
-            return False
+        result = self._request(
+            "DELETE",
+            f"/orders/{order_id}/",
+            success_codes=(200, 204),
+            expect_json=False,
+        )
+        return result is not None
