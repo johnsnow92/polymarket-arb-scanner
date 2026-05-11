@@ -3,39 +3,26 @@
 import os
 import sys
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Mock heavy upstream deps before importing the module under test, then
-# restore the original (or remove) so other test files (e.g.
-# test_polymarket_api) which need the real module are not poisoned by a
-# leftover MagicMock in sys.modules. pytest collects all test modules
-# before running any, so module-level pollution here would survive into
-# every later test file in the same run.
-_saved_polymarket_api = sys.modules.get("polymarket_api")
-_was_real_polymarket = _saved_polymarket_api is not None and not isinstance(
-    _saved_polymarket_api, MagicMock
-)
-if not _was_real_polymarket:
-    _mock_pm = MagicMock()
-    _mock_pm.get_binary_markets = lambda mkts: list(mkts) if mkts else []
-    sys.modules["polymarket_api"] = _mock_pm
-
+# py-clob-client (the only heavy dep polymarket_api drags in) is installed
+# in CI via requirements.txt, so a plain import works regardless of which
+# test file runs first. Tests that need to control get_binary_markets()
+# patch cross_pair_index.get_binary_markets directly at the call site —
+# no sys.modules hacking.
 from cross_pair_index import (
     CrossPair, CrossPairIndex,
     _kalshi_price, _poly_ask_for_token, _read_cached_price,
 )
 
-# Restore originals so earlier-alphabetical test files are not affected.
-if _was_real_polymarket:
-    sys.modules["polymarket_api"] = _saved_polymarket_api  # type: ignore[assignment]
-elif _saved_polymarket_api is not None:
-    sys.modules["polymarket_api"] = _saved_polymarket_api  # type: ignore[assignment]
-else:
-    sys.modules.pop("polymarket_api", None)
+# Identity stub used by TestRebuild — accepts the poly_markets list and
+# returns it unchanged (real get_binary_markets filters to binary-only,
+# but the fixtures we hand-craft are already binary-shaped).
+_identity_binary_markets = lambda mkts: list(mkts) if mkts else []
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +138,8 @@ class TestRebuild:
                          "pm_title": "Trump wins", "kalshi_title": "Trump wins",
                          "similarity": 100, "confidence": "HIGH", "entity_overlap": 1.0}]
         idx = CrossPairIndex()
-        with patch("matcher.detect_inverted", return_value=False), \
+        with patch("cross_pair_index.get_binary_markets", side_effect=_identity_binary_markets), \
+             patch("matcher.detect_inverted", return_value=False), \
              patch("matcher.match_markets_to_events", return_value=match_result), \
              patch("matcher.match_markets_to_events_semantic", return_value=match_result):
             n = idx.rebuild(poly, kalshi)
@@ -175,7 +163,8 @@ class TestRebuild:
                    "pm_title": "y", "kalshi_title": "y", "similarity": 100,
                    "confidence": "HIGH", "entity_overlap": 1.0}]
 
-        with patch("matcher.detect_inverted", return_value=False), \
+        with patch("cross_pair_index.get_binary_markets", side_effect=_identity_binary_markets), \
+             patch("matcher.detect_inverted", return_value=False), \
              patch("matcher.match_markets_to_events", side_effect=[match1, match2]), \
              patch("matcher.match_markets_to_events_semantic", side_effect=[match1, match2]):
             idx.rebuild(poly1, kalshi1)
@@ -196,7 +185,8 @@ class TestRebuild:
                          "confidence": "HIGH", "entity_overlap": 1.0}]
 
         idx = CrossPairIndex()
-        with patch("matcher.detect_inverted", return_value=False), \
+        with patch("cross_pair_index.get_binary_markets", side_effect=_identity_binary_markets), \
+             patch("matcher.detect_inverted", return_value=False), \
              patch("matcher.match_markets_to_events", return_value=match_result), \
              patch("matcher.match_markets_to_events_semantic", return_value=match_result):
             n = idx.rebuild(poly, kalshi)

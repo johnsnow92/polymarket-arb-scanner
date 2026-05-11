@@ -384,6 +384,78 @@ class TestPlatformWhitelistConfig:
 
 
 # ---------------------------------------------------------------------------
+# validate_config — Phase 1 quick-win guards (PR #18)
+# ---------------------------------------------------------------------------
+
+class TestSXBetQuarantine:
+    """SX Bet `place_order()` sends unsigned JSON. Live trading must be blocked."""
+
+    def test_live_trading_with_sxbet_raises(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,sxbet")
+        monkeypatch.setenv("DRY_RUN", "false")
+        with pytest.raises(ValueError, match="SX Bet"):
+            _reload_config()
+
+    def test_dry_run_with_sxbet_ok(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,sxbet")
+        monkeypatch.setenv("DRY_RUN", "true")
+        cfg = _reload_config()  # must not raise
+        assert "sxbet" in cfg.ENABLED_EXECUTION_PLATFORMS
+
+    def test_live_trading_without_sxbet_ok(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,kalshi")
+        monkeypatch.setenv("DRY_RUN", "false")
+        cfg = _reload_config()  # must not raise
+        assert "sxbet" not in cfg.ENABLED_EXECUTION_PLATFORMS
+
+
+class TestDashboardHostGuard:
+    """Non-loopback DASHBOARD_HOST without DASHBOARD_PASS is an unauth public bind."""
+
+    def test_non_loopback_without_password_raises(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_PORT", "8080")
+        monkeypatch.setenv("DASHBOARD_HOST", "0.0.0.0")
+        monkeypatch.setenv("DASHBOARD_PASS", "")
+        with pytest.raises(ValueError, match="non-loopback"):
+            _reload_config()
+
+    def test_non_loopback_with_password_ok(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_PORT", "8080")
+        monkeypatch.setenv("DASHBOARD_HOST", "0.0.0.0")
+        monkeypatch.setenv("DASHBOARD_PASS", "strong-secret")
+        cfg = _reload_config()  # must not raise
+        assert cfg.DASHBOARD_HOST == "0.0.0.0"
+        assert cfg.DASHBOARD_PASS == "strong-secret"
+
+    def test_loopback_without_password_warns_not_raises(self, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_PORT", "8080")
+        monkeypatch.setenv("DASHBOARD_HOST", "127.0.0.1")
+        monkeypatch.setenv("DASHBOARD_PASS", "")
+        cfg = _reload_config()
+        warnings = cfg.validate_config()
+        assert any("loopback-only" in w for w in warnings)
+
+    def test_default_host_is_loopback(self, monkeypatch):
+        monkeypatch.delenv("DASHBOARD_HOST", raising=False)
+        cfg = _reload_config()
+        assert cfg.DASHBOARD_HOST == "127.0.0.1"
+
+
+class TestResolutionWindowOverride:
+    """RESOLUTION_SNIPE_WINDOW_HOURS replaces the previously hardcoded 48h literal."""
+
+    def test_default_is_48_hours(self, monkeypatch):
+        monkeypatch.delenv("RESOLUTION_SNIPE_WINDOW_HOURS", raising=False)
+        cfg = _reload_config()
+        assert cfg.RESOLUTION_SNIPE_WINDOW_HOURS == 48.0
+
+    def test_env_override_respected(self, monkeypatch):
+        monkeypatch.setenv("RESOLUTION_SNIPE_WINDOW_HOURS", "72")
+        cfg = _reload_config()
+        assert cfg.RESOLUTION_SNIPE_WINDOW_HOURS == 72.0
+
+
+# ---------------------------------------------------------------------------
 # STRAT-04: Logical Arbitrage (Phase 9)
 # ---------------------------------------------------------------------------
 
