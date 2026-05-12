@@ -437,10 +437,10 @@ def build_recommendations(result: BacktestResult) -> dict:
     and per-strategy breakdown. Safe to call with zero-trade results.
     """
     import config as _config
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     return {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "period_days": 7,
         "total_trades": result.total_trades,
         "win_rate": result.win_rate,
