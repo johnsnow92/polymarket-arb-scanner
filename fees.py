@@ -1543,10 +1543,10 @@ def net_profit_bracket(
 ) -> dict:
     """Calculate net profit for bracket/range market arbitrage.
 
-    Exploits when the sum of mutually exclusive range brackets exceeds 1.0:
-        Σ(P(range_i)) > 1.0
+    Exploits when the sum of mutually exclusive range brackets is below 1.0:
+        Σ(P(range_i)) < 1.0
 
-    Example: "BTC $60k-70k" + "BTC $70k-80k" + "BTC $80k+" > 1.0
+    Example: "BTC $60k-70k" + "BTC $70k-80k" + "BTC $80k+" = 0.95 → 5% profit
 
     Layer 1: Pure arbitrage — buy all brackets for guaranteed payout.
 
@@ -1631,7 +1631,7 @@ def net_profit_nway(
         elif platform in ("betfair", "smarkets"):
             pass
         elif platform == "gemini":
-            fees += price * GEMINI_TAKER_RATE * price * (1 - price)
+            fees += gemini_fee(price)
         else:
             fees += polymarket_taker_fee(price)
 

@@ -111,7 +111,7 @@ class MarginOptimizer:
     def __init__(self):
         self._margin_available: dict[str, float] = {}
         self._margin_used: dict[str, float] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def update_margin(self, platform: str, available: float, used: float) -> None:
         """Update margin state for a platform.

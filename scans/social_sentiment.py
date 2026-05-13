@@ -62,7 +62,7 @@ def _aggregate_sentiment(
         try:
             result = twitter_client.get_market_sentiment(market_title)
             if result and result.get("sample_size", 0) >= 5:
-                scores.append(result["score"])
+                scores.append(result["sentiment_score"])
                 weights.append(SOCIAL_SENTIMENT_WEIGHT_TWITTER)
                 total_samples += result["sample_size"]
         except Exception as e:
@@ -72,7 +72,7 @@ def _aggregate_sentiment(
         try:
             result = reddit_client.get_market_sentiment(market_title)
             if result and result.get("sample_size", 0) >= 3:
-                scores.append(result["score"])
+                scores.append(result["sentiment_score"])
                 weights.append(SOCIAL_SENTIMENT_WEIGHT_REDDIT)
                 total_samples += result["sample_size"]
         except Exception as e:

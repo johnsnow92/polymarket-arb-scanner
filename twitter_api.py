@@ -69,7 +69,7 @@ class TwitterClient:
 
     def is_authenticated(self) -> bool:
         """Check if client has valid credentials."""
-        return self.authenticated and bool(TWITTER_BEARER_TOKEN)
+        return self.authenticated
 
     def search_tweets(
         self,

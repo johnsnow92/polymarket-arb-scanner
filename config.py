@@ -532,7 +532,7 @@ CONDITIONAL_ARB_MAX_TRADE_SIZE = _env_float("CONDITIONAL_ARB_MAX_TRADE_SIZE", "2
 
 # #31: Bracket/Range Market Arbitrage — Σ(range brackets) > 1.0
 BRACKET_ARB_ENABLED = _env_bool("BRACKET_ARB_ENABLED", "false")
-BRACKET_ARB_MIN_OVERROUND = _env_float("BRACKET_ARB_MIN_OVERROUND", "0.02")
+BRACKET_ARB_MIN_SPREAD = _env_float("BRACKET_ARB_MIN_SPREAD", "0.02")
 BRACKET_ARB_MAX_TRADE_SIZE = _env_float("BRACKET_ARB_MAX_TRADE_SIZE", "25.0")
 
 # #32: Multi-Leg Exotic Arb — N-way extension of triangular (4+ platforms)

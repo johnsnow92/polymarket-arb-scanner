@@ -1357,12 +1357,13 @@ class ToxicFlowDetector:
         from config import MM_TOXIC_FLOW_PAUSE_SECONDS
 
         pause_seconds = pause_seconds or MM_TOXIC_FLOW_PAUSE_SECONDS
+        toxicity = self.get_toxicity(market_key)
         with self._lock:
             self._pause_until[market_key] = time.time() + pause_seconds
-            logger.warning(
-                "Toxic flow detected on %s (%.1f%%), pausing for %.0fs",
-                market_key, self.get_toxicity(market_key) * 100, pause_seconds,
-            )
+        logger.warning(
+            "Toxic flow detected on %s (%.1f%%), pausing for %.0fs",
+            market_key, toxicity * 100, pause_seconds,
+        )
 
     def get_pause_remaining(self, market_key: str) -> float:
         """Get remaining pause time in seconds."""

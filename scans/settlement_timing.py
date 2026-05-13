@@ -196,7 +196,7 @@ def scan_settlement_timing(
         opportunities.append(opp)
 
     opportunities = _refine_settlement_with_clob(
-        opportunities, min_profit, price_cache
+        opportunities, min_profit, min_discount, price_cache
     )
     opportunities = filter_dust(opportunities, min_amount=min_profit)
     opportunities.sort(key=lambda o: o["net_profit"], reverse=True)
@@ -208,6 +208,7 @@ def scan_settlement_timing(
 def _refine_settlement_with_clob(
     opportunities: list[dict],
     min_profit: float,
+    min_discount: float,
     price_cache: dict | None = None,
 ) -> list[dict]:
     """Refine settlement timing opportunities with CLOB ask prices.
@@ -215,6 +216,7 @@ def _refine_settlement_with_clob(
     Args:
         opportunities: List of opportunity dicts from Stage 1.
         min_profit: Minimum net profit threshold.
+        min_discount: Minimum discount from payout to keep opportunity.
         price_cache: Optional WS price cache.
 
     Returns:
@@ -267,7 +269,7 @@ def _refine_settlement_with_clob(
             depth = 0
 
         discount = 1.0 - current_price
-        if discount < SETTLEMENT_TIMING_MIN_DISCOUNT:
+        if discount < min_discount:
             continue
 
         from fees import net_profit_settlement_timing

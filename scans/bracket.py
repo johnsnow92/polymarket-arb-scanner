@@ -1,14 +1,14 @@
 """Bracket/Range Market Arbitrage — Strategy #31.
 
-Detects when the sum of mutually exclusive range brackets exceeds 1.0:
-    Σ(P(range_i)) > 1.0
+Detects when the sum of mutually exclusive range brackets is less than 1.0:
+    Σ(P(range_i)) < 1.0
 
 Example on Kalshi:
-    "S&P 5000-5100 EOD" = 0.25
-    "S&P 5100-5200 EOD" = 0.30
+    "S&P 5000-5100 EOD" = 0.22
+    "S&P 5100-5200 EOD" = 0.25
     "S&P 5200-5300 EOD" = 0.25
-    "S&P 5300+ EOD"     = 0.22
-    Total = 1.02 → 2% guaranteed profit by buying all brackets
+    "S&P 5300+ EOD"     = 0.23
+    Total = 0.95 → 5% guaranteed profit by buying all brackets (pay $0.95, receive $1.00)
 
 Requires grouping range markets by their base event (e.g., "S&P EOD").
 """
@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import (
     BRACKET_ARB_ENABLED,
-    BRACKET_ARB_MIN_OVERROUND,
+    BRACKET_ARB_MIN_SPREAD,
     BRACKET_ARB_MAX_TRADE_SIZE,
 )
 from .helpers import capital_efficiency_score, filter_dust, _fetch_clob_for_market
@@ -142,18 +142,18 @@ def _brackets_are_complete(brackets: list[dict]) -> bool:
 
 def scan_bracket_arb(
     markets: list[dict],
-    min_overround: float | None = None,
+    min_spread: float | None = None,
     min_profit: float = 0.005,
     price_cache: dict | None = None,
 ) -> list[dict]:
     """Scan for bracket/range market arbitrage opportunities.
 
     Groups range markets by base event and identifies sets where
-    Σ(prices) > 1.0.
+    Σ(prices) < 1.0 (underround), allowing guaranteed profit by buying all.
 
     Args:
         markets: List of market dicts with title, yes_price.
-        min_overround: Minimum overround to flag (default from config).
+        min_spread: Minimum spread (1.0 - total_cost) to flag (default from config).
         min_profit: Minimum net profit threshold.
         price_cache: Optional WS price cache for CLOB refinement.
 
@@ -163,7 +163,7 @@ def scan_bracket_arb(
     if not BRACKET_ARB_ENABLED:
         return []
 
-    min_overround = min_overround or BRACKET_ARB_MIN_OVERROUND
+    min_spread = min_spread or BRACKET_ARB_MIN_SPREAD
     opportunities = []
 
     bracket_groups = _group_brackets(markets)
@@ -180,9 +180,9 @@ def scan_bracket_arb(
             continue
 
         total_cost = sum(prices)
-        overround = total_cost - 1.0
+        spread = 1.0 - total_cost
 
-        if overround < min_overround:
+        if spread < min_spread:
             continue
 
         from fees import net_profit_bracket
@@ -202,7 +202,7 @@ def scan_bracket_arb(
             "type": "BracketArb",
             "_layer": 1,
             "market": market_desc,
-            "prices": f"Σ={total_cost:.4f} (overround={overround:.4f})",
+            "prices": f"Σ={total_cost:.4f} (spread={spread:.4f})",
             "total_cost": f"${total_cost:.4f}",
             "net_profit": result["net_profit"],
             "net_roi": result.get("net_roi", 0),
@@ -211,7 +211,7 @@ def scan_bracket_arb(
             "_platform": platform,
             "_brackets": brackets,
             "_bracket_prices": prices,
-            "_overround": overround,
+            "_spread": spread,
             "_num_brackets": len(brackets),
         }
         opp["_efficiency"] = capital_efficiency_score(opp)

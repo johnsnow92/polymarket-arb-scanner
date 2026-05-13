@@ -101,8 +101,9 @@ class CalibrationTracker:
             conn.commit()
             conn.close()
 
-        if platform in self._in_memory_cache:
-            del self._in_memory_cache[platform]
+        keys_to_delete = [k for k in self._in_memory_cache if k.startswith(f"{platform}:")]
+        for k in keys_to_delete:
+            del self._in_memory_cache[k]
 
     def get_platform_brier_score(
         self,

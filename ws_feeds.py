@@ -1064,6 +1064,7 @@ class FeedHealthTracker:
             latency_ms: Optional message latency in milliseconds.
         """
         now = time.time()
+        fire_recovery = False
         with self._lock:
             was_in_outage = self._outage_start.get(platform) is not None
             self._last_message_time[platform] = now
@@ -1088,7 +1089,10 @@ class FeedHealthTracker:
                 ]
 
             if was_in_outage:
-                self._fire_health_change(platform, is_healthy=True)
+                fire_recovery = True
+
+        if fire_recovery:
+            self._fire_health_change(platform, is_healthy=True)
 
     def check_outages(self) -> dict[str, dict]:
         """Check all platforms for outages.
@@ -1099,6 +1103,7 @@ class FeedHealthTracker:
         """
         now = time.time()
         results = {}
+        new_outages = []
 
         with self._lock:
             for platform in list(self._last_message_time.keys()):
@@ -1112,7 +1117,7 @@ class FeedHealthTracker:
                             "%s feed outage detected (no message for %.0fs)",
                             platform, silent_seconds
                         )
-                        self._fire_health_change(platform, is_healthy=False)
+                        new_outages.append(platform)
 
                     results[platform] = {
                         "in_outage": True,
@@ -1125,6 +1130,9 @@ class FeedHealthTracker:
                         "duration_seconds": None,
                         "last_message_ago": silent_seconds,
                     }
+
+        for platform in new_outages:
+            self._fire_health_change(platform, is_healthy=False)
 
         return results
 
