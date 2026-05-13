@@ -170,6 +170,7 @@ REVALIDATION_ADAPTIVE = _env_bool("REVALIDATION_ADAPTIVE", "true")
 # Strategy layers and layer-specific revalidation floors (per D-02, D-03)
 # ---------------------------------------------------------------------------
 STRATEGY_LAYERS: dict[str, int] = {
+    # Layer 1 — Pure Arbitrage
     "Binary": 1, "KalshiBinary": 1, "Cross": 1, "NegRisk": 1,
     "MultiCross": 1, "TriangularCross": 1,
     "BetfairBackAll": 1, "BetfairBackLay": 1,
@@ -179,9 +180,24 @@ STRATEGY_LAYERS: dict[str, int] = {
     "GeminiBinary": 1, "GeminiMulti": 1,
     "IBKRBinary": 1,
     "Spread": 1,
+    # #30-#32: New Layer 1 strategies
+    "ConditionalArb": 1, "BracketArb": 1, "NWayArb": 1,
+    # Layer 2 — Near-Arbitrage
     "StalePriceOpp": 2, "ResolutionSnipeOpp": 2, "FeePromo": 2,
+    # #33-#35: New Layer 2 strategies
+    "SettlementTimingArb": 2, "NewMarketMispricing": 2, "APIOutageArb": 2,
+    # Layer 3 — Market Making
     "MarketMake": 3, "CrossPlatformMM": 3,
+    # #36-#38: New Layer 3 strategies
+    "VolatilityAdjustedMM": 3, "LeadLagMM": 3, "ToxicFlowPause": 3,
+    # Layer 4 — Informed Trading
     "EventDivergence": 4, "ConvergenceOpp": 4,
+    # #39-#43: New Layer 4 strategies
+    "SocialSentiment": 4, "ExpertDivergence": 4, "CalibratedSignal": 4,
+    "InsiderPattern": 4, "CrossCategoryCorrelation": 4,
+    # Layer 5 — Capital Optimization (scoring adjustments, not opps)
+    "OpportunityCostScore": 5, "MarginOptimization": 5,
+    "TaxAwarePosition": 5, "WithdrawalTiming": 5,
 }
 
 REVAL_FLOOR_L1 = _env_float("REVAL_FLOOR_L1", "0.02")   # 2% pure arb
@@ -503,6 +519,133 @@ if WHALE_COPY_ENABLED and not WHALE_WALLETS:
 
 # Polygonscan API for on-chain monitoring
 POLYGONSCAN_API_KEY = os.getenv("POLYGONSCAN_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# Extended Strategy Flags (#30-#49) — Phase 2 expansion, all default false
+# ---------------------------------------------------------------------------
+
+# Layer 1 — Pure Arbitrage (New)
+# #30: Conditional Market Arbitrage — P(X|Y) × P(Y) ≠ P(X) detection
+CONDITIONAL_ARB_ENABLED = _env_bool("CONDITIONAL_ARB_ENABLED", "false")
+CONDITIONAL_ARB_MIN_DIVERGENCE = _env_float("CONDITIONAL_ARB_MIN_DIVERGENCE", "0.05")
+CONDITIONAL_ARB_MAX_TRADE_SIZE = _env_float("CONDITIONAL_ARB_MAX_TRADE_SIZE", "25.0")
+
+# #31: Bracket/Range Market Arbitrage — Σ(range brackets) > 1.0
+BRACKET_ARB_ENABLED = _env_bool("BRACKET_ARB_ENABLED", "false")
+BRACKET_ARB_MIN_OVERROUND = _env_float("BRACKET_ARB_MIN_OVERROUND", "0.02")
+BRACKET_ARB_MAX_TRADE_SIZE = _env_float("BRACKET_ARB_MAX_TRADE_SIZE", "25.0")
+
+# #32: Multi-Leg Exotic Arb — N-way extension of triangular (4+ platforms)
+NWAY_ARB_ENABLED = _env_bool("NWAY_ARB_ENABLED", "false")
+NWAY_ARB_MAX_LEGS = _env_int("NWAY_ARB_MAX_LEGS", "5")
+NWAY_ARB_MAX_TRADE_SIZE = _env_float("NWAY_ARB_MAX_TRADE_SIZE", "20.0")
+
+# Layer 2 — Near-Arbitrage (New)
+# #33: Settlement Timing Arb — buy winning outcome on slow-settling platform
+SETTLEMENT_TIMING_ENABLED = _env_bool("SETTLEMENT_TIMING_ENABLED", "false")
+SETTLEMENT_TIMING_MIN_DISCOUNT = _env_float("SETTLEMENT_TIMING_MIN_DISCOUNT", "0.005")
+SETTLEMENT_TIMING_MAX_TRADE_SIZE = _env_float("SETTLEMENT_TIMING_MAX_TRADE_SIZE", "50.0")
+
+# #34: New Market Mispricing — first 24-48h price inefficiency
+NEW_MARKET_MISPRICING_ENABLED = _env_bool("NEW_MARKET_MISPRICING_ENABLED", "false")
+NEW_MARKET_AGE_HOURS = _env_float("NEW_MARKET_AGE_HOURS", "48.0")
+NEW_MARKET_MIN_DIVERGENCE = _env_float("NEW_MARKET_MIN_DIVERGENCE", "0.10")
+NEW_MARKET_MAX_TRADE_SIZE = _env_float("NEW_MARKET_MAX_TRADE_SIZE", "15.0")
+
+# #35: API Outage Arbitrage — exploit stale prices during platform outages
+API_OUTAGE_ARB_ENABLED = _env_bool("API_OUTAGE_ARB_ENABLED", "false")
+API_OUTAGE_STALE_THRESHOLD = _env_float("API_OUTAGE_STALE_THRESHOLD", "120.0")
+API_OUTAGE_MIN_DIVERGENCE = _env_float("API_OUTAGE_MIN_DIVERGENCE", "0.05")
+
+# Layer 3 — Market Making (New)
+# #36: Volatility-Adjusted Spread Quoting — dynamic spread widening
+MM_VOLATILITY_ADJUSTED_ENABLED = _env_bool("MM_VOLATILITY_ADJUSTED_ENABLED", "false")
+MM_VOLATILITY_LOOKBACK_SECONDS = _env_float("MM_VOLATILITY_LOOKBACK_SECONDS", "300.0")
+MM_VOLATILITY_SPREAD_MULTIPLIER = _env_float("MM_VOLATILITY_SPREAD_MULTIPLIER", "2.0")
+
+# #37: Lead-Lag Market Making — quote lagging platforms using leader's price
+LEAD_LAG_MM_ENABLED = _env_bool("LEAD_LAG_MM_ENABLED", "false")
+LEAD_LAG_MIN_DELAY_MS = _env_float("LEAD_LAG_MIN_DELAY_MS", "500.0")
+LEAD_LAG_PLATFORMS = os.getenv("LEAD_LAG_PLATFORMS", "polymarket,kalshi")
+
+# #38: Toxic Flow Detection — detect adverse selection, pause quoting
+MM_TOXIC_FLOW_ENABLED = _env_bool("MM_TOXIC_FLOW_ENABLED", "false")
+MM_TOXIC_FLOW_THRESHOLD = _env_float("MM_TOXIC_FLOW_THRESHOLD", "0.60")
+MM_TOXIC_FLOW_PAUSE_SECONDS = _env_float("MM_TOXIC_FLOW_PAUSE_SECONDS", "60.0")
+
+# Layer 4 — Informed Trading (New)
+# #39: Social Sentiment Signals — Twitter/Reddit sentiment vs price
+SOCIAL_SENTIMENT_ENABLED = _env_bool("SOCIAL_SENTIMENT_ENABLED", "false")
+TWITTER_API_KEY = os.getenv("TWITTER_API_KEY", "")
+TWITTER_API_SECRET = os.getenv("TWITTER_API_SECRET", "")
+TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
+SOCIAL_SENTIMENT_MIN_DIVERGENCE = _env_float("SOCIAL_SENTIMENT_MIN_DIVERGENCE", "0.15")
+SOCIAL_SENTIMENT_MAX_TRADE_SIZE = _env_float("SOCIAL_SENTIMENT_MAX_TRADE_SIZE", "20.0")
+
+# #40: Expert Individual Forecaster Divergence — superforecaster predictions
+EXPERT_DIVERGENCE_ENABLED = _env_bool("EXPERT_DIVERGENCE_ENABLED", "false")
+EXPERT_DIVERGENCE_THRESHOLD = _env_float("EXPERT_DIVERGENCE_THRESHOLD", "0.15")
+EXPERT_DIVERGENCE_MIN_ACCURACY = _env_float("EXPERT_DIVERGENCE_MIN_ACCURACY", "0.70")
+EXPERT_DIVERGENCE_MAX_TRADE_SIZE = _env_float("EXPERT_DIVERGENCE_MAX_TRADE_SIZE", "25.0")
+
+# #41: Historical Platform Calibration Weighting — bias-adjusted weights
+CALIBRATION_WEIGHTING_ENABLED = _env_bool("CALIBRATION_WEIGHTING_ENABLED", "false")
+CALIBRATION_LOOKBACK_DAYS = _env_int("CALIBRATION_LOOKBACK_DAYS", "90")
+CALIBRATION_MIN_SAMPLES = _env_int("CALIBRATION_MIN_SAMPLES", "50")
+
+# #42: Insider Pattern Detection — unusual order flow before events
+INSIDER_PATTERN_ENABLED = _env_bool("INSIDER_PATTERN_ENABLED", "false")
+INSIDER_PATTERN_VOLUME_ZSCORE = _env_float("INSIDER_PATTERN_VOLUME_ZSCORE", "2.5")
+INSIDER_PATTERN_LOOKBACK_HOURS = _env_float("INSIDER_PATTERN_LOOKBACK_HOURS", "24.0")
+INSIDER_PATTERN_MAX_TRADE_SIZE = _env_float("INSIDER_PATTERN_MAX_TRADE_SIZE", "15.0")
+
+# #43: Cross-Category Correlation Signals — BTC price vs prediction markets
+CROSS_CATEGORY_ENABLED = _env_bool("CROSS_CATEGORY_ENABLED", "false")
+CROSS_CATEGORY_MIN_DIVERGENCE = _env_float("CROSS_CATEGORY_MIN_DIVERGENCE", "0.10")
+CROSS_CATEGORY_MAX_TRADE_SIZE = _env_float("CROSS_CATEGORY_MAX_TRADE_SIZE", "20.0")
+# External price feeds for correlation tracking
+CRYPTO_PRICE_API_URL = os.getenv("CRYPTO_PRICE_API_URL", "https://api.coingecko.com/api/v3")
+
+# Layer 5 — Capital Optimization (New)
+# #44: Opportunity Cost Scoring — time-weighted ROI
+OPPORTUNITY_COST_SCORING_ENABLED = _env_bool("OPPORTUNITY_COST_SCORING_ENABLED", "false")
+OPPORTUNITY_COST_MIN_ANNUALIZED_ROI = _env_float("OPPORTUNITY_COST_MIN_ANNUALIZED_ROI", "0.10")
+
+# #45: Margin Efficiency Optimization — route collateral optimally
+MARGIN_EFFICIENCY_ENABLED = _env_bool("MARGIN_EFFICIENCY_ENABLED", "false")
+MARGIN_REBALANCE_THRESHOLD = _env_float("MARGIN_REBALANCE_THRESHOLD", "0.20")
+
+# #46: Tax-Aware Position Management — harvest losses, defer gains
+TAX_AWARE_ENABLED = _env_bool("TAX_AWARE_ENABLED", "false")
+TAX_LOSS_HARVEST_THRESHOLD = _env_float("TAX_LOSS_HARVEST_THRESHOLD", "0.10")
+TAX_SHORT_TERM_RATE = _env_float("TAX_SHORT_TERM_RATE", "0.37")
+TAX_LONG_TERM_RATE = _env_float("TAX_LONG_TERM_RATE", "0.20")
+
+# #47: Withdrawal Timing Optimization — factor withdrawal delays
+WITHDRAWAL_TIMING_ENABLED = _env_bool("WITHDRAWAL_TIMING_ENABLED", "false")
+# Platform withdrawal delays in hours (used by treasury.py rebalancing)
+PLATFORM_WITHDRAWAL_DELAYS: dict[str, float] = {
+    "polymarket": 0.5,     # ~30 min (Polygon L2)
+    "kalshi": 24.0,        # 1 business day
+    "betfair": 24.0,       # 1 business day
+    "smarkets": 24.0,      # 1 business day
+    "sxbet": 1.0,          # ~1 hour (Polygon L2)
+    "matchbook": 48.0,     # 2 business days
+    "gemini": 0.5,         # ~30 min (crypto)
+    "ibkr": 72.0,          # 3 business days
+}
+
+# Infrastructure (New)
+# #48: Redundant Data Feed Arbitrage — parallel feeds, trust fastest
+REDUNDANT_FEEDS_ENABLED = _env_bool("REDUNDANT_FEEDS_ENABLED", "false")
+REDUNDANT_FEEDS_STALENESS_MS = _env_float("REDUNDANT_FEEDS_STALENESS_MS", "500.0")
+
+# #49: Geographic Latency Optimization — multi-region deployment
+GEOGRAPHIC_LATENCY_ENABLED = _env_bool("GEOGRAPHIC_LATENCY_ENABLED", "false")
+LATENCY_MONITOR_INTERVAL = _env_float("LATENCY_MONITOR_INTERVAL", "60.0")
+DEPLOYMENT_REGION = os.getenv("DEPLOYMENT_REGION", "us-east-1")
 
 # Convergence detection
 CONVERGENCE_MIN_DIVERGENCE = _env_float("CONVERGENCE_MIN_DIVERGENCE", "0.05")
