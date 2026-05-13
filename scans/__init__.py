@@ -28,6 +28,9 @@ from scans.rewards import scan_polymarket_rewards, scan_kalshi_rewards
 from scans.fee_promo import scan_fee_promo
 from scans.cross_mm import scan_cross_mm
 from scans.conditional import scan_conditional_arb, _refine_conditional_with_clob
+from scans.settlement_timing import scan_settlement_timing, _refine_settlement_with_clob
+from scans.new_market import scan_new_market_mispricing
+from scans.api_outage import scan_api_outage_arb
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, capital_efficiency_score
 
 __all__ = [
@@ -63,6 +66,10 @@ __all__ = [
     "scan_cross_mm",
     "scan_conditional_arb",
     "_refine_conditional_with_clob",
+    "scan_settlement_timing",
+    "_refine_settlement_with_clob",
+    "scan_new_market_mispricing",
+    "scan_api_outage_arb",
     "_refine_binary_with_clob",
     "_refine_negrisk_with_clob",
     "_refine_cross_with_clob",
