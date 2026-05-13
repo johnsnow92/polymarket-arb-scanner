@@ -1016,3 +1016,283 @@ class BetfairFeed:
                 logger.debug("Error closing Betfair stream: %s", e)
         self._reader = None
         self._writer = None
+
+
+# ---------------------------------------------------------------------------
+# Feed Health Tracker — supports #35 (API Outage Arb) and #48 (Redundant Feeds)
+# ---------------------------------------------------------------------------
+
+class FeedHealthTracker:
+    """Track health metrics across multiple data feeds for arbitrage detection.
+
+    Provides:
+    - Per-platform health status and latency tracking
+    - Outage detection for #35 API Outage Arbitrage
+    - Feed comparison for #48 Redundant Data Feed Arbitrage
+    """
+
+    def __init__(
+        self,
+        stale_threshold_seconds: float = 120.0,
+        latency_window_seconds: float = 60.0,
+    ):
+        """Initialize the feed health tracker.
+
+        Args:
+            stale_threshold_seconds: Seconds without message to mark as outage.
+            latency_window_seconds: Rolling window for latency statistics.
+        """
+        self._stale_threshold = stale_threshold_seconds
+        self._latency_window = latency_window_seconds
+        self._lock = threading.Lock()
+
+        self._last_message_time: dict[str, float] = {}
+        self._latencies: dict[str, list[tuple[float, float]]] = {}
+        self._message_counts: dict[str, int] = {}
+        self._outage_start: dict[str, float | None] = {}
+        self._health_callbacks: list[Callable] = []
+
+    def record_message(
+        self,
+        platform: str,
+        latency_ms: float | None = None,
+    ) -> None:
+        """Record a message received from a platform feed.
+
+        Args:
+            platform: Platform name (e.g., "polymarket", "kalshi").
+            latency_ms: Optional message latency in milliseconds.
+        """
+        now = time.time()
+        fire_recovery = False
+        with self._lock:
+            was_in_outage = self._outage_start.get(platform) is not None
+            self._last_message_time[platform] = now
+            self._message_counts[platform] = self._message_counts.get(platform, 0) + 1
+
+            if self._outage_start.get(platform) is not None:
+                outage_duration = now - self._outage_start[platform]
+                self._outage_start[platform] = None
+                logger.info(
+                    "%s feed recovered after %.1fs outage",
+                    platform, outage_duration
+                )
+
+            if latency_ms is not None:
+                if platform not in self._latencies:
+                    self._latencies[platform] = []
+                self._latencies[platform].append((now, latency_ms))
+                cutoff = now - self._latency_window
+                self._latencies[platform] = [
+                    (ts, lat) for ts, lat in self._latencies[platform]
+                    if ts > cutoff
+                ]
+
+            if was_in_outage:
+                fire_recovery = True
+
+        if fire_recovery:
+            self._fire_health_change(platform, is_healthy=True)
+
+    def check_outages(self) -> dict[str, dict]:
+        """Check all platforms for outages.
+
+        Returns:
+            Dict mapping platform name to outage info:
+            {platform: {"in_outage": bool, "duration_seconds": float | None}}
+        """
+        now = time.time()
+        results = {}
+        new_outages = []
+
+        with self._lock:
+            for platform in list(self._last_message_time.keys()):
+                last_msg = self._last_message_time.get(platform, 0)
+                silent_seconds = now - last_msg
+
+                if silent_seconds > self._stale_threshold:
+                    if self._outage_start.get(platform) is None:
+                        self._outage_start[platform] = last_msg
+                        logger.warning(
+                            "%s feed outage detected (no message for %.0fs)",
+                            platform, silent_seconds
+                        )
+                        new_outages.append(platform)
+
+                    results[platform] = {
+                        "in_outage": True,
+                        "duration_seconds": now - self._outage_start[platform],
+                        "last_message_ago": silent_seconds,
+                    }
+                else:
+                    results[platform] = {
+                        "in_outage": False,
+                        "duration_seconds": None,
+                        "last_message_ago": silent_seconds,
+                    }
+
+        for platform in new_outages:
+            self._fire_health_change(platform, is_healthy=False)
+
+        return results
+
+    def get_platform_health(self, platform: str) -> dict:
+        """Get health metrics for a specific platform.
+
+        Returns:
+            Dict with is_healthy, last_message_ago, avg_latency_ms,
+            message_count, in_outage.
+        """
+        now = time.time()
+        with self._lock:
+            last_msg = self._last_message_time.get(platform, 0)
+            silent_seconds = now - last_msg if last_msg > 0 else float("inf")
+
+            latency_samples = self._latencies.get(platform, [])
+            if latency_samples:
+                avg_latency = sum(lat for _, lat in latency_samples) / len(latency_samples)
+            else:
+                avg_latency = None
+
+            return {
+                "is_healthy": silent_seconds <= self._stale_threshold,
+                "last_message_ago": silent_seconds,
+                "avg_latency_ms": avg_latency,
+                "message_count": self._message_counts.get(platform, 0),
+                "in_outage": self._outage_start.get(platform) is not None,
+            }
+
+    def get_fastest_feed(self, platforms: list[str]) -> str | None:
+        """Return the platform with the lowest average latency.
+
+        Args:
+            platforms: List of platform names to compare.
+
+        Returns:
+            Platform name with lowest latency, or None if no data.
+        """
+        with self._lock:
+            best_platform = None
+            best_latency = float("inf")
+
+            for platform in platforms:
+                samples = self._latencies.get(platform, [])
+                if not samples:
+                    continue
+                avg = sum(lat for _, lat in samples) / len(samples)
+                if avg < best_latency:
+                    best_latency = avg
+                    best_platform = platform
+
+            return best_platform
+
+    def get_leader_feed(self, platforms: list[str]) -> str | None:
+        """Identify the feed that updates first (price discovery leader).
+
+        Used by #37 Lead-Lag MM to identify which platform to use as
+        the fair value reference.
+
+        Args:
+            platforms: List of platform names to compare.
+
+        Returns:
+            Platform name that typically updates first.
+        """
+        with self._lock:
+            recent_update = {}
+            for platform in platforms:
+                last = self._last_message_time.get(platform, 0)
+                if last > 0:
+                    recent_update[platform] = last
+
+            if not recent_update:
+                return None
+
+            return max(recent_update.keys(), key=lambda p: recent_update[p])
+
+    def get_outage_opportunities(
+        self,
+        min_outage_seconds: float = 30.0,
+    ) -> list[dict]:
+        """Identify platforms in outage that may have stale prices.
+
+        Used by #35 API Outage Arbitrage.
+
+        Args:
+            min_outage_seconds: Minimum outage duration to flag.
+
+        Returns:
+            List of {platform, outage_duration, last_message_ago} dicts.
+        """
+        outages = self.check_outages()
+        opportunities = []
+
+        for platform, info in outages.items():
+            if info["in_outage"] and info["duration_seconds"] >= min_outage_seconds:
+                opportunities.append({
+                    "platform": platform,
+                    "outage_duration": info["duration_seconds"],
+                    "last_message_ago": info["last_message_ago"],
+                })
+
+        return opportunities
+
+    def compare_feeds(
+        self,
+        platforms: list[str],
+    ) -> dict:
+        """Compare health metrics across multiple feeds.
+
+        Used by #48 Redundant Data Feed Arbitrage.
+
+        Returns:
+            Dict with fastest, healthiest, leader, and per-platform metrics.
+        """
+        metrics = {}
+        healthy_platforms = []
+
+        for platform in platforms:
+            health = self.get_platform_health(platform)
+            metrics[platform] = health
+            if health["is_healthy"]:
+                healthy_platforms.append(platform)
+
+        return {
+            "fastest": self.get_fastest_feed(healthy_platforms),
+            "leader": self.get_leader_feed(healthy_platforms),
+            "healthy_count": len(healthy_platforms),
+            "total_count": len(platforms),
+            "platforms": metrics,
+        }
+
+    def register_health_callback(
+        self,
+        callback: Callable[[str, bool], None],
+    ) -> None:
+        """Register a callback for health state changes.
+
+        Callback receives (platform: str, is_healthy: bool).
+        """
+        self._health_callbacks.append(callback)
+
+    def _fire_health_change(self, platform: str, is_healthy: bool) -> None:
+        """Fire all registered health change callbacks."""
+        for callback in self._health_callbacks:
+            try:
+                callback(platform, is_healthy)
+            except Exception as e:
+                logger.error("Health callback error: %s", e)
+
+
+_feed_health_tracker: FeedHealthTracker | None = None
+
+
+def get_feed_health_tracker() -> FeedHealthTracker:
+    """Get or create the module-level FeedHealthTracker instance."""
+    global _feed_health_tracker
+    if _feed_health_tracker is None:
+        from config import API_OUTAGE_STALE_THRESHOLD
+        _feed_health_tracker = FeedHealthTracker(
+            stale_threshold_seconds=API_OUTAGE_STALE_THRESHOLD,
+        )
+    return _feed_health_tracker

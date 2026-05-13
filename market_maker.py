@@ -1011,3 +1011,397 @@ class KalshiRewardTracker:
         # Estimate: reward ∝ resting_time * (1 - spread_tightness)
         estimated_daily = (total_resting / 86400) * (1 - avg_spread * 100) * 0.50
         return max(0.0, estimated_daily)
+
+
+# ---------------------------------------------------------------------------
+# Strategy #36: Volatility Tracker for Spread Adjustment
+# ---------------------------------------------------------------------------
+
+class VolatilityTracker:
+    """Track price volatility for dynamic spread adjustment.
+
+    Calculates rolling volatility from price changes to inform spread
+    widening during high-volatility periods.
+    """
+
+    def __init__(
+        self,
+        lookback_seconds: float = 300.0,
+        min_samples: int = 5,
+    ):
+        """Initialize the volatility tracker.
+
+        Args:
+            lookback_seconds: Rolling window for volatility calculation.
+            min_samples: Minimum samples required for valid volatility.
+        """
+        self.lookback_seconds = lookback_seconds
+        self.min_samples = min_samples
+        self._prices: dict[str, list[tuple[float, float]]] = {}
+        self._lock = threading.Lock()
+
+    def record_price(self, market_key: str, price: float) -> None:
+        """Record a price observation.
+
+        Args:
+            market_key: Market identifier.
+            price: Current price (0-1).
+        """
+        now = time.time()
+        with self._lock:
+            if market_key not in self._prices:
+                self._prices[market_key] = []
+            self._prices[market_key].append((now, price))
+            cutoff = now - self.lookback_seconds
+            self._prices[market_key] = [
+                (t, p) for t, p in self._prices[market_key]
+                if t > cutoff
+            ]
+
+    def get_volatility(self, market_key: str) -> float:
+        """Calculate rolling volatility for a market.
+
+        Returns:
+            Volatility as standard deviation of price changes (0-1).
+            Returns 0.0 if insufficient data.
+        """
+        with self._lock:
+            samples = self._prices.get(market_key, [])
+            if len(samples) < self.min_samples:
+                return 0.0
+
+            prices = [p for _, p in samples]
+            if len(prices) < 2:
+                return 0.0
+
+            returns = [
+                prices[i] - prices[i - 1]
+                for i in range(1, len(prices))
+            ]
+
+            if not returns:
+                return 0.0
+
+            mean_return = sum(returns) / len(returns)
+            variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
+            return variance ** 0.5
+
+    def get_spread_multiplier(
+        self,
+        market_key: str,
+        base_multiplier: float = 1.0,
+        max_multiplier: float = 3.0,
+    ) -> float:
+        """Calculate spread multiplier based on current volatility.
+
+        Higher volatility -> wider spread to compensate for adverse selection risk.
+
+        Args:
+            market_key: Market identifier.
+            base_multiplier: Base multiplier (usually 1.0).
+            max_multiplier: Maximum spread multiplier.
+
+        Returns:
+            Spread multiplier (1.0 to max_multiplier).
+        """
+        from config import MM_VOLATILITY_ADJUSTED_ENABLED, MM_VOLATILITY_SPREAD_MULTIPLIER
+
+        if not MM_VOLATILITY_ADJUSTED_ENABLED:
+            return base_multiplier
+
+        vol = self.get_volatility(market_key)
+        vol_threshold = 0.01
+
+        if vol <= vol_threshold:
+            return base_multiplier
+
+        multiplier = base_multiplier + (vol - vol_threshold) * MM_VOLATILITY_SPREAD_MULTIPLIER * 100
+        return min(multiplier, max_multiplier)
+
+    def is_high_volatility(self, market_key: str, threshold: float = 0.03) -> bool:
+        """Check if a market is in high volatility mode."""
+        return self.get_volatility(market_key) > threshold
+
+
+# ---------------------------------------------------------------------------
+# Strategy #37: Lead-Lag Market Making
+# ---------------------------------------------------------------------------
+
+class LeadLagMM:
+    """Market make on lagging platforms using leader's price as fair value.
+
+    Identifies which platform leads price discovery and uses that price
+    to quote on slower platforms.
+    """
+
+    def __init__(self):
+        self._last_updates: dict[str, dict[str, float]] = {}
+        self._prices: dict[str, dict[str, float]] = {}
+        self._lock = threading.Lock()
+
+    def record_update(
+        self,
+        market_key: str,
+        platform: str,
+        price: float,
+    ) -> None:
+        """Record a price update from a platform.
+
+        Args:
+            market_key: Market identifier.
+            platform: Platform name.
+            price: Current price.
+        """
+        now = time.time()
+        with self._lock:
+            if market_key not in self._last_updates:
+                self._last_updates[market_key] = {}
+                self._prices[market_key] = {}
+            self._last_updates[market_key][platform] = now
+            self._prices[market_key][platform] = price
+
+    def get_leader(self, market_key: str) -> str | None:
+        """Identify the leading platform for a market.
+
+        The leader is the platform that updated most recently.
+
+        Returns:
+            Platform name of the leader, or None.
+        """
+        from config import LEAD_LAG_MM_ENABLED
+
+        if not LEAD_LAG_MM_ENABLED:
+            return None
+
+        with self._lock:
+            updates = self._last_updates.get(market_key, {})
+            if not updates:
+                return None
+            return max(updates.keys(), key=lambda p: updates[p])
+
+    def get_lag_ms(self, market_key: str, platform: str) -> float:
+        """Get lag in milliseconds for a platform relative to leader.
+
+        Args:
+            market_key: Market identifier.
+            platform: Platform to check lag for.
+
+        Returns:
+            Lag in milliseconds, or 0 if platform is leader.
+        """
+        leader = self.get_leader(market_key)
+        if not leader or leader == platform:
+            return 0.0
+
+        with self._lock:
+            leader_time = self._last_updates.get(market_key, {}).get(leader, 0)
+            platform_time = self._last_updates.get(market_key, {}).get(platform, 0)
+            return max(0, (leader_time - platform_time) * 1000)
+
+    def get_fair_value(self, market_key: str) -> float | None:
+        """Get fair value from the leading platform.
+
+        Returns:
+            Leader's price as fair value, or None.
+        """
+        leader = self.get_leader(market_key)
+        if not leader:
+            return None
+
+        with self._lock:
+            return self._prices.get(market_key, {}).get(leader)
+
+    def should_quote(
+        self,
+        market_key: str,
+        platform: str,
+        min_lag_ms: float = 500.0,
+    ) -> bool:
+        """Check if we should quote on a lagging platform.
+
+        Only quote if the platform lags the leader by at least min_lag_ms.
+
+        Args:
+            market_key: Market identifier.
+            platform: Platform to check.
+            min_lag_ms: Minimum lag to trigger quoting.
+
+        Returns:
+            True if platform lags enough to quote.
+        """
+        from config import LEAD_LAG_MM_ENABLED, LEAD_LAG_MIN_DELAY_MS
+
+        if not LEAD_LAG_MM_ENABLED:
+            return False
+
+        min_lag_ms = min_lag_ms or LEAD_LAG_MIN_DELAY_MS
+        lag = self.get_lag_ms(market_key, platform)
+        return lag >= min_lag_ms
+
+
+# ---------------------------------------------------------------------------
+# Strategy #38: Toxic Flow Detector
+# ---------------------------------------------------------------------------
+
+class ToxicFlowDetector:
+    """Detect adverse selection and pause quoting.
+
+    Tracks fill patterns to identify when informed traders are
+    picking off our quotes, and pauses quoting when toxicity is high.
+    """
+
+    def __init__(
+        self,
+        lookback_trades: int = 20,
+        toxicity_threshold: float = 0.60,
+    ):
+        """Initialize the toxic flow detector.
+
+        Args:
+            lookback_trades: Number of recent trades to analyze.
+            toxicity_threshold: Threshold above which to pause (0-1).
+        """
+        self.lookback_trades = lookback_trades
+        self.toxicity_threshold = toxicity_threshold
+        self._fills: dict[str, list[dict]] = {}
+        self._pause_until: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def record_fill(
+        self,
+        market_key: str,
+        side: str,
+        price: float,
+        size: float,
+        mid_at_fill: float,
+    ) -> None:
+        """Record a fill for toxicity analysis.
+
+        Args:
+            market_key: Market identifier.
+            side: "bid" or "ask" (which side got filled).
+            price: Fill price.
+            size: Fill size in dollars.
+            mid_at_fill: Mid price at time of fill.
+        """
+        now = time.time()
+        with self._lock:
+            if market_key not in self._fills:
+                self._fills[market_key] = []
+
+            adverse = False
+            if side == "bid" and mid_at_fill < price:
+                adverse = True
+            elif side == "ask" and mid_at_fill > price:
+                adverse = True
+
+            self._fills[market_key].append({
+                "timestamp": now,
+                "side": side,
+                "price": price,
+                "size": size,
+                "mid": mid_at_fill,
+                "adverse": adverse,
+            })
+
+            self._fills[market_key] = self._fills[market_key][-self.lookback_trades:]
+
+    def get_toxicity(self, market_key: str) -> float:
+        """Calculate toxicity ratio for a market.
+
+        Toxicity = (adverse fills) / (total fills)
+
+        Returns:
+            Toxicity ratio (0-1). Higher = more informed flow.
+        """
+        with self._lock:
+            fills = self._fills.get(market_key, [])
+            if len(fills) < 3:
+                return 0.0
+
+            adverse_count = sum(1 for f in fills if f["adverse"])
+            return adverse_count / len(fills)
+
+    def should_pause(self, market_key: str) -> bool:
+        """Check if quoting should be paused due to toxic flow.
+
+        Args:
+            market_key: Market identifier.
+
+        Returns:
+            True if quoting should be paused.
+        """
+        from config import MM_TOXIC_FLOW_ENABLED
+
+        if not MM_TOXIC_FLOW_ENABLED:
+            return False
+
+        with self._lock:
+            if self._pause_until.get(market_key, 0) > time.time():
+                return True
+
+        toxicity = self.get_toxicity(market_key)
+        return toxicity >= self.toxicity_threshold
+
+    def trigger_pause(
+        self,
+        market_key: str,
+        pause_seconds: float | None = None,
+    ) -> None:
+        """Trigger a quoting pause for a market.
+
+        Args:
+            market_key: Market identifier.
+            pause_seconds: Duration of pause (default from config).
+        """
+        from config import MM_TOXIC_FLOW_PAUSE_SECONDS
+
+        pause_seconds = pause_seconds or MM_TOXIC_FLOW_PAUSE_SECONDS
+        toxicity = self.get_toxicity(market_key)
+        with self._lock:
+            self._pause_until[market_key] = time.time() + pause_seconds
+        logger.warning(
+            "Toxic flow detected on %s (%.1f%%), pausing for %.0fs",
+            market_key, toxicity * 100, pause_seconds,
+        )
+
+    def get_pause_remaining(self, market_key: str) -> float:
+        """Get remaining pause time in seconds."""
+        with self._lock:
+            return max(0, self._pause_until.get(market_key, 0) - time.time())
+
+
+# Module-level instances for convenience
+_volatility_tracker: VolatilityTracker | None = None
+_lead_lag_mm: LeadLagMM | None = None
+_toxic_flow_detector: ToxicFlowDetector | None = None
+
+
+def get_volatility_tracker() -> VolatilityTracker:
+    """Get or create the module-level VolatilityTracker."""
+    global _volatility_tracker
+    if _volatility_tracker is None:
+        from config import MM_VOLATILITY_LOOKBACK_SECONDS
+        _volatility_tracker = VolatilityTracker(
+            lookback_seconds=MM_VOLATILITY_LOOKBACK_SECONDS,
+        )
+    return _volatility_tracker
+
+
+def get_lead_lag_mm() -> LeadLagMM:
+    """Get or create the module-level LeadLagMM."""
+    global _lead_lag_mm
+    if _lead_lag_mm is None:
+        _lead_lag_mm = LeadLagMM()
+    return _lead_lag_mm
+
+
+def get_toxic_flow_detector() -> ToxicFlowDetector:
+    """Get or create the module-level ToxicFlowDetector."""
+    global _toxic_flow_detector
+    if _toxic_flow_detector is None:
+        from config import MM_TOXIC_FLOW_THRESHOLD
+        _toxic_flow_detector = ToxicFlowDetector(
+            toxicity_threshold=MM_TOXIC_FLOW_THRESHOLD,
+        )
+    return _toxic_flow_detector
