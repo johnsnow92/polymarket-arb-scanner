@@ -445,3 +445,160 @@ def _refine_triangular_with_clob(opportunities: list[dict], min_profit: float) -
     if dropped:
         logger.info("Dropped %d triangular candidates at CLOB ask prices.", dropped)
     return refined
+
+
+# ---------------------------------------------------------------------------
+# Strategy #32: N-Way Exotic Arbitrage (4+ platforms)
+# ---------------------------------------------------------------------------
+
+
+def scan_nway_arb(
+    platform_markets: dict[str, list[dict]],
+    platform_clients: dict,
+    min_profit: float = 0.005,
+    min_confidence: float = 0.6,
+    max_legs: int = 5,
+) -> list[dict]:
+    """Scan for N-way cross-platform arbitrage (4+ platforms).
+
+    Extends triangular by exhaustively searching for profitable cycles
+    across 4 or more platforms.
+
+    Args:
+        platform_markets: Dict mapping platform name to list of market dicts.
+        platform_clients: Dict mapping platform name to client instance.
+        min_profit: Minimum net profit threshold.
+        min_confidence: Minimum confidence tier for fuzzy matching.
+        max_legs: Maximum number of platforms to include in a cycle.
+
+    Returns:
+        List of opportunity dicts sorted by net_profit descending.
+    """
+    from config import NWAY_ARB_ENABLED, NWAY_ARB_MAX_LEGS
+
+    if not NWAY_ARB_ENABLED:
+        return []
+
+    max_legs = min(max_legs, NWAY_ARB_MAX_LEGS)
+    opportunities = []
+
+    active_platforms = {name: mkts for name, mkts in platform_markets.items() if mkts}
+    platforms = list(active_platforms.keys())
+
+    if len(platforms) < 4:
+        logger.debug("N-way scan requires 4+ platforms, only %d active.", len(platforms))
+        return opportunities
+
+    logger.info(
+        "N-way scan: searching %d platforms for 4-%d leg cycles: %s",
+        len(platforms), max_legs, ", ".join(platforms),
+    )
+
+    all_matches = []
+    for pa, pb in combinations(platforms, 2):
+        markets_a = active_platforms[pa]
+        markets_b = active_platforms[pb]
+        if not markets_a or not markets_b:
+            continue
+
+        if SEMANTIC_MATCHING_ENABLED:
+            matched = match_cross_platform_semantic(
+                markets_a, markets_b, pa, pb,
+                threshold=SEMANTIC_MATCH_THRESHOLD,
+                min_confidence=min_confidence,
+            )
+        else:
+            matched = match_cross_platform(
+                markets_a, markets_b, pa, pb,
+                threshold=FUZZY_MATCH_THRESHOLD,
+                min_confidence=min_confidence,
+            )
+        all_matches.extend(matched)
+
+    if not all_matches:
+        return opportunities
+
+    multi_groups = _group_cross_matches(all_matches)
+
+    nway_groups = {k: v for k, v in multi_groups.items() if len(v) >= 4}
+    logger.info("Found %d markets appearing on 4+ platforms.", len(nway_groups))
+
+    if not nway_groups:
+        return opportunities
+
+    for market_title, platforms_dict in nway_groups.items():
+        platform_prices = {}
+
+        for platform_name, market in platforms_dict.items():
+            client = platform_clients.get(platform_name)
+            yes_price, no_price = _get_market_prices(market, platform_name, client)
+            if yes_price is not None and no_price is not None:
+                platform_prices[platform_name] = {
+                    "yes": yes_price,
+                    "no": no_price,
+                    "market": market,
+                }
+
+        if len(platform_prices) < 4:
+            continue
+
+        best_yes_platform = min(platform_prices, key=lambda p: platform_prices[p]["yes"])
+        best_no_platform = min(platform_prices, key=lambda p: platform_prices[p]["no"])
+
+        best_yes = platform_prices[best_yes_platform]["yes"]
+        best_no = platform_prices[best_no_platform]["no"]
+        total_cost = best_yes + best_no
+
+        if total_cost >= 1.0:
+            continue
+
+        from fees import net_profit_nway
+        platform_price_pairs = [
+            (best_yes_platform, best_yes),
+            (best_no_platform, best_no),
+        ]
+        result = net_profit_nway(platform_price_pairs)
+
+        if result["net_profit"] < min_profit:
+            continue
+
+        yes_market = platform_prices[best_yes_platform]["market"]
+        no_market = platform_prices[best_no_platform]["market"]
+
+        opp = {
+            "type": f"NWayArb({len(platform_prices)} platforms)",
+            "_layer": 1,
+            "market": f"{market_title[:40]}... (N-way arb)",
+            "prices": (
+                f"{best_yes_platform}_Y={best_yes:.3f} + "
+                f"{best_no_platform}_N={best_no:.3f} = {total_cost:.3f}"
+            ),
+            "total_cost": f"${total_cost:.2f}",
+            "net_profit": result["net_profit"],
+            "net_roi": result.get("net_roi", 0),
+            "confidence": 0.85,
+            "_market_key": market_title,
+            "_platform_a": best_yes_platform,
+            "_platform_b": best_no_platform,
+            "_price_a": best_yes,
+            "_price_b": best_no,
+            "_side_a": "yes",
+            "_side_b": "no",
+            "_yes_market": yes_market,
+            "_no_market": no_market,
+            "_all_platforms": list(platform_prices.keys()),
+            "_num_platforms": len(platform_prices),
+        }
+
+        if best_yes_platform == "polymarket":
+            opp["_token_ids"] = _extract_token_ids(yes_market)
+        elif best_no_platform == "polymarket":
+            opp["_token_ids"] = _extract_token_ids(no_market)
+
+        opportunities.append(opp)
+
+    opportunities = filter_dust(opportunities, min_amount=min_profit)
+    opportunities.sort(key=lambda o: o["net_profit"], reverse=True)
+
+    logger.info("N-way scan: found %d opportunities", len(opportunities))
+    return opportunities

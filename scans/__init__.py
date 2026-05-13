@@ -18,7 +18,8 @@ from scans.sxbet import scan_sxbet_backall, scan_sxbet_backlay
 from scans.matchbook import scan_matchbook_backall, scan_matchbook_backlay
 from scans.gemini import scan_gemini_binary, scan_gemini_multi
 from scans.ibkr import scan_ibkr_binary
-from scans.triangular import scan_triangular
+from scans.triangular import scan_triangular, scan_nway_arb
+from scans.bracket import scan_bracket_arb, _refine_bracket_with_clob
 from scans.multi_cross import scan_multi_cross
 from scans.stale import scan_stale_prices
 from scans.resolution import scan_resolution_snipes
@@ -49,6 +50,9 @@ __all__ = [
     "scan_gemini_multi",
     "scan_ibkr_binary",
     "scan_triangular",
+    "scan_nway_arb",
+    "scan_bracket_arb",
+    "_refine_bracket_with_clob",
     "scan_multi_cross",
     "scan_stale_prices",
     "scan_resolution_snipes",
