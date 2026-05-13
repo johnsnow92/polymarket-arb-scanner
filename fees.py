@@ -1759,3 +1759,286 @@ def net_profit_new_market(
         "net_profit": net_profit,
         "net_roi": net_roi,
     }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #35: API Outage Arbitrage
+# ---------------------------------------------------------------------------
+
+
+def net_profit_stale_price(
+    stale_price: float,
+    fresh_price: float,
+    platform: str = "polymarket",
+) -> dict:
+    """Calculate net profit for API outage / stale price arbitrage.
+
+    Exploit stale prices during platform API outages.
+
+    Layer 2: Near-arbitrage — exploits temporary information asymmetry.
+
+    Args:
+        stale_price: Stale price on the outage platform.
+        fresh_price: Fresh price on healthy platform(s).
+        platform: Platform with stale prices for fee calculation.
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, net_roi.
+    """
+    gross_spread = abs(fresh_price - stale_price)
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": 0,
+            "fees": 0,
+            "net_profit": 0,
+            "net_roi": 0,
+        }
+
+    entry_price = stale_price
+    if platform == "polymarket":
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+    elif platform == "kalshi":
+        fees = kalshi_taker_fee(entry_price) * 2
+        gas = 0
+    else:
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / entry_price if entry_price > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "net_roi": net_roi,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #39: Social Sentiment Signals
+# ---------------------------------------------------------------------------
+
+
+def net_profit_social_sentiment(
+    market_price: float,
+    implied_prob: float,
+    platform: str = "polymarket",
+) -> dict:
+    """Calculate net profit for social sentiment divergence trade.
+
+    Trade when social media sentiment diverges from market price.
+
+    Layer 4: Informed trading — directional bet based on sentiment edge.
+
+    Args:
+        market_price: Current market price (entry price).
+        implied_prob: Implied probability from sentiment analysis.
+        platform: Platform for fee calculation.
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, net_roi.
+    """
+    gross_spread = abs(implied_prob - market_price)
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": 0,
+            "fees": 0,
+            "net_profit": 0,
+            "net_roi": 0,
+        }
+
+    entry_price = market_price
+    if platform == "polymarket":
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+    elif platform == "kalshi":
+        fees = kalshi_taker_fee(entry_price) * 2
+        gas = 0
+    else:
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / entry_price if entry_price > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "net_roi": net_roi,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #40: Expert Forecaster Divergence
+# ---------------------------------------------------------------------------
+
+
+def net_profit_expert_divergence(
+    market_price: float,
+    expert_prob: float,
+    platform: str = "polymarket",
+) -> dict:
+    """Calculate net profit for expert forecaster divergence trade.
+
+    Trade when superforecaster predictions diverge from market prices.
+
+    Layer 4: Informed trading — directional bet based on expert edge.
+
+    Args:
+        market_price: Current market price (entry price).
+        expert_prob: Expert/superforecaster probability estimate.
+        platform: Platform for fee calculation.
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, net_roi.
+    """
+    gross_spread = abs(expert_prob - market_price)
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": 0,
+            "fees": 0,
+            "net_profit": 0,
+            "net_roi": 0,
+        }
+
+    entry_price = market_price
+    if platform == "polymarket":
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+    elif platform == "kalshi":
+        fees = kalshi_taker_fee(entry_price) * 2
+        gas = 0
+    else:
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / entry_price if entry_price > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "net_roi": net_roi,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #42: Insider Pattern Detection
+# ---------------------------------------------------------------------------
+
+
+def net_profit_insider_pattern(
+    market_price: float,
+    expected_edge: float,
+    platform: str = "polymarket",
+) -> dict:
+    """Calculate net profit for insider pattern detection trade.
+
+    Follow unusual order flow that may indicate informed trading.
+
+    Layer 4: Informed trading — follow informed money.
+
+    Args:
+        market_price: Current market price (entry price).
+        expected_edge: Expected edge based on flow analysis.
+        platform: Platform for fee calculation.
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, net_roi.
+    """
+    if expected_edge <= 0:
+        return {
+            "gross_spread": 0,
+            "fees": 0,
+            "net_profit": 0,
+            "net_roi": 0,
+        }
+
+    entry_price = market_price
+    if platform == "polymarket":
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+    elif platform == "kalshi":
+        fees = kalshi_taker_fee(entry_price) * 2
+        gas = 0
+    else:
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+
+    total_fees = fees + gas
+    net_profit = expected_edge - total_fees
+    net_roi = net_profit / entry_price if entry_price > 0 else 0
+
+    return {
+        "gross_spread": expected_edge,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "net_roi": net_roi,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #43: Cross-Category Correlation Signals
+# ---------------------------------------------------------------------------
+
+
+def net_profit_cross_category(
+    market_price: float,
+    implied_prob: float,
+    platform: str = "polymarket",
+) -> dict:
+    """Calculate net profit for cross-category correlation trade.
+
+    Trade when external signals (BTC price, etc.) imply different probability.
+
+    Layer 4: Informed trading — exploit slow price discovery.
+
+    Args:
+        market_price: Current market price (entry price).
+        implied_prob: Implied probability from external signals.
+        platform: Platform for fee calculation.
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, net_roi.
+    """
+    gross_spread = abs(implied_prob - market_price)
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": 0,
+            "fees": 0,
+            "net_profit": 0,
+            "net_roi": 0,
+        }
+
+    entry_price = market_price
+    if platform == "polymarket":
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+    elif platform == "kalshi":
+        fees = kalshi_taker_fee(entry_price) * 2
+        gas = 0
+    else:
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / entry_price if entry_price > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "net_roi": net_roi,
+    }

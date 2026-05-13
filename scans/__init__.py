@@ -31,6 +31,10 @@ from scans.conditional import scan_conditional_arb, _refine_conditional_with_clo
 from scans.settlement_timing import scan_settlement_timing, _refine_settlement_with_clob
 from scans.new_market import scan_new_market_mispricing
 from scans.api_outage import scan_api_outage_arb
+from scans.social_sentiment import scan_social_sentiment
+from scans.expert_divergence import scan_expert_divergence
+from scans.insider_pattern import scan_insider_pattern, get_order_flow_tracker
+from scans.cross_category import scan_cross_category, get_signal_fetcher
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, capital_efficiency_score
 
 __all__ = [
@@ -81,4 +85,10 @@ __all__ = [
     "_fetch_clob_for_market",
     "_parallel_fetch_kalshi",
     "capital_efficiency_score",
+    "scan_social_sentiment",
+    "scan_expert_divergence",
+    "scan_insider_pattern",
+    "get_order_flow_tracker",
+    "scan_cross_category",
+    "get_signal_fetcher",
 ]
