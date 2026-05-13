@@ -26,6 +26,7 @@ from scans.convergence import scan_convergence
 from scans.rewards import scan_polymarket_rewards, scan_kalshi_rewards
 from scans.fee_promo import scan_fee_promo
 from scans.cross_mm import scan_cross_mm
+from scans.conditional import scan_conditional_arb, _refine_conditional_with_clob
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, capital_efficiency_score
 
 __all__ = [
@@ -56,6 +57,8 @@ __all__ = [
     "scan_kalshi_rewards",
     "scan_fee_promo",
     "scan_cross_mm",
+    "scan_conditional_arb",
+    "_refine_conditional_with_clob",
     "_refine_binary_with_clob",
     "_refine_negrisk_with_clob",
     "_refine_cross_with_clob",

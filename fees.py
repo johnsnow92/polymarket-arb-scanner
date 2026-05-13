@@ -1455,3 +1455,307 @@ def net_profit_whale_copy(entry_price: float, exit_price: float) -> float:
     fee_buy = polymarket_taker_fee(entry_price)
     fee_sell = polymarket_taker_fee(exit_price)
     return (exit_price - entry_price) - fee_buy - fee_sell
+
+
+# ---------------------------------------------------------------------------
+# Strategy #30: Conditional Market Arbitrage
+# ---------------------------------------------------------------------------
+
+
+def net_profit_conditional(
+    p_x_given_y: float,
+    p_y: float,
+    p_x: float,
+    direction: str = "BUY_CONDITIONAL",
+) -> dict:
+    """Calculate net profit for conditional market arbitrage.
+
+    Exploits mispricings between conditional and unconditional markets:
+        P(X|Y) × P(Y) should equal P(X)
+
+    Strategy:
+    - BUY_CONDITIONAL: Buy P(X|Y) and P(Y), sell P(X)
+    - BUY_UNCONDITIONAL: Buy P(X), sell P(X|Y) and P(Y)
+
+    Layer 1: Pure arbitrage when the combined probability diverges.
+
+    Args:
+        p_x_given_y: Price of conditional market P(X|Y).
+        p_y: Price of condition market P(Y).
+        p_x: Price of unconditional market P(X).
+        direction: "BUY_CONDITIONAL" or "BUY_UNCONDITIONAL".
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, total_cost, net_roi.
+    """
+    combined = p_x_given_y * p_y
+
+    if direction == "BUY_CONDITIONAL":
+        total_cost = p_x_given_y + p_y
+        gross_spread = p_x - combined
+    else:
+        total_cost = p_x
+        gross_spread = combined - p_x
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": gross_spread,
+            "fees": 0,
+            "net_profit": gross_spread,
+            "total_cost": total_cost,
+            "net_roi": 0,
+        }
+
+    if direction == "BUY_CONDITIONAL":
+        fee_cond = polymarket_taker_fee(p_x_given_y)
+        fee_y = polymarket_taker_fee(p_y)
+        fee_x = polymarket_taker_fee(p_x)
+        fees = fee_cond + fee_y + fee_x
+        gas = POLYGON_GAS_ESTIMATE * 3
+    else:
+        fee_x = polymarket_taker_fee(p_x)
+        fee_cond = polymarket_taker_fee(p_x_given_y)
+        fee_y = polymarket_taker_fee(p_y)
+        fees = fee_x + fee_cond + fee_y
+        gas = POLYGON_GAS_ESTIMATE * 3
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / total_cost if total_cost > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "total_cost": total_cost,
+        "net_roi": net_roi,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #31: Bracket/Range Market Arbitrage
+# ---------------------------------------------------------------------------
+
+
+def net_profit_bracket(
+    bracket_prices: list[float],
+    platform: str = "kalshi",
+) -> dict:
+    """Calculate net profit for bracket/range market arbitrage.
+
+    Exploits when the sum of mutually exclusive range brackets exceeds 1.0:
+        Σ(P(range_i)) > 1.0
+
+    Example: "BTC $60k-70k" + "BTC $70k-80k" + "BTC $80k+" > 1.0
+
+    Layer 1: Pure arbitrage — buy all brackets for guaranteed payout.
+
+    Args:
+        bracket_prices: List of YES prices for each bracket.
+        platform: Platform for fee calculation ("kalshi" or "polymarket").
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, total_cost, net_roi.
+    """
+    total_cost = sum(bracket_prices)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": gross_spread,
+            "fees": 0,
+            "net_profit": gross_spread,
+            "total_cost": total_cost,
+            "net_roi": 0,
+        }
+
+    if platform == "kalshi":
+        fees = sum(kalshi_taker_fee(p) for p in bracket_prices)
+        gas = 0
+    else:
+        fees = sum(polymarket_taker_fee(p) for p in bracket_prices)
+        gas = POLYGON_GAS_ESTIMATE * len(bracket_prices)
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / total_cost if total_cost > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "total_cost": total_cost,
+        "net_roi": net_roi,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #32: N-Way Multi-Leg Exotic Arbitrage
+# ---------------------------------------------------------------------------
+
+
+def net_profit_nway(
+    platform_prices: list[tuple[str, float]],
+) -> dict:
+    """Calculate net profit for N-way cross-platform arbitrage.
+
+    Extends triangular (3-way) to N-way cycles across 4+ platforms.
+
+    Args:
+        platform_prices: List of (platform, price) tuples for each leg.
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, total_cost, net_roi.
+    """
+    total_cost = sum(price for _, price in platform_prices)
+    gross_spread = 1.0 - total_cost
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": gross_spread,
+            "fees": 0,
+            "net_profit": gross_spread,
+            "total_cost": total_cost,
+            "net_roi": 0,
+        }
+
+    fees = 0.0
+    gas = 0.0
+
+    for platform, price in platform_prices:
+        if platform == "polymarket":
+            fees += polymarket_taker_fee(price)
+            gas += POLYGON_GAS_ESTIMATE
+        elif platform == "kalshi":
+            fees += kalshi_taker_fee(price)
+        elif platform in ("betfair", "smarkets"):
+            pass
+        elif platform == "gemini":
+            fees += price * GEMINI_TAKER_RATE * price * (1 - price)
+        else:
+            fees += polymarket_taker_fee(price)
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / total_cost if total_cost > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "total_cost": total_cost,
+        "net_roi": net_roi,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #33: Settlement Timing Arbitrage
+# ---------------------------------------------------------------------------
+
+
+def net_profit_settlement_timing(
+    current_price: float,
+    expected_payout: float = 1.0,
+    platform: str = "polymarket",
+) -> dict:
+    """Calculate net profit for settlement timing arbitrage.
+
+    Buy winning outcome on slow-settling platform before settlement propagates.
+
+    Layer 2: Near-arbitrage — outcome is known but not yet settled.
+
+    Args:
+        current_price: Current trading price on the slow platform.
+        expected_payout: Expected payout (usually 1.0 for binary YES).
+        platform: Platform for fee calculation.
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, net_roi.
+    """
+    gross_spread = expected_payout - current_price
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": gross_spread,
+            "fees": 0,
+            "net_profit": gross_spread,
+            "net_roi": 0,
+        }
+
+    if platform == "polymarket":
+        fees = polymarket_taker_fee(current_price)
+        gas = POLYGON_GAS_ESTIMATE
+    elif platform == "kalshi":
+        fees = kalshi_taker_fee(current_price)
+        gas = 0
+    else:
+        fees = polymarket_taker_fee(current_price)
+        gas = POLYGON_GAS_ESTIMATE
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / current_price if current_price > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "net_roi": net_roi,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Strategy #34: New Market Mispricing
+# ---------------------------------------------------------------------------
+
+
+def net_profit_new_market(
+    market_price: float,
+    fair_value: float,
+    platform: str = "polymarket",
+) -> dict:
+    """Calculate net profit for new market mispricing.
+
+    Exploit price inefficiency in first 24-48h of new markets.
+
+    Layer 2: Near-arbitrage — directional bet on price convergence.
+
+    Args:
+        market_price: Current market price.
+        fair_value: Estimated fair value from multi-source consensus.
+        platform: Platform for fee calculation.
+
+    Returns:
+        Dict with gross_spread, fees, net_profit, net_roi.
+    """
+    gross_spread = abs(fair_value - market_price)
+
+    if gross_spread <= 0:
+        return {
+            "gross_spread": 0,
+            "fees": 0,
+            "net_profit": 0,
+            "net_roi": 0,
+        }
+
+    entry_price = market_price
+    if platform == "polymarket":
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+    elif platform == "kalshi":
+        fees = kalshi_taker_fee(entry_price) * 2
+        gas = 0
+    else:
+        fees = polymarket_taker_fee(entry_price) * 2
+        gas = POLYGON_GAS_ESTIMATE * 2
+
+    total_fees = fees + gas
+    net_profit = gross_spread - total_fees
+    net_roi = net_profit / entry_price if entry_price > 0 else 0
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": total_fees,
+        "net_profit": net_profit,
+        "net_roi": net_roi,
+    }
