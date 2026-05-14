@@ -6,7 +6,10 @@ __pycache__/
 nul
 trades.db
 snapshots.db
+decisions.jsonl
 *.log
 *.code-workspace
 .opencode/
 .mcp.json
+.firecrawl/
+.worktrees/
