@@ -1,5 +1,8 @@
 """CLI entry point — argument parsing and initialization."""
 
+from sentry_init import init_sentry
+init_sentry()
+
 import argparse
 import io
 import logging
