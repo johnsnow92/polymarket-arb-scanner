@@ -112,7 +112,6 @@ class LatencyMonitor:
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._running = False
         self._thread: threading.Thread | None = None
 
     def _ensure_tracker(self, platform: str) -> LatencyTracker:
@@ -269,7 +268,6 @@ class LatencyMonitor:
             if self._thread and self._thread.is_alive():
                 return
             self._stop_event.clear()
-            self._running = True
             self._thread = threading.Thread(
                 target=self._monitoring_loop,
                 args=(interval_seconds,),
@@ -283,7 +281,6 @@ class LatencyMonitor:
     def stop_monitoring(self) -> None:
         """Stop background monitoring."""
         with self._state_lock:
-            self._running = False
             self._stop_event.set()
             thread = self._thread
         if thread and thread.is_alive():
