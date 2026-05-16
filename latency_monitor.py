@@ -212,7 +212,7 @@ class LatencyMonitor:
             return None
 
         latencies = {p: self.get_latency(p) for p in platforms}
-        valid = {p: l for p, l in latencies.items() if l > 0}
+        valid = {p: lat for p, lat in latencies.items() if lat > 0}
 
         if not valid:
             return platforms[0]
@@ -285,13 +285,16 @@ class LatencyMonitor:
 
 
 _monitor: LatencyMonitor | None = None
+_monitor_lock = threading.Lock()
 
 
 def get_latency_monitor() -> LatencyMonitor:
     """Get or create the module-level LatencyMonitor instance."""
     global _monitor
     if _monitor is None:
-        _monitor = LatencyMonitor()
+        with _monitor_lock:
+            if _monitor is None:
+                _monitor = LatencyMonitor()
     return _monitor
 
 
@@ -376,11 +379,14 @@ class RegionRouter:
 
 
 _router: RegionRouter | None = None
+_router_lock = threading.Lock()
 
 
 def get_region_router() -> RegionRouter:
     """Get or create the module-level RegionRouter instance."""
     global _router
     if _router is None:
-        _router = RegionRouter()
+        with _router_lock:
+            if _router is None:
+                _router = RegionRouter()
     return _router
