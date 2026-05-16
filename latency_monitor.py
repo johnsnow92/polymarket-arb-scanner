@@ -253,10 +253,7 @@ class LatencyMonitor:
             except Exception as e:
                 logger.exception("Latency monitoring error: %s", e)
 
-            for _ in range(int(interval_seconds * 10)):
-                if self._stop_event.is_set():
-                    break
-                time.sleep(0.1)
+            self._stop_event.wait(interval_seconds)
 
     def start_monitoring(self, interval_seconds: float = 30.0) -> None:
         """Start background latency monitoring.
