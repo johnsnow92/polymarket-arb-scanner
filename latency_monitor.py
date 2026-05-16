@@ -110,6 +110,8 @@ class LatencyMonitor:
     def __init__(self):
         self._trackers: dict[str, LatencyTracker] = {}
         self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._running = False
         self._thread: threading.Thread | None = None
 
@@ -246,14 +248,14 @@ class LatencyMonitor:
 
     def _monitoring_loop(self, interval_seconds: float = 30.0) -> None:
         """Background monitoring loop."""
-        while self._running:
+        while not self._stop_event.is_set():
             try:
                 self.ping_all()
             except Exception as e:
                 logger.exception("Latency monitoring error: %s", e)
 
             for _ in range(int(interval_seconds * 10)):
-                if not self._running:
+                if self._stop_event.is_set():
                     break
                 time.sleep(0.1)
 
@@ -263,24 +265,29 @@ class LatencyMonitor:
         Args:
             interval_seconds: Interval between ping rounds.
         """
-        if self._running:
-            return
-
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._monitoring_loop,
-            args=(interval_seconds,),
-            daemon=True,
-            name="LatencyMonitor",
-        )
-        self._thread.start()
+        with self._state_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._running = True
+            self._thread = threading.Thread(
+                target=self._monitoring_loop,
+                args=(interval_seconds,),
+                daemon=True,
+                name="LatencyMonitor",
+            )
+            thread = self._thread
+        thread.start()
         logger.info("Latency monitoring started (interval: %.0fs)", interval_seconds)
 
     def stop_monitoring(self) -> None:
         """Stop background monitoring."""
-        self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5.0)
+        with self._state_lock:
+            self._running = False
+            self._stop_event.set()
+            thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=5.0)
         logger.info("Latency monitoring stopped")
 
 
