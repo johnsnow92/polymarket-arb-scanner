@@ -12,3 +12,4 @@ numpy>=1.24.0
 ib_insync>=0.9.70
 duckdb>=1.1.0
 finnhub-python==2.4.27
+sentry-sdk>=2.60.0

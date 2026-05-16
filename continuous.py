@@ -1,5 +1,8 @@
 """Continuous mode: periodic re-scans with WebSocket feeds, settlement, and dashboard updates."""
 
+from sentry_init import init_sentry
+init_sentry()
+
 import asyncio
 import json
 import logging
