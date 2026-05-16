@@ -268,7 +268,7 @@ class TwitterClient:
         Returns:
             Sentiment dict or None if insufficient data.
         """
-        cache_key = f"sentiment:{market_title}"
+        cache_key = f"sentiment:{market_title}:{int(lookback_hours)}"
 
         with self._lock:
             if cache_key in self._cache:

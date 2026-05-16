@@ -79,7 +79,7 @@ class SuperforecasterClient:
             logger.debug("GJO API key not configured")
             return []
 
-        cache_key = f"gjo_search:{query}"
+        cache_key = f"gjo_search:{query}:{limit}"
         cached = self._get_cached(cache_key)
         if cached:
             return cached.get("results", [])
@@ -132,7 +132,7 @@ class SuperforecasterClient:
             logger.debug("INFER API key not configured")
             return []
 
-        cache_key = f"infer_search:{query}"
+        cache_key = f"infer_search:{query}:{limit}"
         cached = self._get_cached(cache_key)
         if cached:
             return cached.get("results", [])

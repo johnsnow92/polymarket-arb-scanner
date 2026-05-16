@@ -1488,6 +1488,9 @@ def net_profit_conditional(
     Returns:
         Dict with gross_spread, fees, net_profit, total_cost, net_roi.
     """
+    if direction not in {"BUY_CONDITIONAL", "BUY_UNCONDITIONAL"}:
+        raise ValueError(f"Unsupported direction: {direction}")
+
     combined = p_x_given_y * p_y
 
     if direction == "BUY_CONDITIONAL":

@@ -476,11 +476,14 @@ class CapitalOptimizer:
 
 # Module-level singleton for convenience
 _optimizer: CapitalOptimizer | None = None
+_optimizer_lock = threading.Lock()
 
 
 def get_capital_optimizer() -> CapitalOptimizer:
     """Get or create the module-level CapitalOptimizer instance."""
     global _optimizer
     if _optimizer is None:
-        _optimizer = CapitalOptimizer()
+        with _optimizer_lock:
+            if _optimizer is None:
+                _optimizer = CapitalOptimizer()
     return _optimizer

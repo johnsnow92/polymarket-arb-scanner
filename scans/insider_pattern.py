@@ -273,7 +273,13 @@ def scan_insider_pattern(
         market_price = market.get("yes_price") or market.get("yes_mid", 0)
         market_key = market.get("condition_id") or market.get("id", "")
 
-        if not title or not market_price or market_price <= 0 or market_price >= 1:
+        if (
+            not title
+            or not market_key
+            or not market_price
+            or market_price <= 0
+            or market_price >= 1
+        ):
             continue
 
         anomaly = tracker.detect_anomaly(market_key)

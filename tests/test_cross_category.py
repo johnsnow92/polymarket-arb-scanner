@@ -151,12 +151,12 @@ class TestScanCrossCategory:
                 min_profit=0.01,
             )
 
-            if result:
-                opp = result[0]
-                assert opp["type"] == "CrossCategory"
-                assert opp["_layer"] == 4
-                assert "_signal_value" in opp
-                assert "_divergence" in opp
+            assert result, "Expected a cross-category opportunity for this fixture"
+            opp = result[0]
+            assert opp["type"] == "CrossCategory"
+            assert opp["_layer"] == 4
+            assert "_signal_value" in opp
+            assert "_divergence" in opp
 
     def test_low_divergence_filtered(self):
         markets = [

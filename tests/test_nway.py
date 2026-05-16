@@ -75,6 +75,7 @@ class TestScanNwayArb:
         ]
         result = scan_nway_arb(matches, min_platforms=4, min_profit=0.001)
 
+        assert result, "Expected at least one N-way opportunity for this fixture"
         for opp in result:
             assert opp["type"] == "NWayArb"
             assert opp["_layer"] == 1

@@ -63,7 +63,11 @@ def _parse_bracket(title: str) -> dict | None:
                         "upper_bound": float("inf"),
                         "suffix": suffix,
                     }
-                elif "below" in title.lower() or "under" in title.lower():
+                elif (
+                    "below" in title.lower()
+                    or "under" in title.lower()
+                    or "less than" in title.lower()
+                ):
                     return {
                         "base_event": base_event,
                         "lower_bound": float("-inf"),

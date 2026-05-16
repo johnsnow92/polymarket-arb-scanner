@@ -101,9 +101,10 @@ class CalibrationTracker:
             conn.commit()
             conn.close()
 
-        keys_to_delete = [k for k in self._in_memory_cache if k.startswith(f"{platform}:")]
-        for k in keys_to_delete:
-            del self._in_memory_cache[k]
+        with self._lock:
+            keys_to_delete = [k for k in self._in_memory_cache if k.startswith(f"{platform}:")]
+            for k in keys_to_delete:
+                del self._in_memory_cache[k]
 
     def get_platform_brier_score(
         self,
@@ -302,6 +303,9 @@ class CalibrationTracker:
         Returns:
             Dict mapping platform to adjusted weight (sum to 1.0).
         """
+        if not platform_probabilities:
+            return {}
+
         if not CALIBRATION_WEIGHTING_ENABLED:
             n = len(platform_probabilities)
             return {p: 1.0 / n for p in platform_probabilities}

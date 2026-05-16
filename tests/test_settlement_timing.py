@@ -134,12 +134,12 @@ class TestScanSettlementTiming:
             }
             result = scan_settlement_timing(matches, min_profit=0.001, min_discount=0.01)
 
-            if result:
-                opp = result[0]
-                assert opp["type"] == "SettlementTimingArb"
-                assert opp["_layer"] == 2
-                assert opp["_winning_side"] == "yes"
-                assert opp["_platform"] == "kalshi"
+            assert result, "Expected a settlement timing opportunity for this fixture"
+            opp = result[0]
+            assert opp["type"] == "SettlementTimingArb"
+            assert opp["_layer"] == 2
+            assert opp["_winning_side"] == "yes"
+            assert opp["_platform"] == "kalshi"
 
     def test_discount_below_threshold_filtered(self):
         matches = [
