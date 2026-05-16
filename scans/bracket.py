@@ -293,9 +293,9 @@ def _refine_bracket_with_clob(
             continue
 
         total_cost = sum(prices)
-        overround = total_cost - 1.0
+        spread = 1.0 - total_cost
 
-        if overround < 0:
+        if spread < 0:
             continue
 
         from fees import net_profit_bracket
@@ -303,12 +303,12 @@ def _refine_bracket_with_clob(
         result = net_profit_bracket(prices, platform=platform)
 
         if result["net_profit"] >= min_profit:
-            opp["prices"] = f"Σ={total_cost:.4f} (overround={overround:.4f})"
+            opp["prices"] = f"Σ={total_cost:.4f} (spread={spread:.4f})"
             opp["total_cost"] = f"${total_cost:.4f}"
             opp["net_profit"] = result["net_profit"]
             opp["net_roi"] = result.get("net_roi", 0)
             opp["_bracket_prices"] = prices
-            opp["_overround"] = overround
+            opp["_spread"] = spread
             opp["_clob_depth"] = min(depths) if depths else 0
             refined.append(opp)
 

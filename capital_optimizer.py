@@ -205,7 +205,7 @@ class TaxOptimizer:
 
     def __init__(self):
         self._cost_basis: dict[str, dict] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def record_entry(
         self,
