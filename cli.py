@@ -63,6 +63,7 @@ from scans import (
     scan_gemini_multi,
     scan_ibkr_binary,
     scan_triangular,
+    scan_nway_arb,
     scan_multi_cross,
     scan_stale_prices,
     scan_resolution_snipes,
@@ -299,8 +300,8 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             all_opportunities.extend(event_opps)
             logger.info("Found %d event divergence opportunities.", len(event_opps))
 
-    if args.mode in ("all", "triangular"):
-        logger.info("--- Triangular Cross-Platform Scan ---")
+    if args.mode in ("all", "triangular", "nway"):
+        logger.info("--- Triangular / N-way Cross-Platform Scan ---")
         platform_markets_for_tri = {}
         platform_clients_for_tri = {}
         if poly_markets:
@@ -329,12 +330,21 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                         platform_clients_for_tri[name] = client
                 except Exception as e:
                     logger.warning("Triangular: failed to fetch %s markets: %s", name, e)
-        tri_opps = scan_triangular(
-            platform_markets_for_tri, platform_clients_for_tri, min_profit,
-            min_confidence=args.min_confidence,
-        )
-        all_opportunities.extend(tri_opps)
-        logger.info("Found %d triangular opportunities.", len(tri_opps))
+        if args.mode in ("all", "triangular"):
+            tri_opps = scan_triangular(
+                platform_markets_for_tri, platform_clients_for_tri, min_profit,
+                min_confidence=args.min_confidence,
+            )
+            all_opportunities.extend(tri_opps)
+            logger.info("Found %d triangular opportunities.", len(tri_opps))
+
+        if args.mode in ("all", "nway"):
+            nway_opps = scan_nway_arb(
+                platform_markets_for_tri, platform_clients_for_tri, min_profit,
+                min_confidence=args.min_confidence,
+            )
+            all_opportunities.extend(nway_opps)
+            logger.info("Found %d N-way arb opportunities.", len(nway_opps))
 
     # Multi-outcome cross-platform scan
     if args.mode in ("all", "multi-cross") and poly_events and kalshi_client:
@@ -1018,11 +1028,13 @@ def main():
         "--mode",
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
                  "spread", "betfair", "smarkets", "sxbet", "matchbook",
-                 "gemini", "ibkr", "event", "triangular", "multi-cross",
+                 "gemini", "ibkr", "event", "triangular", "nway",
+                 "multi-cross",
                  "stale", "resolution", "convergence", "mm", "rewards",
                  "imbalance", "news-snipe", "correlated", "time-decay",
                  "logical-arb", "whale-copy",
-                 "fee-promo", "cross-mm"],
+                 "fee-promo", "cross-mm",
+                 "lead-lag-mm", "toxic-flow", "vol-mm"],
         default="all",
         help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm",
     )
