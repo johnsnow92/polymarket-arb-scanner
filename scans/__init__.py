@@ -29,6 +29,7 @@ from scans.fee_promo import scan_fee_promo
 from scans.cross_mm import scan_cross_mm
 from scans.lead_lag_mm import scan_lead_lag_mm
 from scans.toxic_flow_pause import scan_toxic_flow_pause
+from scans.volatility_adjusted_mm import scan_volatility_adjusted_mm
 from scans.conditional import scan_conditional_arb, _refine_conditional_with_clob
 from scans.settlement_timing import scan_settlement_timing, _refine_settlement_with_clob
 from scans.new_market import scan_new_market_mispricing
@@ -72,6 +73,7 @@ __all__ = [
     "scan_cross_mm",
     "scan_lead_lag_mm",
     "scan_toxic_flow_pause",
+    "scan_volatility_adjusted_mm",
     "scan_conditional_arb",
     "_refine_conditional_with_clob",
     "scan_settlement_timing",

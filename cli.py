@@ -549,6 +549,29 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         except Exception as exc:
             logger.warning("Cross-MM scan failed: %s", exc)
 
+    # VolatilityAdjustedMM observability scan.
+    if args.mode == "vol-mm":
+        logger.info("--- Volatility-Adjusted MM scan ---")
+        try:
+            from scans.volatility_adjusted_mm import scan_volatility_adjusted_mm
+            market_keys = []
+            if poly_markets:
+                for mkt in poly_markets[:50]:
+                    cid = mkt.get("condition_id") or mkt.get("conditionId") or ""
+                    if cid:
+                        market_keys.append(cid)
+            if kalshi_data and kalshi_data[0]:
+                for evt in kalshi_data[0][:50]:
+                    for mkt in evt.get("markets", [evt]):
+                        t = mkt.get("ticker", "")
+                        if t:
+                            market_keys.append(t)
+            vol_opps = scan_volatility_adjusted_mm(market_keys)
+            all_opportunities.extend(vol_opps)
+            logger.info("Found %d VolatilityAdjustedMM opportunities.", len(vol_opps))
+        except Exception as exc:
+            logger.warning("VolatilityAdjustedMM scan failed: %s", exc)
+
     # ToxicFlowPause observability scan.
     if args.mode == "toxic-flow":
         logger.info("--- Toxic Flow Pause scan ---")
