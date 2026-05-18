@@ -549,6 +549,26 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         except Exception as exc:
             logger.warning("Cross-MM scan failed: %s", exc)
 
+    # LeadLagMM scan — surfaces lagging platforms anchored to leader fair value.
+    if args.mode == "lead-lag-mm":
+        logger.info("--- Lead-Lag MM scan ---")
+        try:
+            from scans.lead_lag_mm import scan_lead_lag_mm
+            from matcher import match_cross_platform
+            pairs = []
+            if poly_markets and kalshi_client:
+                kalshi_events = kalshi_client.fetch_all_events()
+                if kalshi_events:
+                    pairs = match_cross_platform(
+                        poly_markets, kalshi_events,
+                        platform_a="polymarket", platform_b="kalshi",
+                    )
+            ll_opps = scan_lead_lag_mm(pairs)
+            all_opportunities.extend(ll_opps)
+            logger.info("Found %d LeadLagMM opportunities.", len(ll_opps))
+        except Exception as exc:
+            logger.warning("LeadLagMM scan failed: %s", exc)
+
     if args.mode == "mm":
         logger.info("--- Market making scan ---")
         try:

@@ -27,6 +27,7 @@ from scans.convergence import scan_convergence
 from scans.rewards import scan_polymarket_rewards, scan_kalshi_rewards
 from scans.fee_promo import scan_fee_promo
 from scans.cross_mm import scan_cross_mm
+from scans.lead_lag_mm import scan_lead_lag_mm
 from scans.conditional import scan_conditional_arb, _refine_conditional_with_clob
 from scans.settlement_timing import scan_settlement_timing, _refine_settlement_with_clob
 from scans.new_market import scan_new_market_mispricing
@@ -68,6 +69,7 @@ __all__ = [
     "scan_kalshi_rewards",
     "scan_fee_promo",
     "scan_cross_mm",
+    "scan_lead_lag_mm",
     "scan_conditional_arb",
     "_refine_conditional_with_clob",
     "scan_settlement_timing",
