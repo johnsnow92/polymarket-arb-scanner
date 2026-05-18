@@ -63,6 +63,7 @@ from scans import (
     scan_gemini_multi,
     scan_ibkr_binary,
     scan_triangular,
+    scan_nway_arb,
     scan_multi_cross,
     scan_stale_prices,
     scan_resolution_snipes,
@@ -299,8 +300,8 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             all_opportunities.extend(event_opps)
             logger.info("Found %d event divergence opportunities.", len(event_opps))
 
-    if args.mode in ("all", "triangular"):
-        logger.info("--- Triangular Cross-Platform Scan ---")
+    if args.mode in ("all", "triangular", "nway"):
+        logger.info("--- Triangular / N-way Cross-Platform Scan ---")
         platform_markets_for_tri = {}
         platform_clients_for_tri = {}
         if poly_markets:
@@ -329,12 +330,21 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                         platform_clients_for_tri[name] = client
                 except Exception as e:
                     logger.warning("Triangular: failed to fetch %s markets: %s", name, e)
-        tri_opps = scan_triangular(
-            platform_markets_for_tri, platform_clients_for_tri, min_profit,
-            min_confidence=args.min_confidence,
-        )
-        all_opportunities.extend(tri_opps)
-        logger.info("Found %d triangular opportunities.", len(tri_opps))
+        if args.mode in ("all", "triangular"):
+            tri_opps = scan_triangular(
+                platform_markets_for_tri, platform_clients_for_tri, min_profit,
+                min_confidence=args.min_confidence,
+            )
+            all_opportunities.extend(tri_opps)
+            logger.info("Found %d triangular opportunities.", len(tri_opps))
+
+        if args.mode in ("all", "nway"):
+            nway_opps = scan_nway_arb(
+                platform_markets_for_tri, platform_clients_for_tri, min_profit,
+                min_confidence=args.min_confidence,
+            )
+            all_opportunities.extend(nway_opps)
+            logger.info("Found %d N-way arb opportunities.", len(nway_opps))
 
     # Multi-outcome cross-platform scan
     if args.mode in ("all", "multi-cross") and poly_events and kalshi_client:
@@ -538,6 +548,72 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
                 logger.info("Cross-MM requires both Polymarket + Kalshi credentials")
         except Exception as exc:
             logger.warning("Cross-MM scan failed: %s", exc)
+
+    # VolatilityAdjustedMM observability scan.
+    if args.mode == "vol-mm":
+        logger.info("--- Volatility-Adjusted MM scan ---")
+        try:
+            from scans.volatility_adjusted_mm import scan_volatility_adjusted_mm
+            market_keys = []
+            if poly_markets:
+                for mkt in poly_markets[:50]:
+                    cid = mkt.get("condition_id") or mkt.get("conditionId") or ""
+                    if cid:
+                        market_keys.append(cid)
+            if kalshi_data and kalshi_data[0]:
+                for evt in kalshi_data[0][:50]:
+                    for mkt in evt.get("markets", [evt]):
+                        t = mkt.get("ticker", "")
+                        if t:
+                            market_keys.append(t)
+            vol_opps = scan_volatility_adjusted_mm(market_keys)
+            all_opportunities.extend(vol_opps)
+            logger.info("Found %d VolatilityAdjustedMM opportunities.", len(vol_opps))
+        except Exception as exc:
+            logger.warning("VolatilityAdjustedMM scan failed: %s", exc)
+
+    # ToxicFlowPause observability scan.
+    if args.mode == "toxic-flow":
+        logger.info("--- Toxic Flow Pause scan ---")
+        try:
+            from scans.toxic_flow_pause import scan_toxic_flow_pause
+            market_keys = []
+            if poly_markets:
+                for mkt in poly_markets[:50]:
+                    cid = mkt.get("condition_id") or mkt.get("conditionId") or ""
+                    if cid:
+                        market_keys.append(cid)
+            if kalshi_data and kalshi_data[0]:
+                for evt in kalshi_data[0][:50]:
+                    for mkt in evt.get("markets", [evt]):
+                        t = mkt.get("ticker", "")
+                        if t:
+                            market_keys.append(t)
+            tox_opps = scan_toxic_flow_pause(market_keys)
+            all_opportunities.extend(tox_opps)
+            logger.info("Found %d ToxicFlowPause opportunities.", len(tox_opps))
+        except Exception as exc:
+            logger.warning("ToxicFlowPause scan failed: %s", exc)
+
+    # LeadLagMM scan — surfaces lagging platforms anchored to leader fair value.
+    if args.mode == "lead-lag-mm":
+        logger.info("--- Lead-Lag MM scan ---")
+        try:
+            from scans.lead_lag_mm import scan_lead_lag_mm
+            from matcher import match_cross_platform
+            pairs = []
+            if poly_markets and kalshi_client:
+                kalshi_events = kalshi_client.fetch_all_events()
+                if kalshi_events:
+                    pairs = match_cross_platform(
+                        poly_markets, kalshi_events,
+                        platform_a="polymarket", platform_b="kalshi",
+                    )
+            ll_opps = scan_lead_lag_mm(pairs)
+            all_opportunities.extend(ll_opps)
+            logger.info("Found %d LeadLagMM opportunities.", len(ll_opps))
+        except Exception as exc:
+            logger.warning("LeadLagMM scan failed: %s", exc)
 
     if args.mode == "mm":
         logger.info("--- Market making scan ---")
@@ -1018,11 +1094,13 @@ def main():
         "--mode",
         choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
                  "spread", "betfair", "smarkets", "sxbet", "matchbook",
-                 "gemini", "ibkr", "event", "triangular", "multi-cross",
+                 "gemini", "ibkr", "event", "triangular", "nway",
+                 "multi-cross",
                  "stale", "resolution", "convergence", "mm", "rewards",
                  "imbalance", "news-snipe", "correlated", "time-decay",
                  "logical-arb", "whale-copy",
-                 "fee-promo", "cross-mm"],
+                 "fee-promo", "cross-mm",
+                 "lead-lag-mm", "toxic-flow", "vol-mm"],
         default="all",
         help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm",
     )

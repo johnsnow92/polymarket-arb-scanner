@@ -129,6 +129,7 @@ class QuoteEngine:
         inventory: float = 0.0,
         max_inventory: float = DEFAULT_MAX_INVENTORY,
         volatility: float = 0.0,
+        market_key: str = "",
     ) -> dict:
         """Calculate bid and ask prices.
 
@@ -137,11 +138,25 @@ class QuoteEngine:
             inventory: Current net position. Positive = long, quotes skew to sell.
             max_inventory: Maximum inventory for skew calculation.
             volatility: Recent price volatility (0-1). Widens spread.
+            market_key: Optional market key. When set and
+                ``MM_VOLATILITY_ADJUSTED_ENABLED`` is true, the VolatilityTracker
+                singleton multiplies the half-spread by
+                ``get_spread_multiplier(market_key)``.
 
         Returns:
             Dict with ``bid``, ``ask``, ``spread``, ``skew``.
         """
         half_spread = self.min_spread / 2
+
+        # VolatilityAdjustedMM hook — widen spread when the tracker reports
+        # elevated volatility for this market. The multiplier is 1.0 when
+        # MM_VOLATILITY_ADJUSTED_ENABLED is false, making this a cheap no-op.
+        if market_key:
+            try:
+                multiplier = get_volatility_tracker().get_spread_multiplier(market_key)
+                half_spread = half_spread * multiplier
+            except Exception:
+                pass
 
         # Volatility adjustment: wider spread in volatile markets
         vol_adj = volatility * 0.5  # 10% vol -> 5 cent wider spread
@@ -388,6 +403,15 @@ class MarketMaker:
             if mid <= 0.01 or mid >= 0.99:
                 continue
 
+            # ToxicFlowPause hook — when MM_TOXIC_FLOW_ENABLED is true and the
+            # detector flags this market as toxic, skip quoting. should_pause
+            # is itself flag-gated so this is a cheap no-op when disabled.
+            try:
+                if get_toxic_flow_detector().should_pause(mkey):
+                    continue
+            except Exception:
+                pass
+
             # Get current inventory
             inventory = self.inventory.get_position(mkey)
 
@@ -397,7 +421,7 @@ class MarketMaker:
 
             # Calculate quotes
             quotes = self.quote_engine.calculate_quotes(
-                mid, inventory, self.max_inventory
+                mid, inventory, self.max_inventory, market_key=mkey,
             )
 
             # Cancel existing quotes for this market
