@@ -13,3 +13,7 @@ decisions.jsonl
 .mcp.json
 .firecrawl/
 .worktrees/
+arbgrid-roadmap.docx
+~$*.docx
+PLAN.md
+.claude/claudex/
