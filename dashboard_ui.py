@@ -613,6 +613,40 @@ function statusClass(s) {
 function truncate(s, n) { return s && s.length > n ? s.substring(0, n) + '...' : s; }
 
 // ---------------------------------------------------------------------------
+// DOM helpers — safe construction (createElement / textContent for XSS safety)
+// ---------------------------------------------------------------------------
+function makeCell(text, opts) {
+  const td = document.createElement('td');
+  if (opts && opts.className) td.className = opts.className;
+  if (opts && opts.title != null) td.title = String(opts.title);
+  td.textContent = text == null ? '--' : String(text);
+  return td;
+}
+function makeStatusCell(statusText, klass) {
+  const td = document.createElement('td');
+  const span = document.createElement('span');
+  span.className = 'status-badge ' + (klass || '');
+  span.textContent = statusText == null ? '--' : String(statusText);
+  td.appendChild(span);
+  return td;
+}
+function setEmpty(container, colspan, msg) {
+  const tr = document.createElement('tr');
+  const td = document.createElement('td');
+  td.colSpan = colspan;
+  td.className = 'empty';
+  td.textContent = msg;
+  tr.appendChild(td);
+  container.replaceChildren(tr);
+}
+function setEmptyDiv(container, msg) {
+  const div = document.createElement('div');
+  div.className = 'empty';
+  div.textContent = msg;
+  container.replaceChildren(div);
+}
+
+// ---------------------------------------------------------------------------
 // P&L chart
 // ---------------------------------------------------------------------------
 function initPnlChart() {
@@ -729,19 +763,20 @@ function renderStrategyPnlTable(data) {
   const tbody = $('strategy-pnl-tbody');
   const strategies = (data && data.strategies) ? data.strategies : [];
   if (strategies.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No trade data yet</td></tr>';
+    setEmpty(tbody, 5, 'No trade data yet');
     return;
   }
-  tbody.innerHTML = strategies.map(s => {
+  const rows = strategies.map(s => {
     const winRate = s.trade_count > 0 ? ((s.win_count / s.trade_count) * 100).toFixed(1) + '%' : '--';
-    return `<tr>
-      <td>${s.strategy}</td>
-      <td class="mono right">${s.trade_count}</td>
-      <td class="mono right">${winRate}</td>
-      <td class="mono right ${pnlClass(s.total_pnl)}">${fmtUSD(s.total_pnl)}</td>
-      <td class="mono right ${pnlClass(s.avg_profit)}">${fmtUSD(s.avg_profit)}</td>
-    </tr>`;
-  }).join('');
+    const tr = document.createElement('tr');
+    tr.appendChild(makeCell(s.strategy));
+    tr.appendChild(makeCell(s.trade_count, { className: 'mono right' }));
+    tr.appendChild(makeCell(winRate, { className: 'mono right' }));
+    tr.appendChild(makeCell(fmtUSD(s.total_pnl), { className: 'mono right ' + pnlClass(s.total_pnl) }));
+    tr.appendChild(makeCell(fmtUSD(s.avg_profit), { className: 'mono right ' + pnlClass(s.avg_profit) }));
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
 }
 
 // ---------------------------------------------------------------------------
@@ -792,28 +827,38 @@ function renderBalancesTable(balancesData, rebalanceData) {
 
   const platforms = Object.keys(balances);
   if (platforms.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No balance data</td></tr>';
+    setEmpty(tbody, 5, 'No balance data');
     return;
   }
-  tbody.innerHTML = platforms.map(p => {
+  const rows = platforms.map(p => {
     const bal = balances[p];
     const pct = total > 0 ? ((bal / total) * 100).toFixed(1) + '%' : '--';
     const rec = recsByPlatform[p];
     const recPct = rec ? (rec.recommended_pct * 100).toFixed(1) + '%' : pct;
-    let action = '--';
+    const tr = document.createElement('tr');
+    tr.appendChild(makeCell(p));
+    tr.appendChild(makeCell('$' + parseFloat(bal).toFixed(2), { className: 'mono right' }));
+    tr.appendChild(makeCell(pct, { className: 'mono right' }));
+    tr.appendChild(makeCell(recPct, { className: 'mono right' }));
+    const actionTd = document.createElement('td');
     if (rec) {
       const amt = rec.transfer_amount;
-      if (amt > 0) action = '<span class="positive">&#8593; Receive $' + Math.abs(amt).toFixed(2) + '</span>';
-      else action = '<span class="negative">&#8595; Send $' + Math.abs(amt).toFixed(2) + '</span>';
+      const span = document.createElement('span');
+      if (amt > 0) {
+        span.className = 'positive';
+        span.textContent = '↑ Receive $' + Math.abs(amt).toFixed(2);
+      } else {
+        span.className = 'negative';
+        span.textContent = '↓ Send $' + Math.abs(amt).toFixed(2);
+      }
+      actionTd.appendChild(span);
+    } else {
+      actionTd.textContent = '--';
     }
-    return `<tr>
-      <td>${p}</td>
-      <td class="mono right">$${parseFloat(bal).toFixed(2)}</td>
-      <td class="mono right">${pct}</td>
-      <td class="mono right">${recPct}</td>
-      <td>${action}</td>
-    </tr>`;
-  }).join('');
+    tr.appendChild(actionTd);
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
 }
 
 // ---------------------------------------------------------------------------
@@ -845,13 +890,12 @@ function renderHealth(data) {
   if (!data) return;
   // Mode badge
   const badge = $('mode-badge');
-  if (data.dry_run) {
-    badge.className = 'badge badge-dry';
-    badge.innerHTML = '<span class="dot dot-yellow dot-pulse"></span> DRY RUN';
-  } else {
-    badge.className = 'badge badge-live';
-    badge.innerHTML = '<span class="dot dot-green dot-pulse"></span> LIVE';
-  }
+  const dotClass = data.dry_run ? 'dot-yellow' : 'dot-green';
+  const label = data.dry_run ? 'DRY RUN' : 'LIVE';
+  badge.className = 'badge ' + (data.dry_run ? 'badge-dry' : 'badge-live');
+  const dot = document.createElement('span');
+  dot.className = 'dot ' + dotClass + ' dot-pulse';
+  badge.replaceChildren(dot, document.createTextNode(' ' + label));
   // Uptime
   $('uptime').textContent = 'Up ' + fmtDuration(data.uptime_seconds);
   // Metrics
@@ -874,102 +918,123 @@ function renderSlippage(data) {
 function renderCumulative(data) {
   if (data == null) return;
   const v = data.cumulative_pnl;
-  $('kpi-cumulative-pnl').innerHTML = 'Cumulative: <span class="' + pnlClass(v) + '">' + fmtUSD(v) + '</span>';
+  const cumEl = $('kpi-cumulative-pnl');
+  const cumSpan = document.createElement('span');
+  cumSpan.className = pnlClass(v);
+  cumSpan.textContent = fmtUSD(v);
+  cumEl.replaceChildren(document.createTextNode('Cumulative: '), cumSpan);
 }
 
 function renderStrategies(data) {
   const tbody = $('strategy-tbody');
   if (!data || data.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No data yet</td></tr>';
+    setEmpty(tbody, 5, 'No data yet');
     return;
   }
-  tbody.innerHTML = data.map(s => `
-    <tr>
-      <td>${s.type}</td>
-      <td class="mono right">${s.count}</td>
-      <td class="mono right">${fmtPct(s.avg_roi)}</td>
-      <td class="mono right">${fmtUSD(s.avg_profit)}</td>
-      <td class="mono right ${pnlClass(s.total_profit)}">${fmtUSD(s.total_profit)}</td>
-    </tr>`).join('');
+  const rows = data.map(s => {
+    const tr = document.createElement('tr');
+    tr.appendChild(makeCell(s.type));
+    tr.appendChild(makeCell(s.count, { className: 'mono right' }));
+    tr.appendChild(makeCell(fmtPct(s.avg_roi), { className: 'mono right' }));
+    tr.appendChild(makeCell(fmtUSD(s.avg_profit), { className: 'mono right' }));
+    tr.appendChild(makeCell(fmtUSD(s.total_profit), { className: 'mono right ' + pnlClass(s.total_profit) }));
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
 }
 
 function renderPositions(data) {
   const tbody = $('positions-tbody');
   if (!data || data.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">No open positions</td></tr>';
+    setEmpty(tbody, 5, 'No open positions');
     $('positions-count').textContent = '';
     return;
   }
   $('positions-count').textContent = data.length + ' position' + (data.length !== 1 ? 's' : '');
-  tbody.innerHTML = data.map(p => `
-    <tr>
-      <td title="${p.market_identifier || ''}">${truncate(p.market_identifier || '--', 60)}</td>
-      <td>${p.platform || '--'}</td>
-      <td class="mono right ${pnlClass(p.expected_pnl)}">${fmtUSD(p.expected_pnl)}</td>
-      <td>${fmtTime(p.entry_timestamp)}</td>
-      <td><span class="status-badge ${statusClass(p.status)}">${p.status || '--'}</span></td>
-    </tr>`).join('');
+  const rows = data.map(p => {
+    const tr = document.createElement('tr');
+    tr.appendChild(makeCell(truncate(p.market_identifier || '--', 60), { title: p.market_identifier || '' }));
+    tr.appendChild(makeCell(p.platform || '--'));
+    tr.appendChild(makeCell(fmtUSD(p.expected_pnl), { className: 'mono right ' + pnlClass(p.expected_pnl) }));
+    tr.appendChild(makeCell(fmtTime(p.entry_timestamp)));
+    tr.appendChild(makeStatusCell(p.status || '--', statusClass(p.status)));
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
 }
 
 function renderTrades(data) {
   const tbody = $('trades-tbody');
   if (!data || data.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">No trades yet</td></tr>';
+    setEmpty(tbody, 7, 'No trades yet');
     $('trades-count').textContent = '';
     return;
   }
   $('trades-count').textContent = data.length + ' recent';
-  tbody.innerHTML = data.slice(0, 50).map(t => {
+  const rows = data.slice(0, 50).map(t => {
     const slip = t.slippage != null ? (t.slippage * 100).toFixed(3) + '%' : '--';
-    return `
-    <tr>
-      <td>${fmtTime(t.timestamp)}</td>
-      <td>${t.platform}</td>
-      <td>${t.side}</td>
-      <td class="mono right">${t.price != null ? t.price.toFixed(4) : '--'}</td>
-      <td class="mono right">${t.fill_price != null ? t.fill_price.toFixed(4) : '--'}</td>
-      <td class="mono right">${slip}</td>
-      <td><span class="status-badge ${statusClass(t.status)}">${t.status}</span></td>
-    </tr>`;
-  }).join('');
+    const tr = document.createElement('tr');
+    tr.appendChild(makeCell(fmtTime(t.timestamp)));
+    tr.appendChild(makeCell(t.platform));
+    tr.appendChild(makeCell(t.side));
+    tr.appendChild(makeCell(t.price != null ? t.price.toFixed(4) : '--', { className: 'mono right' }));
+    tr.appendChild(makeCell(t.fill_price != null ? t.fill_price.toFixed(4) : '--', { className: 'mono right' }));
+    tr.appendChild(makeCell(slip, { className: 'mono right' }));
+    tr.appendChild(makeStatusCell(t.status, statusClass(t.status)));
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
 }
 
 function renderOpportunities(data) {
   const tbody = $('opps-tbody');
   if (!data || data.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty">No opportunities detected yet</td></tr>';
+    setEmpty(tbody, 9, 'No opportunities detected yet');
     $('opps-count').textContent = '';
     return;
   }
   $('opps-count').textContent = data.length + ' recent';
-  tbody.innerHTML = data.slice(0, 100).map(o => `
-    <tr>
-      <td>${fmtTime(o.timestamp)}</td>
-      <td>${o.type || '--'}</td>
-      <td title="${o.market || ''}">${truncate(o.market || '--', 45)}</td>
-      <td class="mono" title="${o.prices || ''}">${truncate(o.prices || '--', 30)}</td>
-      <td class="mono right">${fmtUSD(o.total_cost)}</td>
-      <td class="mono right ${pnlClass(o.net_profit)}">${fmtUSD(o.net_profit)}</td>
-      <td class="mono right">${fmtPct(o.net_roi)}</td>
-      <td class="mono right">${o.depth != null ? '$' + parseFloat(o.depth).toFixed(2) : '--'}</td>
-      <td><span class="status-badge ${statusClass(o.action)}">${o.action || '--'}</span></td>
-    </tr>`).join('');
+  const rows = data.slice(0, 100).map(o => {
+    const tr = document.createElement('tr');
+    tr.appendChild(makeCell(fmtTime(o.timestamp)));
+    tr.appendChild(makeCell(o.type || '--'));
+    tr.appendChild(makeCell(truncate(o.market || '--', 45), { title: o.market || '' }));
+    tr.appendChild(makeCell(truncate(o.prices || '--', 30), { className: 'mono', title: o.prices || '' }));
+    tr.appendChild(makeCell(fmtUSD(o.total_cost), { className: 'mono right' }));
+    tr.appendChild(makeCell(fmtUSD(o.net_profit), { className: 'mono right ' + pnlClass(o.net_profit) }));
+    tr.appendChild(makeCell(fmtPct(o.net_roi), { className: 'mono right' }));
+    tr.appendChild(makeCell(o.depth != null ? '$' + parseFloat(o.depth).toFixed(2) : '--', { className: 'mono right' }));
+    tr.appendChild(makeStatusCell(o.action || '--', statusClass(o.action)));
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
 }
 
 function renderAlerts(data) {
   const body = $('alerts-body');
   if (!data || data.length === 0) {
-    body.innerHTML = '<div class="empty">No alerts</div>';
+    setEmptyDiv(body, 'No alerts');
     $('alerts-count').textContent = '';
     return;
   }
   $('alerts-count').textContent = data.length + ' alert' + (data.length !== 1 ? 's' : '');
-  body.innerHTML = data.slice(0, 30).map(a => `
-    <div class="alert-item">
-      <span class="alert-sev sev-${a.severity}">${a.severity}</span>
-      <span class="alert-time">${fmtTime(a.timestamp)}</span>
-      <span>${a.message || a.type}</span>
-    </div>`).join('');
+  const items = data.slice(0, 30).map(a => {
+    const div = document.createElement('div');
+    div.className = 'alert-item';
+    const sev = document.createElement('span');
+    sev.className = 'alert-sev sev-' + a.severity;
+    sev.textContent = a.severity;
+    div.appendChild(sev);
+    const time = document.createElement('span');
+    time.className = 'alert-time';
+    time.textContent = fmtTime(a.timestamp);
+    div.appendChild(time);
+    const msg = document.createElement('span');
+    msg.textContent = a.message || a.type;
+    div.appendChild(msg);
+    return div;
+  });
+  body.replaceChildren(...items);
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,20 +1116,22 @@ function renderFailures(data) {
   // Update table
   const tbody = $('failures-tbody');
   if (trades.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">No failed trades</td></tr>';
+    setEmpty(tbody, 6, 'No failed trades');
     $('failures-count').textContent = '';
     return;
   }
   $('failures-count').textContent = trades.length + ' recent';
-  tbody.innerHTML = trades.slice(0, 50).map(t => `
-    <tr>
-      <td>${fmtTime(t.timestamp)}</td>
-      <td>${t.platform || '--'}</td>
-      <td>${t.opp_type || '--'}</td>
-      <td title="${t.opp_market || ''}">${truncate(t.opp_market || '--', 35)}</td>
-      <td class="mono right">${t.price != null ? t.price.toFixed(4) : '--'}</td>
-      <td class="mono right">${t.size != null ? t.size.toFixed(2) : '--'}</td>
-    </tr>`).join('');
+  const rows = trades.slice(0, 50).map(t => {
+    const tr = document.createElement('tr');
+    tr.appendChild(makeCell(fmtTime(t.timestamp)));
+    tr.appendChild(makeCell(t.platform || '--'));
+    tr.appendChild(makeCell(t.opp_type || '--'));
+    tr.appendChild(makeCell(truncate(t.opp_market || '--', 35), { title: t.opp_market || '' }));
+    tr.appendChild(makeCell(t.price != null ? t.price.toFixed(4) : '--', { className: 'mono right' }));
+    tr.appendChild(makeCell(t.size != null ? t.size.toFixed(2) : '--', { className: 'mono right' }));
+    return tr;
+  });
+  tbody.replaceChildren(...rows);
 }
 
 // ---------------------------------------------------------------------------
