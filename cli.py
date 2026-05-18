@@ -549,6 +549,29 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
         except Exception as exc:
             logger.warning("Cross-MM scan failed: %s", exc)
 
+    # ToxicFlowPause observability scan.
+    if args.mode == "toxic-flow":
+        logger.info("--- Toxic Flow Pause scan ---")
+        try:
+            from scans.toxic_flow_pause import scan_toxic_flow_pause
+            market_keys = []
+            if poly_markets:
+                for mkt in poly_markets[:50]:
+                    cid = mkt.get("condition_id") or mkt.get("conditionId") or ""
+                    if cid:
+                        market_keys.append(cid)
+            if kalshi_data and kalshi_data[0]:
+                for evt in kalshi_data[0][:50]:
+                    for mkt in evt.get("markets", [evt]):
+                        t = mkt.get("ticker", "")
+                        if t:
+                            market_keys.append(t)
+            tox_opps = scan_toxic_flow_pause(market_keys)
+            all_opportunities.extend(tox_opps)
+            logger.info("Found %d ToxicFlowPause opportunities.", len(tox_opps))
+        except Exception as exc:
+            logger.warning("ToxicFlowPause scan failed: %s", exc)
+
     # LeadLagMM scan — surfaces lagging platforms anchored to leader fair value.
     if args.mode == "lead-lag-mm":
         logger.info("--- Lead-Lag MM scan ---")

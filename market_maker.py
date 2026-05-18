@@ -388,6 +388,15 @@ class MarketMaker:
             if mid <= 0.01 or mid >= 0.99:
                 continue
 
+            # ToxicFlowPause hook — when MM_TOXIC_FLOW_ENABLED is true and the
+            # detector flags this market as toxic, skip quoting. should_pause
+            # is itself flag-gated so this is a cheap no-op when disabled.
+            try:
+                if get_toxic_flow_detector().should_pause(mkey):
+                    continue
+            except Exception:
+                pass
+
             # Get current inventory
             inventory = self.inventory.get_position(mkey)
 
