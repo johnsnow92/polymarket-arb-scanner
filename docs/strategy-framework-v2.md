@@ -81,10 +81,10 @@ Directional positions based on information advantages. Positive expected value, 
 | 15 | Multi-source signal aggregation | BUILT | `signal_aggregator.py`, `manifold_api.py`, `metaculus_api.py` | 8+ sources, weighted consensus |
 | 24 | Order book imbalance | BUILT | `imbalance.py` | Two-stage refinement |
 | 25 | Logical / combinatorial arb | BUILT | `logical_arb.py` | Semantic rule violations on Polymarket |
-| 26 | Time decay convergence | PARTIAL | `time_decay.py` | Stage 2 refiner is dead code |
-| 27 | News-driven sniping | PARTIAL | `news_snipe.py` (+ `finnhub_api.py`) | Stage 2 refiner is dead code |
-| 28 | Whale copy | PARTIAL | `whale_copy.py` (+ `polygonscan_api.py`) | Stage 2 refiner dead **and** calldata parsing is MVP/stub (High severity) |
-| 29 | Correlated pairs | STUB | `correlated.py` | Refiner is a TODO marker; effectively not functional |
+| 26 | Time decay convergence | BUILT | `time_decay.py` | First-class refiner `_refine_time_decay_with_prices` (l.156); 48 tests pass |
+| 27 | News-driven sniping | BUILT | `news_snipe.py` (+ `finnhub_api.py`) | First-class refiner `_refine_news_with_confidence` (l.208); 36 tests pass |
+| 28 | Whale copy | BUILT | `whale_copy.py` (+ `polygonscan_api.py` + `whale_copy_decoder.py`) | Refiner `_refine_whale_copy_with_prices` (l.216) + decoded calldata via `decode_calldata`; 76 tests pass |
+| 29 | Correlated pairs | BUILT | `correlated.py` (+ `correlation_tracker.py`) | Stage 2 refiner `_refine_correlated_with_depth` (l.306) + auto Pearson-correlation detection over 30-day snapshots; 58 tests pass |
 
 ---
 
@@ -108,9 +108,9 @@ Force multipliers that increase returns from all other layers.
 
 | Status | Count | Strategies |
 |--------|-------|------------|
-| BUILT | 22 | 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23, 24, 25 |
-| PARTIAL | 6 | 6, 18, 20, 26, 27, 28 (#28 has High-severity sub-issue, see Group D) |
-| STUB | 1 | 29 |
+| BUILT | 26 | 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29 |
+| PARTIAL | 3 | 6, 18, 20 |
+| STUB | 0 | — |
 | NOT BUILT | 0 | — |
 | **Total** | **29** | |
 
@@ -118,19 +118,17 @@ Layer breakdown: Layer 1 = 7 (1, 2, 3, 4, 5, 6, 21), Layer 2 = 3 (7, 8, 9), Laye
 
 Net change vs prior v2: +4 BUILT (#9, #11, #19 corrected, plus #18 lifted from NOT BUILT to PARTIAL is captured separately), −3 PARTIAL (#9, #11, #19 promoted), −1 NOT BUILT (#18 promoted to PARTIAL).
 
+**2026-05-20 audit update:** +4 additional BUILT (#26, #27, #28, #29 — each has a first-class Stage 2 refiner with substantial test coverage; the earlier "dead refiner" / "TODO marker" notes were stale by the time of this audit). −3 PARTIAL (#26, #27, #28 promoted). −1 STUB (#29 promoted).
+
 ---
 
 ## Known Gaps
 
-Grouped by remediation type. **Group A is now empty** — every original-framework strategy that was incomplete pre-PR-10 is either BUILT or PARTIAL with a documented by-design ceiling. The only remaining original-framework gap is #20.
+Grouped by remediation type. **Groups A, B, and C are now empty** after the 2026-05-20 audit and the Sprint 1 / Sprint 4 ship cycles. The only remaining original-framework gap is #20.
 
-**Group B — Codebase additions with dead Stage 2 refiners**
-- **#26 Time decay convergence** (`time_decay.py`)
-- **#27 News-driven sniping** (`news_snipe.py`)
-- **#28 Whale copy** (`whale_copy.py`) — additionally has High-severity stub in calldata parsing
+~~**Group B — Codebase additions with dead Stage 2 refiners**~~ — resolved 2026-05-20 audit. #26 / #27 / #28 each have first-class Stage 2 refiners (`_refine_time_decay_with_prices`, `_refine_news_with_confidence`, `_refine_whale_copy_with_prices`) with substantial test coverage. #28 calldata parsing now uses real `whale_copy_decoder.decode_calldata`.
 
-**Group C — Stubbed strategy**
-- **#29 Correlated pairs** (`correlated.py`) — TODO marker only
+~~**Group C — Stubbed strategy**~~ — resolved 2026-05-20 audit. #29 Correlated pairs is fully built (`scan_correlated`, `_refine_correlated_with_depth`, auto-detection via `correlation_tracker.py`).
 
 **Group D — Platform / infrastructure issues affecting Layer 1**
 - **SX Bet `place_order()`** sends unsigned JSON — non-functional (High severity). Live trading is now blocked by `validate_config()` (PR #18); EIP-712 signing is the real fix.
@@ -138,9 +136,9 @@ Grouped by remediation type. **Group A is now empty** — every original-framewo
 - ~~Resolution sniping hardcoded 7-day window~~ — resolved in PR #18 via `RESOLUTION_SNIPE_WINDOW_HOURS` env var (default 48h)
 
 **Group E — Code health (not strategy gaps but block production confidence)**
-- Dashboard `innerHTML` XSS risk (`dashboard_ui.py`) — Medium
+- ~~Dashboard `innerHTML` XSS risk (`dashboard_ui.py`)~~ — resolved in PR #28 (Sprint 1): all `innerHTML` sites replaced with `createElement` / `textContent`; regression-guarded by `tests/test_dashboard_ui.py`.
 - ~~Hardcoded password in `run_dashboard.py`~~ — resolved (no default; `DASHBOARD_PASS` must come from env). PR #18 additionally added a `DASHBOARD_HOST` env var with loopback default and a `validate_config()` gate that raises `ConfigError` on non-loopback host + empty password.
-- No dedicated test files for `position_sizer.py`, `signal_aggregator.py`, `price_tracker.py`, `manifold_api.py`, `dashboard_ui.py`. Note: `market_maker.py` now has direct coverage via `tests/test_hedger_inventory.py` and `tests/test_cross_mm.py` from PR #10.
+- No dedicated test files for `position_sizer.py`, `signal_aggregator.py`, `price_tracker.py`, `manifold_api.py`. Note: `market_maker.py` has direct coverage via `tests/test_hedger_inventory.py` and `tests/test_cross_mm.py` from PR #10; `dashboard_ui.py` covered by `tests/test_dashboard_ui.py` from PR #28.
 
 **Group F — #20 backtesting tuning loop (only original-framework gap left)**
 - `backtest.py` and `snapshot.py` exist; no automated tuning loop consumes them.

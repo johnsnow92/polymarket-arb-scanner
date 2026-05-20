@@ -53,9 +53,11 @@ Python CLI tool (`arbgrid`) that scans for arbitrage and trading opportunities a
 
 All original-framework strategies (#1-#20) are first-class as of the May 2026 milestone (PR #10, commit `1e5087b`). The codebase additionally implements 9 strategies that grew beyond the original framework (#21 spread detection, #22-#23 liquidity rewards, #24-#29 Layer 4 informed-trading variants). Per the v2 framework status table:
 
-- **22 BUILT** — distinct opp type, scan/detection module, executor branch, tests
-- **6 PARTIAL** — #6 (SX Bet quarantined for unsigned-JSON bug), #18 (Gemini↔Polymarket auto-corridor only by design), #20 (tuning-loop pending), #26-#28 (incomplete refiners)
-- **1 STUB** — #29 correlated pairs (TODO)
+- **26 BUILT** — distinct opp type, scan/detection module, executor branch, tests (#1-5, 7-17, 19, 21-29)
+- **3 PARTIAL** — #6 (SX Bet quarantined for unsigned-JSON bug pending EIP-712 signing), #18 (Gemini↔Polymarket auto-corridor only by design), #20 (tuning-loop pending)
+- **0 STUB** — none remaining
+
+*Updated 2026-05-20 after audit revealed #26 / #27 / #28 / #29 all have first-class Stage 2 refiners with substantial test coverage (48 / 36 / 76 / 58 passing tests respectively) — the prior PARTIAL/STUB labels were stale.*
 
 Each first-class strategy has a feature flag defaulting to `false`. The four flags added in PR #10:
 
