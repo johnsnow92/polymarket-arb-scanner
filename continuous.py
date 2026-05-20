@@ -78,9 +78,13 @@ from scans import (
     scan_gemini_multi,
     scan_ibkr_binary,
     scan_triangular,
+    scan_nway_arb,
     scan_multi_cross,
     scan_polymarket_rewards,
     scan_kalshi_rewards,
+    scan_lead_lag_mm,
+    scan_toxic_flow_pause,
+    scan_volatility_adjusted_mm,
     _fetch_kalshi_data,
     capital_efficiency_score,
 )
@@ -643,6 +647,32 @@ def _check_platform_balance(executor, opportunities, notifier, scan_count):
                 notifier.notify_text(msg)
 
 
+def _feed_sprint3_trackers(platform: str, ticker: str, data: dict) -> None:
+    """Feed the Sprint 2 VolatilityTracker + LeadLagMM singletons with a WS tick.
+
+    Both trackers short-circuit internally when their respective config flags
+    are false; we also short-circuit at this level to avoid the per-tick
+    module-singleton lookup when the operator hasn't opted in. Wrapped in
+    try/except because ``on_price_update`` is a hot WS path and an unrelated
+    tracker bug must never break the feed.
+    """
+    try:
+        if not (config.MM_VOLATILITY_ADJUSTED_ENABLED or config.LEAD_LAG_MM_ENABLED):
+            return
+        price_val = data.get("price") or data.get("yes") or data.get("yes_price")
+        if price_val is None:
+            return
+        price_f = float(price_val)
+        if config.MM_VOLATILITY_ADJUSTED_ENABLED:
+            from market_maker import get_volatility_tracker
+            get_volatility_tracker().record_price(ticker, price_f)
+        if config.LEAD_LAG_MM_ENABLED:
+            from market_maker import get_lead_lag_mm
+            get_lead_lag_mm().record_price(ticker, platform, price_f)
+    except Exception as exc:
+        logger.debug("VolatilityTracker/LeadLagMM WS feed failed: %s", exc)
+
+
 def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                    kalshi_private_key_path, executor, db, price_cache,
                    extra_clients=None, notifier=None, pm_trader=None,
@@ -762,6 +792,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             price_val = data.get("price") or data.get("yes") or data.get("yes_price")
             if price_val is not None:
                 _market_maker.update_price(ticker, float(price_val))
+
+        # Sprint 3: Feed VolatilityTracker + LeadLagMM with per-tick prices
+        _feed_sprint3_trackers(platform, ticker, data)
 
         nonlocal _seq_counter
 
@@ -1266,7 +1299,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                             platform_markets_for_event, min_profit=min_profit)
                         all_opportunities.extend(event_opps)
 
-                if args.mode in ("all", "triangular"):
+                if args.mode in ("all", "triangular", "nway"):
                     platform_markets_for_tri = {}
                     platform_clients_for_tri = {}
                     if poly_markets:
@@ -1295,11 +1328,69 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                                     platform_clients_for_tri[name] = client
                             except Exception as e:
                                 logger.warning("Triangular: failed to fetch %s: %s", name, e)
-                    tri_opps = scan_triangular(
-                        platform_markets_for_tri, platform_clients_for_tri, min_profit,
-                        min_confidence=args.min_confidence,
-                    )
-                    all_opportunities.extend(tri_opps)
+                    if args.mode in ("all", "triangular"):
+                        tri_opps = scan_triangular(
+                            platform_markets_for_tri, platform_clients_for_tri, min_profit,
+                            min_confidence=args.min_confidence,
+                        )
+                        all_opportunities.extend(tri_opps)
+
+                    if args.mode in ("all", "nway"):
+                        try:
+                            nway_opps = scan_nway_arb(
+                                platform_markets_for_tri, platform_clients_for_tri,
+                                min_profit, min_confidence=args.min_confidence,
+                            )
+                            all_opportunities.extend(nway_opps)
+                        except Exception as exc:
+                            logger.warning("NWayArb scan failed: %s", exc)
+
+                # Sprint 3: LeadLagMM periodic scan. Mirrors the cli.py
+                # --mode lead-lag-mm dispatch — uses poly+kalshi matched pairs
+                # and asks the LeadLagMM detector which platform is lagging.
+                # No-op when LEAD_LAG_MM_ENABLED is false (the scan itself
+                # short-circuits on the flag).
+                if args.mode in ("all", "lead-lag-mm"):
+                    try:
+                        from matcher import match_cross_platform
+                        kalshi_events_for_ll = kalshi_data[0] if kalshi_data else None
+                        if poly_markets and kalshi_events_for_ll:
+                            pairs = match_cross_platform(
+                                poly_markets, kalshi_events_for_ll,
+                                platform_a="polymarket", platform_b="kalshi",
+                            )
+                            ll_opps = scan_lead_lag_mm(pairs)
+                            all_opportunities.extend(ll_opps)
+                    except Exception as exc:
+                        logger.warning("LeadLagMM scan failed: %s", exc)
+
+                # Sprint 3: ToxicFlowPause + VolatilityAdjustedMM periodic
+                # observability scans. Both consume a market_keys list (built
+                # once from currently-known poly+kalshi markets) and inspect
+                # the respective detector singletons. No-op when their flags
+                # are false.
+                if args.mode in ("all", "toxic-flow", "vol-mm"):
+                    try:
+                        observability_market_keys: list[str] = []
+                        if poly_markets:
+                            for mkt in poly_markets[:50]:
+                                cid = mkt.get("condition_id") or mkt.get("conditionId") or ""
+                                if cid:
+                                    observability_market_keys.append(cid)
+                        if kalshi_data and kalshi_data[0]:
+                            for evt in kalshi_data[0][:50]:
+                                for mkt in evt.get("markets", [evt]):
+                                    t = mkt.get("ticker", "")
+                                    if t:
+                                        observability_market_keys.append(t)
+                        if args.mode in ("all", "toxic-flow"):
+                            tox_opps = scan_toxic_flow_pause(observability_market_keys)
+                            all_opportunities.extend(tox_opps)
+                        if args.mode in ("all", "vol-mm"):
+                            vol_opps = scan_volatility_adjusted_mm(observability_market_keys)
+                            all_opportunities.extend(vol_opps)
+                    except Exception as exc:
+                        logger.warning("ToxicFlow/VolMM scans failed: %s", exc)
 
                 # MultiCross kill-switch: same FOK partial-fill vulnerability
                 # as KalshiMulti. Places N legs concurrently on thin Kalshi
