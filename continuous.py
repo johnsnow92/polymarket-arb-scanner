@@ -647,6 +647,32 @@ def _check_platform_balance(executor, opportunities, notifier, scan_count):
                 notifier.notify_text(msg)
 
 
+def _feed_sprint3_trackers(platform: str, ticker: str, data: dict) -> None:
+    """Feed the Sprint 2 VolatilityTracker + LeadLagMM singletons with a WS tick.
+
+    Both trackers short-circuit internally when their respective config flags
+    are false; we also short-circuit at this level to avoid the per-tick
+    module-singleton lookup when the operator hasn't opted in. Wrapped in
+    try/except because ``on_price_update`` is a hot WS path and an unrelated
+    tracker bug must never break the feed.
+    """
+    try:
+        if not (config.MM_VOLATILITY_ADJUSTED_ENABLED or config.LEAD_LAG_MM_ENABLED):
+            return
+        price_val = data.get("price") or data.get("yes") or data.get("yes_price")
+        if price_val is None:
+            return
+        price_f = float(price_val)
+        if config.MM_VOLATILITY_ADJUSTED_ENABLED:
+            from market_maker import get_volatility_tracker
+            get_volatility_tracker().record_price(ticker, price_f)
+        if config.LEAD_LAG_MM_ENABLED:
+            from market_maker import get_lead_lag_mm
+            get_lead_lag_mm().record_price(ticker, platform, price_f)
+    except Exception as exc:
+        logger.debug("VolatilityTracker/LeadLagMM WS feed failed: %s", exc)
+
+
 def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                    kalshi_private_key_path, executor, db, price_cache,
                    extra_clients=None, notifier=None, pm_trader=None,
@@ -768,24 +794,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 _market_maker.update_price(ticker, float(price_val))
 
         # Sprint 3: Feed VolatilityTracker + LeadLagMM with per-tick prices
-        # so their detector state stays current. Both no-op internally when
-        # their flags are false, but we also short-circuit at this level to
-        # avoid the import + module-singleton hit on every WS tick when the
-        # operator hasn't opted in. Wrapped in try/except since on_price_update
-        # is a hot path and an unrelated tracker bug must never break WS.
-        try:
-            if config.MM_VOLATILITY_ADJUSTED_ENABLED or config.LEAD_LAG_MM_ENABLED:
-                price_val = data.get("price") or data.get("yes") or data.get("yes_price")
-                if price_val is not None:
-                    price_f = float(price_val)
-                    if config.MM_VOLATILITY_ADJUSTED_ENABLED:
-                        from market_maker import get_volatility_tracker
-                        get_volatility_tracker().record_price(ticker, price_f)
-                    if config.LEAD_LAG_MM_ENABLED:
-                        from market_maker import get_lead_lag_mm
-                        get_lead_lag_mm().record_price(ticker, platform, price_f)
-        except Exception as exc:
-            logger.debug("VolatilityTracker/LeadLagMM WS feed failed: %s", exc)
+        _feed_sprint3_trackers(platform, ticker, data)
 
         nonlocal _seq_counter
 
