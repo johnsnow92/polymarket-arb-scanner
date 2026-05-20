@@ -437,6 +437,39 @@ class ArbitrageExecutor:
                 # Strategy #11: paired bid/ask quotes — refreshed by the MM
                 # engine, not subject to stale-mid revalidation.
                 reason = "mm_refreshed"
+            elif opp_type.startswith("NWayArb"):
+                # Sprint 4: N-way cross-platform arb. Picks the cheapest YES
+                # and cheapest NO across 4+ platforms. Reuse the Cross
+                # revalidator when both platforms are poly+kalshi; otherwise
+                # accept on the signal alone (the scan's freshly-fetched mid
+                # prices are still recent).
+                pa = opportunity.get("_platform_a", "")
+                pb = opportunity.get("_platform_b", "")
+                if {pa, pb} <= {"polymarket", "kalshi"}:
+                    passed, reval_profit, reason = self._revalidate_cross(
+                        opportunity, original_profit, price_cache)
+                else:
+                    reason = "nway_signal"
+            elif opp_type == "LeadLagMM":
+                # Sprint 4: lag-based directional quote. Ask the LeadLagMM
+                # singleton whether the lag still exists; if the lagger has
+                # caught up, the convergence trade is stale.
+                try:
+                    from market_maker import get_lead_lag_mm
+                    detector = get_lead_lag_mm()
+                    market_key = opportunity.get("_market_key", "")
+                    lagger = opportunity.get("_lagger", "")
+                    if market_key and lagger and detector.should_quote(market_key, lagger):
+                        reason = "lag_confirmed"
+                    else:
+                        passed = False
+                        reason = "lag_collapsed"
+                except Exception:
+                    reason = "lag_confirmed"
+            elif opp_type in ("ToxicFlowPause", "VolatilityAdjustedMM"):
+                # Sprint 4: observability-only opps. Block execution.
+                passed = False
+                reason = "defensive_observability"
             elif opp_type == "MarketMake":
                 reason = "mm_refreshed"  # MM quotes are continuously refreshed by the MM engine
             elif opp_type == "PolymarketRewards":
@@ -1630,6 +1663,77 @@ class ArbitrageExecutor:
             leg_a = opportunity.get("_leg_a")
             leg_b = opportunity.get("_leg_b")
             legs = [leg for leg in (leg_a, leg_b) if leg]
+        elif opp_type.startswith("NWayArb"):
+            # Sprint 4: N-way cross-platform arbitrage. The scan emits the
+            # cheapest-YES platform as _platform_a (price _price_a) and the
+            # cheapest-NO platform as _platform_b (price _price_b). Build two
+            # legs and reuse _build_single_cross_leg for per-platform shape.
+            platform_yes = opportunity.get("_platform_a", "")
+            platform_no = opportunity.get("_platform_b", "")
+            price_yes = opportunity.get("_price_a")
+            price_no = opportunity.get("_price_b")
+            if not platform_yes or not platform_no or price_yes is None or price_no is None:
+                legs = []
+            else:
+                blocked = False
+                for plat in (platform_yes, platform_no):
+                    if plat not in ENABLED_EXECUTION_PLATFORMS:
+                        logger.info(
+                            "NWayArb leg on '%s' blocked — not in ENABLED_EXECUTION_PLATFORMS",
+                            plat,
+                        )
+                        blocked = True
+                        break
+                if blocked:
+                    legs = []
+                else:
+                    leg_a = self._build_single_cross_leg(
+                        f"{platform_yes}_Y={price_yes}", platform_yes, platform_no,
+                        opportunity, token_ids, is_first=True,
+                    )
+                    leg_b = self._build_single_cross_leg(
+                        f"{platform_no}_N={price_no}", platform_no, platform_yes,
+                        opportunity, token_ids, is_first=False,
+                    )
+                    legs = [leg for leg in (leg_a, leg_b) if leg]
+                    if len(legs) != 2:
+                        legs = []
+        elif opp_type == "LeadLagMM":
+            # Sprint 4: directional quote on the lagging platform anchored to
+            # the leader's fair value. Single BUY-YES leg at fair_value.
+            lagger = opportunity.get("_lagger", "")
+            fair_value = opportunity.get("_fair_value")
+            if not lagger or fair_value is None:
+                legs = []
+            elif lagger not in ENABLED_EXECUTION_PLATFORMS:
+                logger.info(
+                    "LeadLagMM leg on '%s' blocked — not in ENABLED_EXECUTION_PLATFORMS",
+                    lagger,
+                )
+                legs = []
+            else:
+                leg = {
+                    "platform": lagger,
+                    "side": "BUY" if lagger == "polymarket" else "yes",
+                    "price": float(fair_value),
+                    "token": "yes",
+                    "_market_key": opportunity.get("_market_key", ""),
+                    "_leader": opportunity.get("_leader", ""),
+                }
+                if lagger == "polymarket":
+                    leg["_token_id"] = token_ids[0] if token_ids else ""
+                elif lagger == "kalshi":
+                    leg["action"] = "buy"
+                    leg["_ticker"] = opportunity.get("_market_key", "")
+                legs = [leg]
+        elif opp_type in ("ToxicFlowPause", "VolatilityAdjustedMM"):
+            # Sprint 4: observability-only opps. ToxicFlowPause is a defensive
+            # pause signal; VolatilityAdjustedMM informs MM spread-widening
+            # rather than a placeable trade. Return [] so executor skips both.
+            logger.info(
+                "%s is observability-only — no execution legs built", opp_type,
+            )
+            legs = []
         elif opp_type.startswith("Cross"):
             # Re-validate fee path if scan provided a hint (per user decision: confirm or override)
             fee_path = opportunity.get("_fee_path")
