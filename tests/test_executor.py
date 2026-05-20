@@ -17,13 +17,26 @@ from risk_manager import RiskManager
 
 @pytest.fixture(autouse=True)
 def mock_external_modules():
-    """Mock external API modules that may not be installed."""
+    """Use real platform-API modules when importable; mock only the ones that fail.
+
+    The historical version of this fixture unconditionally replaced these
+    modules with MagicMocks if they were absent from ``sys.modules``. That
+    broke isolation runs where ``test_executor.py`` was the first file to
+    load — ``_revalidate_cross`` would then call MagicMock'd
+    ``kalshi_api.parse_orderbook`` / ``best_yes_ask`` and fail when
+    formatting a MagicMock as a float. The full test suite hid the bug
+    because earlier files always imported the real modules first.
+    """
     mock_modules = {}
     for mod_name in [
         "polymarket_api", "kalshi_api",
         "betfair_api", "smarkets_api", "sxbet_api",
     ]:
-        if mod_name not in sys.modules:
+        if mod_name in sys.modules:
+            continue
+        try:
+            __import__(mod_name)
+        except ImportError:
             mock_modules[mod_name] = MagicMock()
             sys.modules[mod_name] = mock_modules[mod_name]
     yield
