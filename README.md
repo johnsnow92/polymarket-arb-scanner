@@ -141,4 +141,5 @@ IBKR connectivity requires a reachable IB Gateway socket — not viable from Rai
 | [`TASK_CONTRACT.md`](TASK_CONTRACT.md) | Definition of done, opportunity-dict schema, execution legs, exceptions. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Branching, style, testing, how to add a strategy. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release history (Keep a Changelog). |
+| [`docs/PLATFORM-RECOMMENDATION.md`](docs/PLATFORM-RECOMMENDATION.md) | Platform-expansion decision memo — ranked candidates + greenlight gates. |
 | [`docs/audit/`](docs/audit/) | Content-audit register + platform-research evidence artifacts. |
