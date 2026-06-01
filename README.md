@@ -130,3 +130,15 @@ IBKR connectivity requires a reachable IB Gateway socket — not viable from Rai
 | [`docs/strategy-framework-v2.md`](docs/strategy-framework-v2.md) | Authoritative 29-strategy / 5-layer reconciliation with per-strategy status. |
 | [`CODEBASE-INVENTORY.md`](CODEBASE-INVENTORY.md) | File-by-file map of modules, functions, classes, and cross-references. |
 | [`AGENTS.md`](AGENTS.md) | Notes for AI agents working on the codebase. |
+| [`docs/PRD.md`](docs/PRD.md) | Product requirements — problem, users, definition of done, scope/non-goals. |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Now / Next / Later sequencing + the path to the done milestone. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design — layers, data flow, invariants, deploy topology. |
+| [`docs/PLATFORM-MATRIX.md`](docs/PLATFORM-MATRIX.md) | **Canonical** platform capability / auth / fee / custody matrix. |
+| [`docs/RISK-POLICY.md`](docs/RISK-POLICY.md) | Risk gates, limits, circuit breakers, kill/pause. |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Deploy, post-deploy checklist, observability contract, rollback. |
+| [`docs/BACKTESTING.md`](docs/BACKTESTING.md) | Snapshot → replay → tuning (#20) methodology. |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Secrets, custody-grade keys, dashboard exposure (ENFORCED vs TODO). |
+| [`TASK_CONTRACT.md`](TASK_CONTRACT.md) | Definition of done, opportunity-dict schema, execution legs, exceptions. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Branching, style, testing, how to add a strategy. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release history (Keep a Changelog). |
+| [`docs/audit/`](docs/audit/) | Content-audit register + platform-research evidence artifacts. |

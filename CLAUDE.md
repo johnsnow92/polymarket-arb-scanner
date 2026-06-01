@@ -12,6 +12,8 @@ Python CLI tool (`arbgrid`) that scans for arbitrage and trading opportunities a
 
 **Strategy framework:** see [`docs/strategy-framework-v2.md`](docs/strategy-framework-v2.md) for the canonical 29-strategy / 5-layer reconciliation. The summary block below is informative; the framework doc is authoritative.
 
+**Documentation index:** [`docs/PRD.md`](docs/PRD.md) (requirements/done) · [`docs/ROADMAP.md`](docs/ROADMAP.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/PLATFORM-MATRIX.md`](docs/PLATFORM-MATRIX.md) (canonical platform/auth/fee source of truth) · [`docs/RISK-POLICY.md`](docs/RISK-POLICY.md) · [`docs/RUNBOOK.md`](docs/RUNBOOK.md) · [`docs/BACKTESTING.md`](docs/BACKTESTING.md) · [`docs/SECURITY.md`](docs/SECURITY.md) · [`TASK_CONTRACT.md`](TASK_CONTRACT.md) (definition of done) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md). Audit evidence: [`docs/audit/`](docs/audit/).
+
 ## Project Scope
 
 - **What does "done" look like?** Profitable 24/7 automated trading bot on Railway — **29 strategies across 5 risk layers** (pure arbitrage, near-arbitrage, market making + liquidity provision, informed/statistical edge, capital optimization) operating across all 8 platforms. Full-stack: detection, execution, risk management, market making, monitoring, and backtesting — all production-grade and battle-tested. Canonical strategy taxonomy lives in [`docs/strategy-framework-v2.md`](docs/strategy-framework-v2.md).
