@@ -59,6 +59,8 @@ All original-framework strategies (#1-#20) are first-class as of the May 2026 mi
 
 *Updated 2026-05-20 after audit revealed #26 / #27 / #28 / #29 all have first-class Stage 2 refiners with substantial test coverage (48 / 36 / 76 / 58 passing tests respectively) — the prior PARTIAL/STUB labels were stale.*
 
+> **Mode-vs-taxonomy note (2026-05-31 audit):** the canonical taxonomy is 29 strategies, but `cli.py` exposes **32 `--mode` scan values** (excluding `all`). The extra modes are execution variants / Layer-4 sub-strategies — `nway`, `rewards`, `imbalance`, `news-snipe`, `correlated`, `time-decay`, `logical-arb`, `whale-copy`, `lead-lag-mm`, `toxic-flow`, `vol-mm` — that grew alongside the framework. The `--mode` set in `cli.py` is the source of truth for *runnable scans*; the 29-strategy table is the source of truth for the *risk-layer taxonomy*. A full mode→strategy reconciliation in `docs/strategy-framework-v2.md` is a tracked follow-up.
+
 Each first-class strategy has a feature flag defaulting to `false`. The four flags added in PR #10:
 
 | Flag | Strategy | Module(s) |
@@ -73,10 +75,11 @@ Remaining gaps and the build sequence to close them are documented in the v2 fra
 
 ## Current Status
 
-- **Last session**: 2026-04-14 11:04 PM
-- **Worked on**: HubSpot: hubspot_accounts, hubspot_api
-- **Next recommended**: GSD: /gsd:progress to check next step
-- **Project type**: dev-only | GSD Phase 9/9
+- **Last updated**: 2026-05-31
+- **Branch**: `feat/sprint-6-correlated-pairs`
+- **Worked on**: Sprint 6 — correlated-pairs (#29, BUILT) shipped; Strategy #20 backtesting-driven tuning loop (impl-complete, not yet production-wired into continuous mode). Content/doc audit in progress (`docs/audit/`).
+- **Next recommended**: wire `config.apply_backtest_recommendations()` into continuous-mode startup (#20); continue doc truth-alignment workstream.
+- **Project type**: dev-only
 ## Commands
 
 ```bash
@@ -159,7 +162,7 @@ Scan modules:
 - `cross.py` — 2-way cross-platform (all platform pairs)
 - `spread.py` — Polymarket/Kalshi bid-ask spreads
 - `betfair.py`, `smarkets.py`, `sxbet.py`, `matchbook.py` — exchange back-all/back-lay
-- `gemini.py` — Gemini binary + multi-outcome (1% maker / 5% taker fees)
+- `gemini.py` — Gemini binary + multi-outcome (1.75% maker / 7% taker fees)
 - `ibkr.py` — IBKR ForecastEx binary only (BUY-only, $0.00 commission)
 - `multi_cross.py` — multi-outcome cross-platform (cheapest YES per outcome across Polymarket + Kalshi, fuzzy event-title matching)
 - `triangular.py` — 3-way cross-platform (union-find grouping of pairwise matches)
@@ -188,7 +191,7 @@ Each `*_api.py` wraps a platform's REST API with auth, retries (`tenacity`), and
 - **Smarkets**: API key session
 - **SX Bet**: API key session — **READ-ONLY** (`place_order()` sends unsigned JSON; EIP-712 signing not yet implemented). `validate_config()` errors at startup if `sxbet` is in `ENABLED_EXECUTION_PLATFORMS` while `DRY_RUN=false`
 - **Matchbook**: Username/password session auth (0% commission on predictions)
-- **Gemini Predictions**: HMAC-SHA384 signed headers (API key + secret), 1% maker / 5% taker fees (`GEMINI_FEE_RATE`), full buy+sell
+- **Gemini Predictions**: HMAC-SHA384 signed headers (API key + secret), 1.75% maker / 7% taker fees (`GEMINI_MAKER_RATE` / `GEMINI_TAKER_RATE`), full buy+sell. Fee formula per the CFTC 40.6 filing effective 2026-03-09: `roundup(rate × C × P × (1 − P))` — *not* the legacy `min(P, 1−P) × rate`. The old single `GEMINI_FEE_RATE=0.05` constant is superseded (slated for removal).
 - **IBKR ForecastEx**: TWS API via `ib_insync` (IB Gateway socket), BUY-only (no sell), LMT-only, $0.00 commission, 5s order rate limit
 - **Metaculus**: Public REST API (optional API key), read-only signal source
 

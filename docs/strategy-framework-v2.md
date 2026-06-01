@@ -98,7 +98,7 @@ Force multipliers that increase returns from all other layers.
 | 17 | Kelly criterion sizing | BUILT | `position_sizer.py` | Strategy-aware fractions by layer |
 | 18 | Platform fund rebalancing | **PARTIAL** ✱ | `treasury.py`, `gemini_api.withdraw_usdc`, `db.transfers`, `dashboard.py:POST /api/rebalance/execute`, weekly digest via `notifier.py` | **PR #10** — Gemini ↔ Polymarket programmatic auto-transfer via USDC on Polygon. Six other platforms (Kalshi, Betfair, Smarkets, SX Bet, Matchbook, IBKR) remain on the manual-digest path because their public APIs expose no withdraw / deposit / transfer endpoints. This is a by-design ceiling, not a gap. Default off (`AUTO_REBALANCE_ENABLED=false`). |
 | 19 | Latency optimization | **BUILT** ✱ | `continuous.py:_execution_priority()` + `asyncio.PriorityQueue` | Pre-existing infrastructure misclassified by earlier v2 drafts. WS-triggered high-priority execution at `continuous.py:909`; priority scoring at `continuous.py:523`. |
-| 20 | Backtesting-driven tuning | PARTIAL | `backtest.py` + `snapshot.py` | Engine and recorder exist; systematic tuning of `MIN_NET_ROI` / MM spreads / divergence thresholds against historical data is not wired in |
+| 20 | Backtesting-driven tuning | PARTIAL | `backtest.py` + `snapshot.py` + `scripts/tune.py` | Tuning loop **implemented + tested** (Sprint 6, in-flight as of 2026-05-31): `scripts/tune.py` runs `backtest._suggest_strategy_thresholds()` / `build_recommendations()` over rolling windows and emits per-strategy `MIN_NET_ROI` / `FUZZY_MATCH_THRESHOLD` recommendations; `config.load/apply_backtest_recommendations()` consumes them behind `BACKTEST_TUNING_ENABLED`. **Remaining gap (why still PARTIAL):** applied only on manual invocation — not auto-wired into `continuous.py` startup, and no alert fires when recommendations change. |
 
 ✱ Status changed (or correctly classified) after PR #10 review.
 
@@ -119,6 +119,8 @@ Layer breakdown: Layer 1 = 7 (1, 2, 3, 4, 5, 6, 21), Layer 2 = 3 (7, 8, 9), Laye
 Net change vs prior v2: +4 BUILT (#9, #11, #19 corrected, plus #18 lifted from NOT BUILT to PARTIAL is captured separately), −3 PARTIAL (#9, #11, #19 promoted), −1 NOT BUILT (#18 promoted to PARTIAL).
 
 **2026-05-20 audit update:** +4 additional BUILT (#26, #27, #28, #29 — each has a first-class Stage 2 refiner with substantial test coverage; the earlier "dead refiner" / "TODO marker" notes were stale by the time of this audit). −3 PARTIAL (#26, #27, #28 promoted). −1 STUB (#29 promoted).
+
+**2026-05-31 content audit:** counts unchanged (26 BUILT / 3 PARTIAL / 0 STUB). #20 note refreshed to reflect the in-flight tuning-loop implementation (still PARTIAL — manual-apply only). Open follow-up: this 29-strategy taxonomy does **not** 1:1 map the **32 `--mode` scan values** in `cli.py` (excluding `all`). The surplus modes (`nway`, `rewards`, `imbalance`, `news-snipe`, `correlated`, `time-decay`, `logical-arb`, `whale-copy`, `lead-lag-mm`, `toxic-flow`, `vol-mm`) are runnable scans that map onto the layer strategies above (or are execution variants of them) but are not separately enumerated here. A 1:1 mode→strategy reconciliation table is a tracked TODO; until then, treat `cli.py` `--mode` choices as the source of truth for *runnable scans* and this table as the source of truth for the *risk-layer taxonomy*.
 
 ---
 
