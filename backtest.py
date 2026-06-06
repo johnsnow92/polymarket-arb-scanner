@@ -430,14 +430,90 @@ def _suggest_min_profit(result: BacktestResult) -> float:
     return current
 
 
+PER_STRATEGY_MIN_TRADES = 10
+
+
+def _suggest_strategy_thresholds(stats: dict) -> dict:
+    """Per-strategy MIN_NET_ROI + FUZZY_MATCH_THRESHOLD from a stats row.
+
+    Uses the per-strategy win rate to nudge global defaults the same way
+    _suggest_min_roi / _suggest_fuzzy_threshold do at the portfolio level.
+    Returns clamped values inside the safe operating ranges.
+    """
+    import config as _config
+
+    count = max(int(stats.get("count", 0)), 1)
+    wins = int(stats.get("wins", 0))
+    win_rate = stats.get("win_rate")
+    if win_rate is None:
+        win_rate = wins / count
+
+    base_roi = _config.MIN_NET_ROI
+    base_fuzzy = _config.FUZZY_MATCH_THRESHOLD
+
+    if win_rate > 0.7:
+        roi = base_roi * 0.90
+        fuzzy = base_fuzzy
+    elif win_rate < 0.5:
+        roi = (base_roi * 1.20) if base_roi > 0 else 0.005
+        fuzzy = base_fuzzy + 3
+    else:
+        roi = base_roi
+        fuzzy = base_fuzzy
+
+    return {
+        "MIN_NET_ROI": max(0.001, min(0.05, roi)),
+        "FUZZY_MATCH_THRESHOLD": max(60, min(90, int(fuzzy))),
+    }
+
+
 def build_recommendations(result: BacktestResult) -> dict:
     """Build a recommendations dict from a BacktestResult.
 
     Returns a dict with suggested threshold adjustments, current values,
-    and per-strategy breakdown. Safe to call with zero-trade results.
+    per-strategy breakdown, and per-strategy threshold overrides for any
+    strategy with at least PER_STRATEGY_MIN_TRADES backtested trades.
+    Safe to call with zero-trade results.
+
+    Each ``by_strategy`` entry additively carries ``MIN_NET_ROI`` and
+    ``FUZZY_MATCH_THRESHOLD`` alongside ``win_rate`` / ``avg_profit`` so
+    callers that only inspect ``by_strategy`` still get per-strategy
+    threshold guidance. When the backtest produced zero trades, a
+    synthetic ``__default__`` entry carries the portfolio-wide
+    recommendation so the dict is never empty.
     """
     import config as _config
     from datetime import datetime
+
+    global_roi = _suggest_min_roi(result)
+    global_fuzzy = _suggest_fuzzy_threshold(result)
+
+    by_strategy: dict = {}
+    for strategy, stats in result.trades_by_type.items():
+        strat_recs = _suggest_strategy_thresholds(stats)
+        count = max(int(stats.get("count", 0)), 1)
+        by_strategy[strategy] = {
+            "win_rate": stats["wins"] / count,
+            "avg_profit": stats["pnl"] / count,
+            "count": int(stats.get("count", 0)),
+            "MIN_NET_ROI": strat_recs["MIN_NET_ROI"],
+            "FUZZY_MATCH_THRESHOLD": strat_recs["FUZZY_MATCH_THRESHOLD"],
+        }
+
+    if not by_strategy:
+        by_strategy["__default__"] = {
+            "win_rate": result.win_rate,
+            "avg_profit": 0.0,
+            "count": int(result.total_trades),
+            "MIN_NET_ROI": global_roi,
+            "FUZZY_MATCH_THRESHOLD": global_fuzzy,
+        }
+
+    recommended_by_strategy = {
+        strategy: _suggest_strategy_thresholds(stats)
+        for strategy, stats in result.trades_by_type.items()
+        if int(stats.get("count", 0)) >= PER_STRATEGY_MIN_TRADES
+    }
 
     return {
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -445,8 +521,8 @@ def build_recommendations(result: BacktestResult) -> dict:
         "total_trades": result.total_trades,
         "win_rate": result.win_rate,
         "recommended": {
-            "MIN_NET_ROI": _suggest_min_roi(result),
-            "FUZZY_MATCH_THRESHOLD": _suggest_fuzzy_threshold(result),
+            "MIN_NET_ROI": global_roi,
+            "FUZZY_MATCH_THRESHOLD": global_fuzzy,
             "MIN_PROFIT_THRESHOLD": _suggest_min_profit(result),
         },
         "current": {
@@ -454,13 +530,8 @@ def build_recommendations(result: BacktestResult) -> dict:
             "FUZZY_MATCH_THRESHOLD": _config.FUZZY_MATCH_THRESHOLD,
             "MIN_PROFIT_THRESHOLD": _config.DEFAULT_MIN_PROFIT,
         },
-        "by_strategy": {
-            strategy: {
-                "win_rate": stats["wins"] / max(stats["count"], 1),
-                "avg_profit": stats["pnl"] / max(stats["count"], 1),
-            }
-            for strategy, stats in result.trades_by_type.items()
-        },
+        "by_strategy": by_strategy,
+        "recommended_by_strategy": recommended_by_strategy,
     }
 
 

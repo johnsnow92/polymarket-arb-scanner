@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-05-20T14:26:13.982794Z",
+  "period_days": 7,
+  "total_trades": 27,
+  "win_rate": 1.0,
+  "recommended": {
+    "MIN_NET_ROI": 0.009000000000000001,
+    "FUZZY_MATCH_THRESHOLD": 72,
+    "MIN_PROFIT_THRESHOLD": 0.005
+  },
+  "current": {
+    "MIN_NET_ROI": 0.01,
+    "FUZZY_MATCH_THRESHOLD": 72,
+    "MIN_PROFIT_THRESHOLD": 0.005
+  },
+  "by_strategy": {
+    "KalshiBinary": {
+      "win_rate": 1.0,
+      "avg_profit": 0.5813953488372093
+    },
+    "Binary": {
+      "win_rate": 1.0,
+      "avg_profit": 0.7088235294117643
+    }
+  },
+  "recommended_by_strategy": {
+    "KalshiBinary": {
+      "MIN_NET_ROI": 0.009000000000000001,
+      "FUZZY_MATCH_THRESHOLD": 72
+    },
+    "Binary": {
+      "MIN_NET_ROI": 0.009000000000000001,
+      "FUZZY_MATCH_THRESHOLD": 72
+    }
+  }
+}
