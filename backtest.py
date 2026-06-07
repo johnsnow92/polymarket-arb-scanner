@@ -483,7 +483,37 @@ def build_recommendations(result: BacktestResult) -> dict:
     recommendation so the dict is never empty.
     """
     import config as _config
-    from datetime import datetime
+    from datetime import datetime, timezone
+
+    global_roi = _suggest_min_roi(result)
+    global_fuzzy = _suggest_fuzzy_threshold(result)
+
+    by_strategy: dict = {}
+    for strategy, stats in result.trades_by_type.items():
+        strat_recs = _suggest_strategy_thresholds(stats)
+        count = max(int(stats.get("count", 0)), 1)
+        by_strategy[strategy] = {
+            "win_rate": stats["wins"] / count,
+            "avg_profit": stats["pnl"] / count,
+            "count": int(stats.get("count", 0)),
+            "MIN_NET_ROI": strat_recs["MIN_NET_ROI"],
+            "FUZZY_MATCH_THRESHOLD": strat_recs["FUZZY_MATCH_THRESHOLD"],
+        }
+
+    if not by_strategy:
+        by_strategy["__default__"] = {
+            "win_rate": result.win_rate,
+            "avg_profit": 0.0,
+            "count": int(result.total_trades),
+            "MIN_NET_ROI": global_roi,
+            "FUZZY_MATCH_THRESHOLD": global_fuzzy,
+        }
+
+    recommended_by_strategy = {
+        strategy: _suggest_strategy_thresholds(stats)
+        for strategy, stats in result.trades_by_type.items()
+        if int(stats.get("count", 0)) >= PER_STRATEGY_MIN_TRADES
+    }
 
     global_roi = _suggest_min_roi(result)
     global_fuzzy = _suggest_fuzzy_threshold(result)
@@ -516,7 +546,7 @@ def build_recommendations(result: BacktestResult) -> dict:
     }
 
     return {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "period_days": 7,
         "total_trades": result.total_trades,
         "win_rate": result.win_rate,

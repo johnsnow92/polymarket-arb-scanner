@@ -1926,9 +1926,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     async def _run_nightly_backtest():
                         try:
                             loop = asyncio.get_event_loop()
-                            from datetime import datetime as _dt, timedelta as _td
-                            _end_iso = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-                            _start_iso = (_dt.utcnow() - _td(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+                            _end_iso = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            _start_iso = (_dt.now(_tz.utc) - _td(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
                             def _sync_run():
                                 from backtest import BacktestEngine, write_recommendations
