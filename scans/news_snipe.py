@@ -74,9 +74,9 @@ def scan_news_snipe(
     all_headlines = []
     for symbol in symbols[:10]:  # Limit to 10 symbols to avoid rate limits
         try:
-            from datetime import datetime, timedelta
-            to_date = datetime.utcnow().strftime("%Y-%m-%d")
-            from_date = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+            from datetime import datetime, timedelta, timezone
+            to_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            from_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
             headlines = finnhub_client.fetch_company_news(symbol, from_date, to_date)
             all_headlines.extend(headlines)
         except Exception as e:
