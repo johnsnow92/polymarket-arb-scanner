@@ -772,6 +772,129 @@ FEE_REFRESH_INTERVAL = _env_float("FEE_REFRESH_INTERVAL", "3600")  # 1 hour
 # How often (seconds) to run the nightly backtest and write recommendations.
 BACKTEST_RUN_INTERVAL = _env_float("BACKTEST_RUN_INTERVAL", "86400")  # 24 hours
 
+# ---------------------------------------------------------------------------
+# Backtest-driven threshold tuning (OPTIMIZE-02 follow-up)
+# ---------------------------------------------------------------------------
+# When BACKTEST_TUNING_ENABLED=true, config reads
+# backtest_recommendations.json at import time and overrides MIN_NET_ROI /
+# FUZZY_MATCH_THRESHOLD with the recommended values, and populates
+# RECOMMENDED_BY_STRATEGY with per-strategy overrides for any strategy that
+# had at least 10 backtested trades. Off by default — existing env-var /
+# CLI / default precedence is unchanged when this flag is false, even if
+# the recommendations file exists on disk.
+BACKTEST_TUNING_ENABLED = _env_bool("BACKTEST_TUNING_ENABLED", "false")
+BACKTEST_RECOMMENDATIONS_PATH = os.getenv(
+    "BACKTEST_RECOMMENDATIONS_PATH",
+    os.path.join(DATA_DIR, "backtest_recommendations.json"),
+)
+# Populated by apply_backtest_recommendations() when the flag is on.
+# Keys are strategy names (e.g. "Binary"); values are dicts with optional
+# "MIN_NET_ROI" / "FUZZY_MATCH_THRESHOLD" overrides. Strategies not in this
+# dict fall back to the top-level MIN_NET_ROI / FUZZY_MATCH_THRESHOLD.
+RECOMMENDED_BY_STRATEGY: dict[str, dict] = {}
+
+
+def load_backtest_recommendations(path: str | None = None) -> dict | None:
+    """Read backtest_recommendations.json and return the parsed dict.
+
+    Defensive: missing file, malformed JSON, or non-object payloads all
+    log a warning and return None — this function never raises.
+    """
+    target = path or BACKTEST_RECOMMENDATIONS_PATH
+    if not os.path.exists(target):
+        logger.warning(
+            "Backtest recommendations file not found at %s — using existing defaults",
+            target,
+        )
+        return None
+    try:
+        with open(target, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Backtest recommendations file at %s is unreadable (%s) — using existing defaults",
+            target, exc,
+        )
+        return None
+    if not isinstance(data, dict):
+        logger.warning(
+            "Backtest recommendations payload at %s is not a JSON object — using existing defaults",
+            target,
+        )
+        return None
+    return data
+
+
+def apply_backtest_recommendations(path: str | None = None) -> dict:
+    """Load backtest recommendations and surface them as module globals.
+
+    Updates MIN_NET_ROI, FUZZY_MATCH_THRESHOLD, and RECOMMENDED_BY_STRATEGY
+    in-place. Defensive — out-of-range or missing values fall back to the
+    existing defaults. Returns the applied recommendations dict (empty
+    when no file or no usable values were loaded).
+    """
+    global MIN_NET_ROI, FUZZY_MATCH_THRESHOLD, RECOMMENDED_BY_STRATEGY
+    data = load_backtest_recommendations(path)
+    if data is None:
+        return {}
+
+    applied: dict = {}
+    recommended = data.get("recommended")
+    if not isinstance(recommended, dict):
+        recommended = {}
+
+    candidate_roi = recommended.get("MIN_NET_ROI")
+    if isinstance(candidate_roi, (int, float)) and 0.0 <= float(candidate_roi) <= 1.0:
+        MIN_NET_ROI = float(candidate_roi)
+        applied["MIN_NET_ROI"] = MIN_NET_ROI
+    elif candidate_roi is not None:
+        logger.warning(
+            "Recommended MIN_NET_ROI=%r is out of range; keeping existing default",
+            candidate_roi,
+        )
+
+    candidate_fuzzy = recommended.get("FUZZY_MATCH_THRESHOLD")
+    if isinstance(candidate_fuzzy, (int, float)) and 0 < int(candidate_fuzzy) <= 100:
+        FUZZY_MATCH_THRESHOLD = int(candidate_fuzzy)
+        applied["FUZZY_MATCH_THRESHOLD"] = FUZZY_MATCH_THRESHOLD
+    elif candidate_fuzzy is not None:
+        logger.warning(
+            "Recommended FUZZY_MATCH_THRESHOLD=%r is out of range; keeping existing default",
+            candidate_fuzzy,
+        )
+
+    per_strategy = data.get("recommended_by_strategy")
+    sanitized: dict[str, dict] = {}
+    if isinstance(per_strategy, dict):
+        for strat, overrides in per_strategy.items():
+            if not isinstance(strat, str) or not isinstance(overrides, dict):
+                continue
+            entry: dict = {}
+            cand = overrides.get("MIN_NET_ROI")
+            if isinstance(cand, (int, float)) and 0.0 <= float(cand) <= 1.0:
+                entry["MIN_NET_ROI"] = float(cand)
+            cand = overrides.get("FUZZY_MATCH_THRESHOLD")
+            if isinstance(cand, (int, float)) and 0 < int(cand) <= 100:
+                entry["FUZZY_MATCH_THRESHOLD"] = int(cand)
+            if entry:
+                sanitized[strat] = entry
+    elif per_strategy is not None:
+        logger.warning(
+            "recommended_by_strategy in %s is not a JSON object; ignoring per-strategy overrides",
+            path or BACKTEST_RECOMMENDATIONS_PATH,
+        )
+    RECOMMENDED_BY_STRATEGY = sanitized
+    applied["recommended_by_strategy_count"] = len(sanitized)
+
+    logger.warning(
+        "Loaded backtest recommendations from %s — applied MIN_NET_ROI=%s, FUZZY_MATCH_THRESHOLD=%s (%d per-strategy overrides)",
+        path or BACKTEST_RECOMMENDATIONS_PATH,
+        MIN_NET_ROI,
+        FUZZY_MATCH_THRESHOLD,
+        len(sanitized),
+    )
+    return applied
+
 # How often (seconds) to emit the weekly platform-rebalance digest.
 REBALANCE_DIGEST_INTERVAL = _env_float("REBALANCE_DIGEST_INTERVAL", "604800")  # 7 days
 
@@ -1096,3 +1219,21 @@ def validate_config() -> list[str]:
 
 # Run validation at import time; log warnings but don't suppress them
 _config_warnings = validate_config()
+
+# Apply backtest recommendations after validate_config so env-var values
+# are validated first. When the flag is off the loader never runs and the
+# existing env-var / default precedence is preserved verbatim.
+# BACKTEST_RECOMMENDATIONS_APPLIED is unconditionally defined so callers
+# (and the evidence harness) can introspect whether tuning was applied:
+# `False` when the flag is off or apply failed, the returned dict when
+# the apply pass ran (may be empty if the file was missing/invalid).
+BACKTEST_RECOMMENDATIONS_APPLIED: dict | bool = False
+if BACKTEST_TUNING_ENABLED:
+    try:
+        BACKTEST_RECOMMENDATIONS_APPLIED = apply_backtest_recommendations()
+    except Exception as _tune_exc:  # never raise at import
+        logger.warning(
+            "apply_backtest_recommendations() failed (%s) — using existing defaults",
+            _tune_exc,
+        )
+        BACKTEST_RECOMMENDATIONS_APPLIED = False

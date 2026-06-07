@@ -32,7 +32,7 @@ Python CLI that scans for arbitrage and trading opportunities across prediction 
 | 4 — Informed Trading | Event divergence, cross-platform convergence, multi-source signal aggregation | 9 |
 | 5 — Capital Optimization | Kelly sizing, fee routing, rebalancing, latency, backtesting-driven tuning | 6 |
 
-As of the May 2026 milestone: **22 BUILT**, **6 PARTIAL**, **1 STUB**. See the framework doc for what's pending.
+As of the 2026-05-20 audit: **26 BUILT**, **3 PARTIAL**, **0 STUB** (29 canonical strategies). See [`docs/strategy-framework-v2.md`](docs/strategy-framework-v2.md) for the full reconciliation. Note: the executable `--mode` set below is broader than the 29-strategy taxonomy — several modes are execution variants / Layer-4 sub-strategies.
 
 ## Quick Start
 
@@ -56,7 +56,7 @@ python scanner.py --mode mm
 python scanner.py --exec-mode full-auto --max-trade 10
 ```
 
-Available `--mode` values: `binary`, `negrisk`, `cross`, `kalshi`, `cross-all`, `spread`, `betfair`, `smarkets`, `sxbet`, `matchbook`, `gemini`, `ibkr`, `event`, `triangular`, `multi-cross`, `stale`, `resolution`, `convergence`, `mm`, `fee-promo`, `cross-mm`.
+Available `--mode` values (authoritative list = `cli.py` argparse choices; `all` runs everything): `binary`, `negrisk`, `cross`, `kalshi`, `cross-all`, `spread`, `betfair`, `smarkets`, `sxbet`, `matchbook`, `gemini`, `ibkr`, `event`, `triangular`, `nway`, `multi-cross`, `stale`, `resolution`, `convergence`, `mm`, `rewards`, `imbalance`, `news-snipe`, `correlated`, `time-decay`, `logical-arb`, `whale-copy`, `fee-promo`, `cross-mm`, `lead-lag-mm`, `toxic-flow`, `vol-mm`.
 
 ## Architecture
 
@@ -130,3 +130,16 @@ IBKR connectivity requires a reachable IB Gateway socket — not viable from Rai
 | [`docs/strategy-framework-v2.md`](docs/strategy-framework-v2.md) | Authoritative 29-strategy / 5-layer reconciliation with per-strategy status. |
 | [`CODEBASE-INVENTORY.md`](CODEBASE-INVENTORY.md) | File-by-file map of modules, functions, classes, and cross-references. |
 | [`AGENTS.md`](AGENTS.md) | Notes for AI agents working on the codebase. |
+| [`docs/PRD.md`](docs/PRD.md) | Product requirements — problem, users, definition of done, scope/non-goals. |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Now / Next / Later sequencing + the path to the done milestone. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design — layers, data flow, invariants, deploy topology. |
+| [`docs/PLATFORM-MATRIX.md`](docs/PLATFORM-MATRIX.md) | **Canonical** platform capability / auth / fee / custody matrix. |
+| [`docs/RISK-POLICY.md`](docs/RISK-POLICY.md) | Risk gates, limits, circuit breakers, kill/pause. |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Deploy, post-deploy checklist, observability contract, rollback. |
+| [`docs/BACKTESTING.md`](docs/BACKTESTING.md) | Snapshot → replay → tuning (#20) methodology. |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | Secrets, custody-grade keys, dashboard exposure (ENFORCED vs TODO). |
+| [`TASK_CONTRACT.md`](TASK_CONTRACT.md) | Definition of done, opportunity-dict schema, execution legs, exceptions. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Branching, style, testing, how to add a strategy. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release history (Keep a Changelog). |
+| [`docs/PLATFORM-RECOMMENDATION.md`](docs/PLATFORM-RECOMMENDATION.md) | Platform-expansion decision memo — ranked candidates + greenlight gates. |
+| [`docs/audit/`](docs/audit/) | Content-audit register + platform-research evidence artifacts. |

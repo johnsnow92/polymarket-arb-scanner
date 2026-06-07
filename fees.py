@@ -562,8 +562,8 @@ def net_profit_cross_matchbook(
 
 # ---------------------------------------------------------------------------
 # Gemini Predictions fee calculations
-# Fee formula: min(P, 1-P) * quantity * fee_rate per contract
-# Default: 5% taker (IOC), 1% maker (GTC)
+# Fee formula (CFTC 40.6 filing, eff. 2026-03-09): roundup(rate * C * P * (1-P)) per contract
+# Rates: 7% taker (GEMINI_TAKER_RATE), 1.75% maker (GEMINI_MAKER_RATE)
 # ---------------------------------------------------------------------------
 
 def gemini_fee(price: float, fee_rate: float | None = None, contracts: int = 1) -> float:

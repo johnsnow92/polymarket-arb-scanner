@@ -75,13 +75,17 @@ def format_recommendations_md(rec: dict, *, window_days: int) -> str:
         )
     lines.append("")
 
-    if by_strategy:
+    visible_strategies = {
+        name: stats for name, stats in by_strategy.items()
+        if not name.startswith("__")
+    }
+    if visible_strategies:
         lines.append("## Per-strategy breakdown")
         lines.append("")
         lines.append("| Strategy | Win rate | Avg profit |")
         lines.append("|---|---:|---:|")
-        for strat in sorted(by_strategy.keys()):
-            stats = by_strategy[strat] or {}
+        for strat in sorted(visible_strategies.keys()):
+            stats = visible_strategies[strat] or {}
             wr = float(stats.get("win_rate", 0.0))
             avg = float(stats.get("avg_profit", 0.0))
             lines.append(f"| {strat} | {wr * 100:.1f}% | {avg:+.4f} |")
@@ -156,7 +160,9 @@ def run_tune(
     now: datetime | None = None,
     backtest_engine=None,
     write_json: bool = True,
-) -> dict[str, str]:
+    json_path: str | None = None,
+    write_markdown: bool = True,
+) -> dict:
     """Run a tune cycle and write the markdown + JSON artefacts.
 
     Args:
@@ -165,11 +171,15 @@ def run_tune(
             Created if missing.
         now: Optional fixed timestamp (used by tests).
         backtest_engine: Optional pre-built engine (used by tests).
-        write_json: When False, only write the markdown — useful for
-            tests that don't want to mutate the filesystem twice.
+        write_json: When False, skip the JSON file entirely.
+        json_path: Explicit absolute path for the JSON file (file-mode
+            CLI invocation). When None, defaults to
+            ``output_dir/backtest_recommendations.json``.
+        write_markdown: When False, skip the markdown sibling — used in
+            file-mode CLI invocation where only the JSON is requested.
 
     Returns:
-        Dict with ``markdown_path``, optional ``json_path``, and
+        Dict with optional ``markdown_path`` / ``json_path`` and
         ``recommendations`` (the dict from ``build_recommendations``).
     """
     if now is None:
@@ -187,29 +197,28 @@ def run_tune(
 
     from backtest import build_recommendations
     rec = build_recommendations(result)
-    # Override the period_days field so the markdown matches the actual window.
+    # Override the period_days field so the report matches the actual window.
     rec["period_days"] = window_days
 
     os.makedirs(output_dir, exist_ok=True)
 
-    md_name = f"tuning_{now.strftime('%Y-%m-%d')}.md"
-    md_path = os.path.join(output_dir, md_name)
-    md_text = format_recommendations_md(rec, window_days=window_days)
-    with open(md_path, "w", encoding="utf-8") as fh:
-        fh.write(md_text)
-    logger.info("Tuning report written to %s", md_path)
+    out: dict = {"recommendations": rec}
 
-    out: dict[str, str] = {
-        "markdown_path": md_path,
-        "recommendations": rec,  # type: ignore[dict-item]
-    }
+    if write_markdown:
+        md_name = f"tuning_{now.strftime('%Y-%m-%d')}.md"
+        md_path = os.path.join(output_dir, md_name)
+        md_text = format_recommendations_md(rec, window_days=window_days)
+        with open(md_path, "w", encoding="utf-8") as fh:
+            fh.write(md_text)
+        logger.info("Tuning report written to %s", md_path)
+        out["markdown_path"] = md_path
 
     if write_json:
-        json_path = os.path.join(output_dir, "backtest_recommendations.json")
-        with open(json_path, "w", encoding="utf-8") as fh:
+        target = json_path or os.path.join(output_dir, "backtest_recommendations.json")
+        with open(target, "w", encoding="utf-8") as fh:
             json.dump(rec, fh, indent=2)
-        out["json_path"] = json_path
-        logger.info("Recommendations JSON written to %s", json_path)
+        out["json_path"] = target
+        logger.info("Recommendations JSON written to %s", target)
 
     return out
 
@@ -227,14 +236,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--window-days", type=int, default=30,
+        "--window-days", "--days", type=int, default=30, dest="window_days",
         help="Rolling backtest window in days (default 30).",
     )
     parser.add_argument(
         "--output", type=str, default=None,
         help=(
-            "Output directory for the markdown + JSON artefacts. "
-            "Defaults to DATA_DIR (env) or ./scripts."
+            "Output target. A path ending in '.json' is treated as a file "
+            "and only the JSON recommendations are written. Anything else "
+            "is treated as a directory and both the JSON and markdown "
+            "report are written into it. Defaults to DATA_DIR/scripts."
         ),
     )
     parser.add_argument(
@@ -253,19 +264,32 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    output_dir = args.output
-    if output_dir is None:
-        output_dir = os.getenv("DATA_DIR") or os.path.join(
-            os.path.dirname(os.path.abspath(__file__))
+    raw_output = args.output
+    file_mode = raw_output is not None and raw_output.lower().endswith(".json")
+
+    if file_mode:
+        json_path = os.path.abspath(raw_output)
+        output_dir = os.path.dirname(json_path) or "."
+    else:
+        output_dir = raw_output or os.getenv("DATA_DIR") or os.path.dirname(
+            os.path.abspath(__file__)
         )
+        json_path = None
 
     paths = run_tune(
         window_days=args.window_days,
         output_dir=output_dir,
         write_json=not args.no_json,
+        json_path=json_path,
+        write_markdown=not file_mode,
     )
-    md_path = paths["markdown_path"]
-    print(f"Wrote {md_path}")
+
+    if file_mode:
+        target = paths.get("json_path") or json_path
+        print(f"Backtest recommendations written to {target}")
+    else:
+        md_path = paths["markdown_path"]
+        print(f"Wrote {md_path}")
     return 0
 
 

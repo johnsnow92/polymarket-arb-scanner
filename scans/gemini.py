@@ -67,7 +67,7 @@ def scan_gemini_binary(gemini_client: GeminiClient, min_profit: float) -> list[d
         if yes_price <= 0 or no_price <= 0:
             continue
 
-        result = net_profit_gemini_binary(yes_price, no_price, fee_rate=config.GEMINI_FEE_RATE)
+        result = net_profit_gemini_binary(yes_price, no_price, fee_rate=config.GEMINI_TAKER_RATE)
         if result["net_profit"] < min_profit:
             continue
 
@@ -169,7 +169,7 @@ def scan_gemini_multi(gemini_client: GeminiClient, min_profit: float) -> list[di
         if not valid or not prices:
             continue
 
-        result = net_profit_gemini_multi(prices, fee_rate=config.GEMINI_FEE_RATE)
+        result = net_profit_gemini_multi(prices, fee_rate=config.GEMINI_TAKER_RATE)
         if result["net_profit"] < min_profit:
             continue
 
