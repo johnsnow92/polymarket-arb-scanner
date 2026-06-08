@@ -6,6 +6,7 @@ __pycache__/
 nul
 trades.db
 snapshots.db
+data/discovery/pmarb.db
 decisions.jsonl
 *.log
 *.code-workspace
