@@ -336,3 +336,6 @@ When splitting work across teammates:
 - **Orchestration** (`cli.py`, `continuous.py`, `display.py`, `scanner.py`) — entry points, loops, output
 
 Avoid two teammates editing the same module. `cli.py` and `continuous.py` are large — coordinate carefully.
+
+## Secrets (Infisical)
+Secrets for this project live in Infisical (env `dev`), linked via `.infisical.json`. Run anything needing secrets with `infisical run --env dev -- <cmd>`; inspect with `infisical secrets --env dev`. The local `.env` is retained as a fallback — retire it once the run command is switched. Pre-commit secret scanning is active.
