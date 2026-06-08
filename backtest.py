@@ -550,6 +550,143 @@ def write_recommendations(result: BacktestResult, data_dir: str) -> str:
     return path
 
 
+# ---------------------------------------------------------------------------
+# Grid-sweep tuning (concept ported from the archived arbgrid scaffold's tune.py)
+# ---------------------------------------------------------------------------
+#
+# OPTIMIZE-02 above nudges a single threshold by a win-rate heuristic. The sweep
+# below instead replays the recorded snapshots under every (min_roi, min_profit)
+# combination in a grid and reports the resulting P&L / win-rate / Sharpe per
+# cell, so a production threshold can be chosen from the actual yield curve
+# rather than a one-step nudge. Strictly read-only — it never places orders.
+
+@dataclass
+class SweepCell:
+    """One cell of the (min_roi, min_profit) tuning grid."""
+    min_roi: float
+    min_profit: float
+    total_trades: int
+    win_rate: float
+    total_pnl: float
+    final_balance: float
+    max_drawdown: float
+    sharpe_ratio: float
+
+
+def _parse_grid(spec: str) -> list[float]:
+    """Parse a comma-separated grid spec like '0,0.01,0.05' into sorted floats.
+
+    Values > 1 are treated as percentages (5 -> 0.05), matching the --min-roi
+    convention used elsewhere in this CLI.
+    """
+    out: list[float] = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        v = float(tok)
+        out.append(v / 100.0 if v > 1.0 else v)
+    return sorted(set(out))
+
+
+def run_tuning_sweep(
+    engine: "BacktestEngine",
+    start_time: str,
+    end_time: str,
+    *,
+    min_roi_grid: list[float],
+    min_profit_grid: list[float],
+    max_trade_size: float = 5.0,
+    opp_type_filter: str | None = None,
+    layer_filter: int | None = None,
+) -> list[SweepCell]:
+    """Replay the snapshots once per (min_roi, min_profit) grid cell.
+
+    Returns one SweepCell per combination in deterministic (min_roi, min_profit)
+    order. Reuses BacktestEngine.run, so it inherits the same fee model and
+    sizing — strictly read-only simulation.
+    """
+    cells: list[SweepCell] = []
+    for min_roi in sorted(set(min_roi_grid)):
+        for min_profit in sorted(set(min_profit_grid)):
+            result = engine.run(
+                start_time=start_time,
+                end_time=end_time,
+                min_roi=min_roi,
+                min_profit=min_profit,
+                max_trade_size=max_trade_size,
+                opp_type_filter=opp_type_filter,
+                layer_filter=layer_filter,
+            )
+            cells.append(SweepCell(
+                min_roi=min_roi,
+                min_profit=min_profit,
+                total_trades=result.total_trades,
+                win_rate=result.win_rate,
+                total_pnl=result.total_pnl,
+                final_balance=result.final_balance,
+                max_drawdown=result.max_drawdown,
+                sharpe_ratio=result.sharpe_ratio,
+            ))
+    return cells
+
+
+def _best_cell(cells: list[SweepCell], min_trades: int = 1) -> "SweepCell | None":
+    """Pick the highest-P&L cell that booked at least `min_trades` trades."""
+    eligible = [c for c in cells if c.total_trades >= min_trades]
+    if not eligible:
+        return None
+    return max(eligible, key=lambda c: (c.total_pnl, c.sharpe_ratio))
+
+
+def render_sweep_markdown(cells: list[SweepCell], generated_at: datetime | None = None) -> str:
+    """Render a tuning sweep to a self-contained markdown report."""
+    ts = generated_at or datetime.now(timezone.utc)
+    best = _best_cell(cells)
+    lines: list[str] = []
+    lines.append(f"# Backtest tuning sweep — {ts.strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append("")
+    lines.append(
+        "Replays the recorded snapshots under each `(min_roi, min_profit)` cell and "
+        "reports P&L, win rate, drawdown, and Sharpe. Pick the threshold pair that "
+        "maximizes P&L while keeping trade count sustainable for the executor."
+    )
+    lines.append("")
+    if best is not None:
+        lines.append(
+            f"**Recommended:** `MIN_NET_ROI={best.min_roi:.4f}`, "
+            f"`MIN_PROFIT={best.min_profit:.4f}` -> P&L ${best.total_pnl:+.4f} over "
+            f"{best.total_trades} trades (win rate {best.win_rate:.1%}, "
+            f"Sharpe {best.sharpe_ratio:.3f})."
+        )
+    else:
+        lines.append("_No cell booked any trades — widen the grid or record more snapshots._")
+    lines.append("")
+    lines.append("| min_roi | min_profit | trades | win_rate | total_pnl | max_dd | sharpe |")
+    lines.append("|---------|-----------|--------|----------|-----------|--------|--------|")
+    for c in cells:
+        marker = " (best)" if best is not None and c is best else ""
+        lines.append(
+            f"| {c.min_roi:.4f} | {c.min_profit:.4f} | {c.total_trades} | "
+            f"{c.win_rate:.1%} | {c.total_pnl:+.4f} | {c.max_drawdown:.4f} | "
+            f"{c.sharpe_ratio:.3f}{marker} |"
+        )
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("Generated by `python backtest.py --tune`.")
+    return "\n".join(lines) + "\n"
+
+
+def write_sweep_report(cells: list[SweepCell], data_dir: str) -> str:
+    """Write the tuning sweep markdown to DATA_DIR/backtest_tuning_report.md."""
+    path = os.path.join(data_dir, "backtest_tuning_report.md")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(render_sweep_markdown(cells))
+    logger.info("Backtest tuning report written to %s", path)
+    return path
+
+
 def main():
     """CLI entry point for backtesting."""
     parser = argparse.ArgumentParser(
@@ -599,6 +736,18 @@ def main():
         "--verbose", "-v", action="store_true",
         help="Print individual trades",
     )
+    parser.add_argument(
+        "--tune", action="store_true",
+        help="Run a (min_roi x min_profit) grid sweep and write a markdown tuning report",
+    )
+    parser.add_argument(
+        "--min-roi-grid", default="0,0.01,0.02,0.05",
+        help="Comma-separated min_roi grid for --tune (values >1 treated as %%)",
+    )
+    parser.add_argument(
+        "--min-profit-grid", default="0,0.005,0.01",
+        help="Comma-separated min_profit grid for --tune",
+    )
 
     args = parser.parse_args()
 
@@ -643,6 +792,21 @@ def main():
 
     recorder = SnapshotRecorder(db_path=args.db)
     engine = BacktestEngine(recorder=recorder, initial_balance=args.balance)
+
+    if args.tune:
+        from config import DATA_DIR
+        cells = run_tuning_sweep(
+            engine, start, end,
+            min_roi_grid=_parse_grid(args.min_roi_grid),
+            min_profit_grid=_parse_grid(args.min_profit_grid),
+            max_trade_size=args.max_trade_size,
+            opp_type_filter=opp_type_filter,
+            layer_filter=args.layer,
+        )
+        print(render_sweep_markdown(cells))
+        write_sweep_report(cells, DATA_DIR)
+        recorder.close()
+        return
 
     result = engine.run(
         start_time=start,
