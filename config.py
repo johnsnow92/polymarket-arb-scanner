@@ -689,6 +689,29 @@ BALANCE_CACHE_TTL = _env_float("BALANCE_CACHE_TTL", "10.0")
 SEMANTIC_MATCHING_ENABLED = _env_bool("SEMANTIC_MATCHING_ENABLED", "true")
 SEMANTIC_MATCH_THRESHOLD = _env_float("SEMANTIC_MATCH_THRESHOLD", "0.70")
 
+# Cross-venue market discovery (LLM equivalence judge — Polymarket x Kalshi).
+# Detection/curation ONLY: a Jaccard pre-filter proposes candidate pairs, Claude
+# judges true resolution-equivalence, and accepted pairs are written to
+# DISCOVERY_CANDIDATES_PATH as status: candidate for HUMAN REVIEW. Discovered
+# pairs are never auto-traded — only human-promoted status: verified pairs in
+# DISCOVERY_VERIFIED_PATH are consumed downstream. Requires ANTHROPIC_API_KEY
+# when enabled. Ported from the pmarb scaffold during the 2026-06 consolidation.
+DISCOVERY_ENABLED = _env_bool("DISCOVERY_ENABLED", "false")
+DISCOVERY_MODEL = os.getenv("DISCOVERY_MODEL", "claude-haiku-4-5")
+DISCOVERY_PREFILTER_THRESHOLD = _env_float("DISCOVERY_PREFILTER_THRESHOLD", "0.10")
+DISCOVERY_ACCEPT_CONFIDENCE = _env_float("DISCOVERY_ACCEPT_CONFIDENCE", "0.85")
+DISCOVERY_MAX_CANDIDATES = _env_int("DISCOVERY_MAX_CANDIDATES", "200")
+DISCOVERY_CACHE_PATH = os.getenv(
+    "DISCOVERY_CACHE_PATH", os.path.join(DATA_DIR, "discovery", "discovery_cache.json")
+)
+DISCOVERY_CANDIDATES_PATH = os.getenv(
+    "DISCOVERY_CANDIDATES_PATH", os.path.join(DATA_DIR, "discovery", "candidate_pairs.yaml")
+)
+DISCOVERY_VERIFIED_PATH = os.getenv(
+    "DISCOVERY_VERIFIED_PATH", os.path.join(DATA_DIR, "discovery", "verified_pairs.yaml")
+)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
 # Fee model: "expected_value" uses probability-weighted average fees,
 # "worst_case" uses max(case1, case2) — more conservative but overfilters.
 FEE_MODEL = os.getenv("FEE_MODEL", "expected_value")

@@ -1,0 +1,744 @@
+pairs:
+- name: discovered-0000
+  question: Will New Zealand win the 2026 FIFA World Cup?
+  confidence: 0.92
+  reasoning: Both ask if New Zealand wins the 2026 World Cup; 'FIFA World Cup' and 'Men's World Cup' refer to the same tournament
+    (FIFA World Cup is inherently the men's competition unless specified as Women's).
+  venues:
+    polymarket: '558957'
+    kalshi: KXMENWORLDCUP-26-NZL
+- name: discovered-0001
+  question: Will South Korea win the 2026 FIFA World Cup?
+  confidence: 0.92
+  reasoning: Both ask if South Korea wins the 2026 World Cup; FIFA World Cup and Men's World Cup refer to the same tournament
+    event.
+  venues:
+    polymarket: '558961'
+    kalshi: KXMENWORLDCUP-26-KR
+- name: discovered-0002
+  question: Will South Africa win the 2026 FIFA World Cup?
+  confidence: 0.92
+  reasoning: Both ask if South Africa wins the 2026 World Cup; FIFA World Cup and Men's World Cup are equivalent terminology
+    for the same tournament.
+  venues:
+    polymarket: '558964'
+    kalshi: KXMENWORLDCUP-26-RSA
+- name: discovered-0003
+  question: Will Ivory Coast win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014Ivory Coast winning the 2026 FIFA Men's World Cup\u2014with matching dates\
+    \ and resolution thresholds."
+  venues:
+    polymarket: '558966'
+    kalshi: KXMENWORLDCUP-26-CIV
+- name: discovered-0004
+  question: Will Cape Verde win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014Cape Verde winning the 2026 FIFA Men's World Cup\u2014with matching dates\
+    \ and resolution thresholds."
+  venues:
+    polymarket: '558970'
+    kalshi: KXMENWORLDCUP-26-CPV
+- name: discovered-0005
+  question: Will Saudi Arabia win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014Saudi Arabia winning the 2026 FIFA Men's World Cup\u2014with matching dates\
+    \ and resolution thresholds; grammatical differences ('the Saudi Arabia') do not affect the substance."
+  venues:
+    polymarket: '558972'
+    kalshi: KXMENWORLDCUP-26-SA
+- name: discovered-0006
+  question: Will Congo DR win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014Congo DR winning the 2026 FIFA Men's World Cup\u2014with matching dates and\
+    \ resolution thresholds."
+  venues:
+    polymarket: '558981'
+    kalshi: KXMENWORLDCUP-26-COD
+- name: discovered-0007
+  question: Will Bosnia-Herzegovina win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014Bosnia and Herzegovina winning the 2026 FIFA Men's World Cup\u2014with matching\
+    \ dates and resolution thresholds; variant naming does not affect the substance."
+  venues:
+    polymarket: '558983'
+    kalshi: KXMENWORLDCUP-26-BIH
+- name: discovered-0008
+  question: Will Alexandria Ocasio-Cortez win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014Alexandria Ocasio-Cortez becoming the 2028 Democratic presidential nominee\u2014\
+    with matching dates and resolution criteria."
+  venues:
+    polymarket: '559653'
+    kalshi: KXPRESNOMD-28-AOC
+- name: discovered-0009
+  question: Will J.B. Pritzker win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014J.B. Pritzker becoming the 2028 Democratic presidential nominee\u2014with\
+    \ matching dates and resolution criteria."
+  venues:
+    polymarket: '559663'
+    kalshi: KXPRESNOMD-28-JBP
+- name: discovered-0010
+  question: James Norton announced as next James Bond?
+  confidence: 0.92
+  reasoning: Both ask about James Norton being selected as the next James Bond; 'announced as' and 'will be' both resolve
+    YES upon official selection confirmation.
+  venues:
+    polymarket: '572111'
+    kalshi: KXBOND-30-JN
+- name: discovered-0011
+  question: Theo James announced as next James Bond?
+  confidence: 0.92
+  reasoning: Both ask about Theo James being selected as the next James Bond; 'announced as' and 'will be' both resolve YES
+    upon official selection confirmation.
+  venues:
+    polymarket: '572123'
+    kalshi: KXBOND-30-THEO
+- name: discovered-0012
+  question: Will Spain win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014Spain winning the 2026 FIFA Men's World Cup\u2014with matching dates and\
+    \ resolution thresholds; grammatical differences ('the Spain') do not affect the substance."
+  venues:
+    polymarket: '558934'
+    kalshi: KXMENWORLDCUP-26-ES
+- name: discovered-0013
+  question: Will England win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014England winning the 2026 FIFA Men's World Cup\u2014with matching dates and\
+    \ resolution thresholds; grammatical differences ('the England') do not affect the substance."
+  venues:
+    polymarket: '558935'
+    kalshi: KXMENWORLDCUP-26-GB
+- name: discovered-0014
+  question: Will France win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: "Both ask about the same event\u2014France winning the 2026 FIFA Men's World Cup\u2014with matching dates and\
+    \ resolution thresholds; grammatical differences ('the France') do not affect the substance."
+  venues:
+    polymarket: '558936'
+    kalshi: KXMENWORLDCUP-26-FR
+- name: discovered-0015
+  question: Will Brazil win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Brazil wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558937'
+    kalshi: KXMENWORLDCUP-26-BR
+- name: discovered-0016
+  question: Will Argentina win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Argentina wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558938'
+    kalshi: KXMENWORLDCUP-26-AR
+- name: discovered-0017
+  question: Will Germany win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Germany wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558939'
+    kalshi: KXMENWORLDCUP-26-DE
+- name: discovered-0018
+  question: Will Portugal win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Portugal wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558940'
+    kalshi: KXMENWORLDCUP-26-PT
+- name: discovered-0019
+  question: Will Netherlands win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Netherlands wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558941'
+    kalshi: KXMENWORLDCUP-26-NL
+- name: discovered-0020
+  question: Will USA win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if USA wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558943'
+    kalshi: KXMENWORLDCUP-26-US
+- name: discovered-0021
+  question: Will Uruguay win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Uruguay wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558944'
+    kalshi: KXMENWORLDCUP-26-UY
+- name: discovered-0022
+  question: Will Mexico win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Mexico wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558945'
+    kalshi: KXMENWORLDCUP-26-MX
+- name: discovered-0023
+  question: Will Belgium win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Belgium wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558946'
+    kalshi: KXMENWORLDCUP-26-BE
+- name: discovered-0024
+  question: Will Colombia win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Colombia wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558947'
+    kalshi: KXMENWORLDCUP-26-CO
+- name: discovered-0025
+  question: Will Japan win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Japan wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558949'
+    kalshi: KXMENWORLDCUP-26-JP
+- name: discovered-0026
+  question: Will Norway win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask if Norway wins the 2026 FIFA/Men's World Cup with identical resolution criteria and timing.
+  venues:
+    polymarket: '558951'
+    kalshi: KXMENWORLDCUP-26-NO
+- name: discovered-0027
+  question: Will Canada win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference the same event (Canada winning 2026 FIFA World Cup), same threshold (tournament winner), and same
+    resolution date (2026), with no material differences.
+  venues:
+    polymarket: '558952'
+    kalshi: KXMENWORLDCUP-26-CA
+- name: discovered-0028
+  question: Will Tunisia win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Tunisia winning 2026 FIFA Men's World Cup with identical resolution criteria and outcome conditions.
+  venues:
+    polymarket: '558954'
+    kalshi: KXMENWORLDCUP-26-TN
+- name: discovered-0029
+  question: Will Ecuador win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Ecuador winning 2026 FIFA Men's World Cup with identical thresholds and resolution events.
+  venues:
+    polymarket: '558955'
+    kalshi: KXMENWORLDCUP-26-EC
+- name: discovered-0030
+  question: Will Paraguay win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Paraguay winning 2026 FIFA Men's World Cup with identical resolution criteria.
+  venues:
+    polymarket: '558956'
+    kalshi: KXMENWORLDCUP-26-PY
+- name: discovered-0031
+  question: Will Australia win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Australia winning 2026 FIFA Men's World Cup with identical thresholds and resolution conditions.
+  venues:
+    polymarket: '558958'
+    kalshi: KXMENWORLDCUP-26-AU
+- name: discovered-0032
+  question: Will Iran win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Iran winning 2026 FIFA Men's World Cup with identical resolution criteria.
+  venues:
+    polymarket: '558959'
+    kalshi: KXMENWORLDCUP-26-IR
+- name: discovered-0033
+  question: Will Uzbekistan win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Uzbekistan winning 2026 FIFA Men's World Cup with identical thresholds and outcome conditions.
+  venues:
+    polymarket: '558960'
+    kalshi: KXMENWORLDCUP-26-UZB
+- name: discovered-0034
+  question: Will Jordan win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Jordan winning 2026 FIFA Men's World Cup with identical resolution criteria.
+  venues:
+    polymarket: '558962'
+    kalshi: KXMENWORLDCUP-26-JOR
+- name: discovered-0035
+  question: Will Morocco win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Morocco winning 2026 FIFA Men's World Cup with identical thresholds and resolution conditions.
+  venues:
+    polymarket: '558963'
+    kalshi: KXMENWORLDCUP-26-MA
+- name: discovered-0036
+  question: Will Senegal win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Senegal winning 2026 FIFA Men's World Cup with identical resolution criteria.
+  venues:
+    polymarket: '558965'
+    kalshi: KXMENWORLDCUP-26-SN
+- name: discovered-0037
+  question: Will Ghana win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Ghana winning 2026 FIFA Men's World Cup with identical thresholds and outcome conditions.
+  venues:
+    polymarket: '558967'
+    kalshi: KXMENWORLDCUP-26-GH
+- name: discovered-0038
+  question: Will Egypt win the 2026 FIFA World Cup?
+  confidence: 0.98
+  reasoning: Both reference Egypt winning 2026 FIFA Men's World Cup with identical resolution criteria and conditions.
+  venues:
+    polymarket: '558968'
+    kalshi: KXMENWORLDCUP-26-EGY
+- name: discovered-0039
+  question: Will Algeria win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask identically about Algeria winning the 2026 FIFA Men's World Cup with matching dates and thresholds.
+  venues:
+    polymarket: '558969'
+    kalshi: KXMENWORLDCUP-26-DZA
+- name: discovered-0040
+  question: Will Qatar win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask identically about Qatar winning the 2026 FIFA Men's World Cup with matching dates and thresholds.
+  venues:
+    polymarket: '558971'
+    kalshi: KXMENWORLDCUP-26-QAT
+- name: discovered-0041
+  question: Will Scotland win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask about Scotland winning the 2026 FIFA Men's World Cup; the article differences ('will Scotland' vs 'will
+    the Scotland') are stylistic only.
+  venues:
+    polymarket: '558973'
+    kalshi: KXMENWORLDCUP-26-SC
+- name: discovered-0042
+  question: Will Switzerland win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask about Switzerland winning the 2026 FIFA Men's World Cup; the article differences are stylistic only.
+  venues:
+    polymarket: '558974'
+    kalshi: KXMENWORLDCUP-26-CH
+- name: discovered-0043
+  question: Will Austria win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask about Austria winning the 2026 FIFA Men's World Cup; the article differences are stylistic only.
+  venues:
+    polymarket: '558975'
+    kalshi: KXMENWORLDCUP-26-AT
+- name: discovered-0044
+  question: Will Croatia win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask about Croatia winning the 2026 FIFA Men's World Cup; the article differences are stylistic only.
+  venues:
+    polymarket: '558976'
+    kalshi: KXMENWORLDCUP-26-HR
+- name: discovered-0045
+  question: Will Haiti win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask identically about Haiti winning the 2026 FIFA Men's World Cup with matching dates and thresholds.
+  venues:
+    polymarket: '558977'
+    kalshi: KXMENWORLDCUP-26-HTI
+- name: discovered-0046
+  question: Will Panama win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask identically about Panama winning the 2026 FIFA Men's World Cup with matching dates and thresholds.
+  venues:
+    polymarket: '558979'
+    kalshi: KXMENWORLDCUP-26-PAN
+- name: discovered-0047
+  question: Will Sweden win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask about Sweden winning the 2026 FIFA Men's World Cup; the article differences are stylistic only.
+  venues:
+    polymarket: '558980'
+    kalshi: KXMENWORLDCUP-26-SE
+- name: discovered-0048
+  question: Will Iraq win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask identically about Iraq winning the 2026 FIFA Men's World Cup with matching dates and thresholds.
+  venues:
+    polymarket: '558982'
+    kalshi: KXMENWORLDCUP-26-IRQ
+- name: discovered-0049
+  question: Will Czechia win the 2026 FIFA World Cup?
+  confidence: 0.95
+  reasoning: Both ask identically about Czechia winning the 2026 FIFA Men's World Cup with matching dates and thresholds.
+  venues:
+    polymarket: '558984'
+    kalshi: KXMENWORLDCUP-26-CZE
+- name: discovered-0050
+  question: Will Gavin Newsom win the 2028 Democratic presidential nomination?
+  confidence: 0.92
+  reasoning: Both ask whether Gavin Newsom becomes the Democratic nominee/winner of the nomination in 2028, with identical
+    outcome conditions.
+  venues:
+    polymarket: '559652'
+    kalshi: KXPRESNOMD-28-GN
+- name: discovered-0051
+  question: Will Pete Buttigieg win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Pete Buttigieg will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold (becoming the nominee), and non-inverted YES outcomes.
+  venues:
+    polymarket: '559654'
+    kalshi: KXPRESNOMD-28-PB
+- name: discovered-0052
+  question: Will Josh Shapiro win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Josh Shapiro will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559655'
+    kalshi: KXPRESNOMD-28-JS
+- name: discovered-0053
+  question: Will Wes Moore win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Wes Moore will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559656'
+    kalshi: KXPRESNOMD-28-WM
+- name: discovered-0054
+  question: Will Stephen A. Smith win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Stephen A. Smith will win/be the Democratic presidential nominee in 2028, with identical
+    event, threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559657'
+    kalshi: KXPRESNOMD-28-SAS
+- name: discovered-0055
+  question: Will Kamala Harris win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Kamala Harris will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559658'
+    kalshi: KXPRESNOMD-28-KH
+- name: discovered-0056
+  question: Will Gretchen Whitmer win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Gretchen Whitmer will win/be the Democratic presidential nominee in 2028, with identical
+    event, threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559659'
+    kalshi: KXPRESNOMD-28-GW
+- name: discovered-0057
+  question: Will Andy Beshear win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Andy Beshear will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559660'
+    kalshi: KXPRESNOMD-28-AB
+- name: discovered-0058
+  question: Will Jon Ossoff win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Jon Ossoff will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559661'
+    kalshi: KXPRESNOMD-28-JOSS
+- name: discovered-0059
+  question: Will Mark Cuban win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Mark Cuban will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559662'
+    kalshi: KXPRESNOMD-28-MC
+- name: discovered-0060
+  question: Will Raphael Warnock win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Raphael Warnock will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559664'
+    kalshi: KXPRESNOMD-28-RW
+- name: discovered-0061
+  question: Will Cory Booker win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Cory Booker will win/be the Democratic presidential nominee in 2028, with identical event,
+    threshold, and non-inverted YES outcomes.
+  venues:
+    polymarket: '559665'
+    kalshi: KXPRESNOMD-28-CBOO
+- name: discovered-0062
+  question: Will Tim Walz win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask if Tim Walz will win/be the Democratic presidential nominee in 2028, with identical event, threshold,
+    and non-inverted YES outcomes.
+  venues:
+    polymarket: '559666'
+    kalshi: KXPRESNOMD-28-TW
+- name: discovered-0063
+  question: Will Michelle Obama win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether the same person (Michelle Obama) will be the Democratic nominee in 2028;
+    'win' and 'be' the nominee are functionally equivalent outcomes with identical resolution criteria.
+  venues:
+    polymarket: '559667'
+    kalshi: KXPRESNOMD-28-MO
+- name: discovered-0064
+  question: Will Mark Kelly win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Mark Kelly will be the Democratic nominee in 2028; the phrasing difference
+    ('win' vs 'be') does not change the underlying resolved event.
+  venues:
+    polymarket: '559668'
+    kalshi: KXPRESNOMD-28-MK
+- name: discovered-0065
+  question: Will Rahm Emanuel win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Rahm Emanuel will be the Democratic nominee in 2028; 'win the nomination'
+    and 'be the nominee' resolve under identical conditions.
+  venues:
+    polymarket: '559669'
+    kalshi: KXPRESNOMD-28-REMA
+- name: discovered-0066
+  question: Will Gina Raimondo win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Gina Raimondo will be the Democratic nominee in 2028; minor phrasing differences
+    do not affect the underlying outcome being measured.
+  venues:
+    polymarket: '559670'
+    kalshi: KXPRESNOMD-28-GR
+- name: discovered-0067
+  question: Will Zohran Mamdani win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Zohran Mamdani will be the Democratic nominee in 2028; 'win' and 'be' are
+    functionally equivalent for this measurable outcome.
+  venues:
+    polymarket: '559671'
+    kalshi: KXPRESNOMD-28-ZMAM
+- name: discovered-0068
+  question: Will Roy Cooper win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Roy Cooper will be the Democratic nominee in 2028; the substantive event
+    being measured is identical.
+  venues:
+    polymarket: '559672'
+    kalshi: KXPRESNOMD-28-RC
+- name: discovered-0069
+  question: Will John Fetterman win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether John Fetterman will be the Democratic nominee in 2028; 'win the nomination'
+    and 'be the nominee' resolve under the same conditions.
+  venues:
+    polymarket: '559673'
+    kalshi: KXPRESNOMD-28-JF
+- name: discovered-0070
+  question: Will Jared Polis win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Jared Polis will be the Democratic nominee in 2028; the underlying event
+    and resolution criteria are identical.
+  venues:
+    polymarket: '559674'
+    kalshi: KXPRESNOMD-28-JP
+- name: discovered-0071
+  question: Will Jon Stewart win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Jon Stewart will be the Democratic nominee in 2028; 'win' and 'be' the nominee
+    are functionally equivalent outcomes.
+  venues:
+    polymarket: '559675'
+    kalshi: KXPRESNOMD-28-JSTE
+- name: discovered-0072
+  question: Will Barack Obama win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Barack Obama will be the Democratic nominee in 2028; 'win the nomination'
+    and 'be the nominee' resolve identically.
+  venues:
+    polymarket: '559676'
+    kalshi: KXPRESNOMD-28-BOBA
+- name: discovered-0073
+  question: Will Liz Cheney win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Liz Cheney will be the Democratic nominee in 2028; minor phrasing differences
+    do not affect resolution.
+  venues:
+    polymarket: '559678'
+    kalshi: KXPRESNOMD-28-LC
+- name: discovered-0074
+  question: Will Bernie Sanders win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: Both markets ask identically whether Bernie Sanders will be the Democratic nominee in 2028; 'win' and 'be' the
+    nominee are functionally equivalent.
+  venues:
+    polymarket: '559679'
+    kalshi: KXPRESNOMD-28-BS
+- name: discovered-0075
+  question: Will Phil Murphy win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: 'Both markets reference the same event: whether Phil Murphy becomes the Democratic nominee in 2028; winning the
+    nomination and being the nominee are equivalent outcomes.'
+  venues:
+    polymarket: '559680'
+    kalshi: KXPRESNOMD-28-PHI
+- name: discovered-0076
+  question: Will LeBron James win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: 'Both markets reference the same event: whether LeBron James becomes the Democratic nominee in 2028; winning
+    and being the nominee are equivalent outcomes.'
+  venues:
+    polymarket: '559681'
+    kalshi: KXPRESNOMD-28-LJAM
+- name: discovered-0077
+  question: Will Hunter Biden win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: 'Both markets reference the same event: whether Hunter Biden becomes the Democratic nominee in 2028; winning
+    and being the nominee are equivalent outcomes.'
+  venues:
+    polymarket: '559682'
+    kalshi: KXPRESNOMD-28-HBID
+- name: discovered-0078
+  question: Will Chris Murphy win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: 'Both markets reference the same event: whether Chris Murphy becomes the Democratic nominee in 2028; winning
+    and being the nominee are equivalent outcomes.'
+  venues:
+    polymarket: '559691'
+    kalshi: KXPRESNOMD-28-CMUR
+- name: discovered-0079
+  question: Will Ruben Gallego win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: 'Both markets reference the same event: whether Ruben Gallego becomes the Democratic nominee in 2028; winning
+    and being the nominee are equivalent outcomes.'
+  venues:
+    polymarket: '559693'
+    kalshi: KXPRESNOMD-28-RGAL
+- name: discovered-0080
+  question: Will Ro Khanna win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: 'Both markets reference the same event: whether Ro Khanna becomes the Democratic nominee in 2028; winning and
+    being the nominee are equivalent outcomes.'
+  venues:
+    polymarket: '559694'
+    kalshi: KXPRESNOMD-28-RKHA
+- name: discovered-0081
+  question: Will James Talarico win the 2028 Democratic presidential nomination?
+  confidence: 0.95
+  reasoning: 'Both markets reference the same event: whether James Talarico becomes the Democratic nominee in 2028; winning
+    and being the nominee are equivalent outcomes.'
+  venues:
+    polymarket: '559695'
+    kalshi: KXPRESNOMD-28-JTAL
+- name: discovered-0082
+  question: "Will PSG win the 2025\u201326 Champions League?"
+  confidence: 0.92
+  reasoning: Both markets reference PSG winning the Champions League in the 2025-26 season; 'Champions League' and 'Champions
+    League Winner' are identical in meaning despite slightly different phrasing.
+  venues:
+    polymarket: '566136'
+    kalshi: KXUCL-26-PSG
+- name: discovered-0083
+  question: "Will Arsenal win the 2025\u201326 Champions League?"
+  confidence: 0.92
+  reasoning: Both markets reference Arsenal winning the Champions League in the 2025-26 season; 'Champions League' and 'Champions
+    League Winner' are identical in meaning despite slightly different phrasing.
+  venues:
+    polymarket: '566140'
+    kalshi: KXUCL-26-ARS
+- name: discovered-0084
+  question: Will the Oklahoma City Thunder win the 2026 NBA Finals?
+  confidence: 0.93
+  reasoning: Both markets reference Oklahoma City winning the professional basketball championship in 2026; 'NBA Finals' and
+    'Pro Basketball Finals' refer to the same event in this context.
+  venues:
+    polymarket: '553856'
+    kalshi: KXNBA-26-OKC
+- name: discovered-0085
+  question: Will the New York Knicks win the 2026 NBA Finals?
+  confidence: 0.93
+  reasoning: Both markets reference New York (Knicks) winning the professional basketball championship in 2026; 'NBA Finals'
+    and 'Pro Basketball Finals' refer to the same event in this context.
+  venues:
+    polymarket: '553858'
+    kalshi: KXNBA-26-NYK
+- name: discovered-0086
+  question: Will the San Antonio Spurs win the 2026 NBA Finals?
+  confidence: 0.95
+  reasoning: Both markets resolve YES if the San Antonio Spurs win the 2026 NBA Finals (Pro Basketball Finals); identical
+    underlying event with matching thresholds.
+  venues:
+    polymarket: '553866'
+    kalshi: KXNBA-26-SAS
+- name: discovered-0087
+  question: Will the Vegas Golden Knights win the 2026 NHL Stanley Cup?
+  confidence: 0.92
+  reasoning: Both resolve YES if Vegas Golden Knights win the 2025-26 Stanley Cup Finals/2026 Stanley Cup; same underlying
+    event and temporal reference.
+  venues:
+    polymarket: '553829'
+    kalshi: KXNHL-26-VGK
+- name: discovered-0088
+  question: Will the Carolina Hurricanes win the 2026 NHL Stanley Cup?
+  confidence: 0.95
+  reasoning: 'Both reference the same outcome: Carolina Hurricanes winning the 2025-26 NHL championship (Polymarket''s ''2026
+    Stanley Cup'' and Kalshi''s ''2025-26 Stanley Cup Finals'' refer to the same championship season).'
+  venues:
+    polymarket: '553824'
+    kalshi: KXNHL-26-CAR
+- name: discovered-0089
+  question: Will the Colorado Avalanche win the 2026 NHL Stanley Cup?
+  confidence: 0.95
+  reasoning: 'Both reference the same outcome: Colorado Avalanche winning the 2025-26 NHL championship (Polymarket''s ''2026
+    Stanley Cup'' and Kalshi''s ''2025-26 Stanley Cup Finals'' refer to the same championship season).'
+  venues:
+    polymarket: '553828'
+    kalshi: KXNHL-26-COL
+- name: discovered-0090
+  question: Will the Minnesota Wild win the 2026 NHL Stanley Cup?
+  confidence: 0.95
+  reasoning: 'Both reference the same outcome: Minnesota Wild winning the 2025-26 NHL championship (Polymarket''s ''2026 Stanley
+    Cup'' and Kalshi''s ''2025-26 Stanley Cup Finals'' refer to the same championship season).'
+  venues:
+    polymarket: '553838'
+    kalshi: KXNHL-26-MIN
+- name: discovered-0091
+  question: Will the Anaheim Ducks win the 2026 NHL Stanley Cup?
+  confidence: 0.95
+  reasoning: 'Both reference the same outcome: Anaheim Ducks winning the 2025-26 NHL championship (Polymarket''s ''2026 Stanley
+    Cup'' and Kalshi''s ''2025-26 Stanley Cup Finals'' refer to the same championship season).'
+  venues:
+    polymarket: '553848'
+    kalshi: KXNHL-26-ANA
+- name: discovered-0092
+  question: Will the Buffalo Sabres win the 2026 NHL Stanley Cup?
+  confidence: 0.95
+  reasoning: 'Both reference the same outcome: Buffalo Sabres winning the 2025-26 NHL championship (Polymarket''s ''2026 Stanley
+    Cup'' and Kalshi''s ''2025-26 Stanley Cup Finals'' refer to the same championship season).'
+  venues:
+    polymarket: '553851'
+    kalshi: KXNHL-26-BUF
+- name: discovered-0093
+  question: Will the Cleveland Cavaliers win the 2026 NBA Finals?
+  confidence: 0.92
+  reasoning: 'Both reference the same outcome: Cleveland Cavaliers winning the 2026 NBA championship (Kalshi''s phrasing ''Cleveland''
+    and ''Pro Basketball Finals'' clearly refers to the NBA Finals).'
+  venues:
+    polymarket: '553857'
+    kalshi: KXNBA-26-CLE
+- name: discovered-0094
+  question: Will the Minnesota Timberwolves win the 2026 NBA Finals?
+  confidence: 0.95
+  reasoning: Both ask whether the Minnesota Timberwolves/Minnesota win the 2026 NBA/Pro Basketball Finals, referencing the
+    same event with matching resolution criteria.
+  venues:
+    polymarket: '553859'
+    kalshi: KXNBA-26-MIN
+- name: discovered-0095
+  question: Will the Los Angeles Lakers win the 2026 NBA Finals?
+  confidence: 0.95
+  reasoning: Both ask whether the Los Angeles Lakers/Los Angeles L win the 2026 NBA/Pro Basketball Finals, referencing the
+    same event with matching resolution criteria.
+  venues:
+    polymarket: '553863'
+    kalshi: KXNBA-26-LAL
+- name: discovered-0096
+  question: Will the Detroit Pistons win the 2026 NBA Finals?
+  confidence: 0.95
+  reasoning: Both ask whether the Detroit Pistons/Detroit win the 2026 NBA/Pro Basketball Finals, referencing the same event
+    with matching resolution criteria.
+  venues:
+    polymarket: '553871'
+    kalshi: KXNBA-26-DET
