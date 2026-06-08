@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Project name:** `arbgrid` (renamed 2026-05-09 from `polymarket-arb-scanner`). The new name reflects the project's actual scope — a grid of platforms × layers × strategies, not a Polymarket-only scanner. The GitHub repo and Railway service have been renamed; local clones may keep the old directory name without functional impact.
+> **Project name:** the GitHub repo and Railway service remain **`polymarket-arb-scanner`**. The codebase is *internally branded* "arbgrid" — a grid of platforms × layers × strategies, not a Polymarket-only scanner — but no GitHub/Railway rename has actually occurred. (A separate exploratory scaffold briefly held the `arbgrid` GitHub repo name; it was archived 2026-06 during the `~/Dev` arbitrage-cluster consolidation, along with a second `prediction-market-arb` scaffold whose Claude market-equivalence discovery was ported here as `market_discovery.py`.) Local clones may use any directory name without functional impact.
 
 ## Project Overview
 
