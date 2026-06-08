@@ -10,7 +10,6 @@ decisions.jsonl
 *.log
 *.code-workspace
 .opencode/
-.mcp.json
 .firecrawl/
 .worktrees/
 arbgrid-roadmap.docx

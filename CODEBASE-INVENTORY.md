@@ -308,7 +308,7 @@ These functions exist but are never called in production:
 
 ### CRITICAL — Requires Immediate Action
 
-1. **Railway API token in `.mcp.json`** — Plaintext `rw_Fe26.2**...` token committed to repo. File is in `.gitignore` but was already committed. **Action:** Revoke token in Railway dashboard, generate new one, store in env var.
+1. **Railway API token in `.mcp.json`** — Plaintext `rw_***REDACTED***` token committed to repo. File is in `.gitignore` but was already committed. **Action:** Revoke token in Railway dashboard, generate new one, store in env var.
 
 2. **Kalshi private key in repo** — `kalshi-private-key.pem` (1,679 bytes) exists in working directory. In `.gitignore` but may have been committed previously. **Action:** Revoke key in Kalshi, regenerate, remove from git history with `git filter-branch`.
 
