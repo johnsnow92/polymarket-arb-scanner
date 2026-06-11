@@ -17,6 +17,7 @@ from config import (
     REVALIDATION_MIN_FLOOR as CONFIG_REVALIDATION_MIN_FLOOR,
     REVAL_FLOORS, get_layer,
     NEWS_SNIPE_CONFIDENCE_THRESHOLD, TIME_DECAY_MIN_CONSENSUS,
+    MIN_ENTRY_PRICE,
 )
 
 
@@ -98,6 +99,58 @@ def _derive_position_platform(legs: list[dict]) -> str:
     if len(platforms) == 1:
         return next(iter(platforms))
     return "cross"
+
+
+def _derive_market_ticker(opportunity: dict, legs: list[dict]) -> str | None:
+    """Pick the platform-native id used for settlement lookups.
+
+    Settlement queries the platform API by ticker (e.g. a Kalshi ticker like
+    KXEPLSPREAD-...), but ``market_identifier`` holds the human-readable title.
+    Storing the ticker lets check_settlements look the market up correctly.
+    Returns None when no platform-native id is available, in which case
+    settlement falls back to ``market_identifier`` (prior behavior).
+    """
+    ticker = opportunity.get("_kalshi_ticker")
+    if not ticker:
+        for leg in legs:
+            ticker = leg.get("_kalshi_ticker") or leg.get("_ticker")
+            if ticker:
+                break
+    return ticker or None
+
+
+def _check_min_entry_price(opportunity: dict, legs: list[dict]) -> tuple[bool, str]:
+    """Entry-discipline gate: refuse taker/arb entries below MIN_ENTRY_PRICE.
+
+    Production evidence (June 2026): $0.01 longshot fills had no resting bids
+    to exit into — 97 of 104 hedge attempts failed because the market would
+    not buy the position back at any acceptable price. A hedger cannot save
+    a position the market will not buy back, so the fix is to not enter.
+
+    MarketMake opportunities are exempt: resting cheap two-sided quotes is
+    how liquidity rewards are farmed, and MM exits via cancel/replace rather
+    than market sells. Only probability-priced buy legs (price in (0, 1)) are
+    gated — exchange back/lay legs price in decimal odds and are skipped.
+    """
+    if MIN_ENTRY_PRICE <= 0:
+        return True, ""
+    if opportunity.get("type", "").startswith("MarketMake"):
+        return True, ""
+    for leg in legs:
+        side = str(leg.get("side", "")).upper()
+        action = str(leg.get("action", "buy")).lower()
+        is_buy = side == "BUY" or (side in ("YES", "NO") and action == "buy")
+        if not is_buy:
+            continue
+        price = leg.get("price")
+        if not isinstance(price, (int, float)) or not (0 < price < 1):
+            continue
+        if price < MIN_ENTRY_PRICE:
+            return False, (
+                f"entry price ${price:.3f} below MIN_ENTRY_PRICE ${MIN_ENTRY_PRICE:.2f} "
+                f"({leg.get('platform', '?')} leg — no exit liquidity at penny prices)"
+            )
+    return True, ""
 
 
 class ArbitrageExecutor:
@@ -302,6 +355,14 @@ class ArbitrageExecutor:
         if not legs:
             logger.info(f"{prefix}Could not build execution legs. Skipping.")
             self._log_skipped(opportunity, "no_legs")
+            return False
+
+        # 4b. Entry-discipline gate: never enter positions the market won't
+        # buy back (penny longshots have no exit liquidity; see hedger.py).
+        ok_entry, entry_reason = _check_min_entry_price(opportunity, legs)
+        if not ok_entry:
+            logger.info(f"{prefix}Entry blocked: {entry_reason}")
+            self._log_skipped(opportunity, "min_entry_price")
             return False
 
         # 5. Display plan
@@ -2406,6 +2467,7 @@ class ArbitrageExecutor:
                 market_identifier=market,
                 platform=platform,
                 expected_pnl=opportunity.get("net_profit", 0),
+                market_ticker=_derive_market_ticker(opportunity, legs),
             )
             # Invalidate balance cache after a successful trade
             self.invalidate_balance_cache()
@@ -2586,6 +2648,7 @@ class ArbitrageExecutor:
                 market_identifier=market,
                 platform=platform,
                 expected_pnl=opportunity.get("net_profit", 0),
+                market_ticker=_derive_market_ticker(opportunity, legs),
             )
             self._notify_trade(opportunity, legs, size, success=True)
         else:
