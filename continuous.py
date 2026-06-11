@@ -311,7 +311,10 @@ def check_settlements(
     settled = 0
     for pos in open_positions:
         platform = pos["platform"]
-        market_id = pos["market_identifier"]
+        # Settlement lookups are keyed by the platform-native ticker, not the
+        # human-readable title. Prefer market_ticker; fall back to
+        # market_identifier for legacy rows written before that column existed.
+        market_id = pos.get("market_ticker") or pos["market_identifier"]
 
         try:
             if platform == "kalshi" and kalshi_client:

@@ -140,6 +140,17 @@ class TradeDB:
         except sqlite3.OperationalError:
             logger.debug("Migration: reward_yield_usdc column already exists")
 
+        # Safe migration: add market_ticker to positions. Settlement checks
+        # query the platform API by ticker (e.g. KXEPLSPREAD-...), but
+        # market_identifier holds the human title (e.g. "Chelsea: Spreads").
+        # Without this column the Kalshi settlement lookup fails on every
+        # position, so positions never settle and realized_pnl stays NULL.
+        try:
+            self.conn.execute("ALTER TABLE positions ADD COLUMN market_ticker TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            logger.debug("Migration: market_ticker column already exists on positions")
+
         # Safe migration: add hedge identifier columns to partial_fills.
         # Without these, _hedge_betfair/_smarkets/_sxbet/_matchbook/_gemini cannot
         # locate the original market and silently fail every hedge attempt.
@@ -299,19 +310,26 @@ class TradeDB:
         market_identifier: str,
         platform: str,
         expected_pnl: float,
+        market_ticker: str | None = None,
     ) -> int | None:
-        """Create an open position after a trade is filled. Returns position ID."""
+        """Create an open position after a trade is filled. Returns position ID.
+
+        market_ticker is the platform-native id used for settlement lookups
+        (e.g. a Kalshi ticker). When omitted, settlement falls back to
+        market_identifier, which only works if that already holds a ticker.
+        """
         with self._lock:
             cur = self.conn.execute(
                 """INSERT INTO positions
-                   (opportunity_id, market_identifier, platform, entry_timestamp, status, expected_pnl)
-                   VALUES (?, ?, ?, ?, 'open', ?)""",
+                   (opportunity_id, market_identifier, platform, entry_timestamp, status, expected_pnl, market_ticker)
+                   VALUES (?, ?, ?, ?, 'open', ?, ?)""",
                 (
                     opportunity_id,
                     market_identifier,
                     platform,
                     datetime.now(timezone.utc).isoformat(),
                     expected_pnl,
+                    market_ticker,
                 ),
             )
             self.conn.commit()

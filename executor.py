@@ -100,6 +100,24 @@ def _derive_position_platform(legs: list[dict]) -> str:
     return "cross"
 
 
+def _derive_market_ticker(opportunity: dict, legs: list[dict]) -> str | None:
+    """Pick the platform-native id used for settlement lookups.
+
+    Settlement queries the platform API by ticker (e.g. a Kalshi ticker like
+    KXEPLSPREAD-...), but ``market_identifier`` holds the human-readable title.
+    Storing the ticker lets check_settlements look the market up correctly.
+    Returns None when no platform-native id is available, in which case
+    settlement falls back to ``market_identifier`` (prior behavior).
+    """
+    ticker = opportunity.get("_kalshi_ticker")
+    if not ticker:
+        for leg in legs:
+            ticker = leg.get("_kalshi_ticker") or leg.get("_ticker")
+            if ticker:
+                break
+    return ticker or None
+
+
 class ArbitrageExecutor:
     """Executes arbitrage trades with risk controls, dry-run, and semi/full-auto modes."""
 
@@ -2406,6 +2424,7 @@ class ArbitrageExecutor:
                 market_identifier=market,
                 platform=platform,
                 expected_pnl=opportunity.get("net_profit", 0),
+                market_ticker=_derive_market_ticker(opportunity, legs),
             )
             # Invalidate balance cache after a successful trade
             self.invalidate_balance_cache()
@@ -2586,6 +2605,7 @@ class ArbitrageExecutor:
                 market_identifier=market,
                 platform=platform,
                 expected_pnl=opportunity.get("net_profit", 0),
+                market_ticker=_derive_market_ticker(opportunity, legs),
             )
             self._notify_trade(opportunity, legs, size, success=True)
         else:
