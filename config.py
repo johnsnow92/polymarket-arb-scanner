@@ -105,6 +105,11 @@ MAX_DAILY_TRADES = _env_int("MAX_DAILY_TRADES", "0")  # 0 = unlimited
 MIN_LIQUIDITY = _env_float("MIN_LIQUIDITY", "10.0")
 MIN_LIQUIDITY_HIGH_ROI = _env_float("MIN_LIQUIDITY_HIGH_ROI", "5.0")
 MIN_NET_ROI = _env_float("MIN_NET_ROI", "0")
+# Entry discipline: refuse taker/arb entries below this per-contract price.
+# Penny longshots (e.g. $0.01 sports outcomes) have no resting bids to exit
+# into — the hedger cannot save a position the market won't buy back.
+# MarketMake legs are exempt (resting cheap quotes is how rewards are farmed).
+MIN_ENTRY_PRICE = _env_float("MIN_ENTRY_PRICE", "0.05")
 ALLOW_BETTER_REENTRY = _env_bool("ALLOW_BETTER_REENTRY", "true")
 REENTRY_IMPROVEMENT_THRESHOLD = _env_float("REENTRY_IMPROVEMENT_THRESHOLD", "0.20")
 
@@ -1087,6 +1092,10 @@ def validate_config() -> list[str]:
         raise ConfigError(
             f"REENTRY_IMPROVEMENT_THRESHOLD={REENTRY_IMPROVEMENT_THRESHOLD} "
             f"must be in [0, 1]"
+        )
+    if not (0 <= MIN_ENTRY_PRICE < 1):
+        raise ConfigError(
+            f"MIN_ENTRY_PRICE={MIN_ENTRY_PRICE} must be in [0, 1)"
         )
     if not (0 < SEMANTIC_MATCH_THRESHOLD <= 1):
         raise ConfigError(
