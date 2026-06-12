@@ -159,6 +159,22 @@ class TestRecommendationAgeGate:
         finally:
             config.MIN_NET_ROI = original_roi
 
+    def test_future_generated_at_not_applied(self):
+        # Negative age (clock skew / malformed file) must not bypass the gate.
+        import config
+        from datetime import datetime, timedelta, timezone
+        original_roi = config.MIN_NET_ROI
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                future_dt = datetime.now(timezone.utc) + timedelta(hours=6)
+                future = future_dt.replace(tzinfo=None).isoformat() + "Z"
+                path = self._write_rec(tmp, future, min_net_roi=0.03)
+                applied = config.apply_backtest_recommendations(path)
+            assert applied == {}
+            assert config.MIN_NET_ROI == original_roi
+        finally:
+            config.MIN_NET_ROI = original_roi
+
     def test_age_helper_parses_utc_z_format(self):
         import config
         from datetime import datetime, timezone

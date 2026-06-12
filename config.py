@@ -897,11 +897,14 @@ def apply_backtest_recommendations(path: str | None = None) -> dict:
         return {}
 
     age_hours = _recommendation_age_hours(data.get("generated_at", ""))
-    if age_hours is None:
+    if age_hours is None or age_hours < 0:
+        # A negative age means generated_at is in the future (clock skew or a
+        # malformed file) — that must not bypass the freshness gate.
         logger.warning(
-            "Backtest recommendations at %s have no parseable generated_at — "
-            "cannot verify freshness, not applying",
+            "Backtest recommendations at %s have invalid generated_at=%r "
+            "(unparseable or in the future) — cannot verify freshness, not applying",
             path or BACKTEST_RECOMMENDATIONS_PATH,
+            data.get("generated_at"),
         )
         return {}
     if age_hours > BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS:
@@ -1070,6 +1073,7 @@ def validate_config() -> list[str]:
         "ALERT_RATE_LIMIT_SECONDS": ALERT_RATE_LIMIT_SECONDS,
         "ALERT_LOSS_STREAK_THRESHOLD": ALERT_LOSS_STREAK_THRESHOLD,
         "STALE_PRICE_THRESHOLD": STALE_PRICE_THRESHOLD,
+        "BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS": BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS,
     }
     for name, val in _positive.items():
         if val <= 0:
