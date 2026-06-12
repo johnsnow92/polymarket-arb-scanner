@@ -105,5 +105,96 @@ class TestCheckSettlementsUsesTicker(unittest.TestCase):
         self.assertEqual(self.db.get_open_positions_count(), 0)
 
 
+class TestPortfolioSettlementsReconciliation(unittest.TestCase):
+    """Account-scoped /portfolio/settlements is the authoritative settlement
+    source — one call covers all open Kalshi positions; per-market lookup is
+    only the fallback for positions absent from the feed."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.db = TradeDB(self.tmp.name)
+
+    def tearDown(self):
+        os.unlink(self.tmp.name)
+
+    def _position(self, ticker, title="Some Market", side="yes", price=0.40):
+        opp_id = self.db.log_opportunity("KalshiBinary", title, f"Y={price}", 0.95, 0.05, 0.05, 1, "exec")
+        self.db.log_trade(opp_id, "kalshi", side, price, 1.0, "filled", fill_price=price)
+        return self.db.create_position(
+            opportunity_id=opp_id, market_identifier=title,
+            platform="kalshi", expected_pnl=0.05, market_ticker=ticker,
+        )
+
+    def test_settles_from_portfolio_feed_without_market_lookup(self):
+        self._position("KXTEST-1")
+        client = MagicMock()
+        client.get_settlements.return_value = [
+            {"ticker": "KXTEST-1", "market_result": "yes", "revenue": 100},
+        ]
+
+        continuous.check_settlements(self.db, client, None)
+
+        self.assertEqual(self.db.get_open_positions_count(), 0)
+        client._request.assert_not_called()
+
+    def test_position_missing_from_feed_falls_back_to_market_lookup(self):
+        self._position("KXTEST-2")
+        client = MagicMock()
+        client.get_settlements.return_value = []  # not in the feed yet
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"market": {"result": "no"}}
+        client._request.return_value = resp
+
+        continuous.check_settlements(self.db, client, None)
+
+        called_path = client._request.call_args[0][1]
+        self.assertIn("KXTEST-2", called_path)
+        self.assertEqual(self.db.get_open_positions_count(), 0)
+
+    def test_unsettled_market_stays_open(self):
+        self._position("KXTEST-3")
+        client = MagicMock()
+        client.get_settlements.return_value = []
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"market": {"result": ""}}  # not resolved yet
+        client._request.return_value = resp
+
+        continuous.check_settlements(self.db, client, None)
+
+        self.assertEqual(self.db.get_open_positions_count(), 1)
+
+    def test_settlements_fetch_error_falls_back(self):
+        self._position("KXTEST-4")
+        client = MagicMock()
+        client.get_settlements.side_effect = RuntimeError("api down")
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"market": {"result": "yes"}}
+        client._request.return_value = resp
+
+        continuous.check_settlements(self.db, client, None)
+
+        self.assertEqual(self.db.get_open_positions_count(), 0)
+
+    def test_winning_side_from_feed_drives_pnl(self):
+        # Directional YES position, market resolved NO → realized loss, not
+        # the legacy arb assumption of 1.0 − cost.
+        self._position("KXTEST-5", side="yes", price=0.40)
+        client = MagicMock()
+        client.get_settlements.return_value = [
+            {"ticker": "KXTEST-5", "market_result": "no"},
+        ]
+
+        continuous.check_settlements(self.db, client, None)
+
+        row = self.db.conn.execute(
+            "SELECT realized_pnl FROM positions WHERE market_ticker='KXTEST-5'"
+        ).fetchone()
+        self.assertAlmostEqual(row[0], -0.40, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

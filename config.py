@@ -110,6 +110,14 @@ MIN_NET_ROI = _env_float("MIN_NET_ROI", "0")
 # into — the hedger cannot save a position the market won't buy back.
 # MarketMake legs are exempt (resting cheap quotes is how rewards are farmed).
 MIN_ENTRY_PRICE = _env_float("MIN_ENTRY_PRICE", "0.05")
+# Entry discipline, part 2: require a live exit bid on every buy leg before
+# placing orders. MIN_ENTRY_PRICE blocks penny longshots; this blocks any
+# market (at any price) whose book is one-sided, where a partial fill could
+# not be hedged or unwound. Depth is contracts resting at the best exit bid.
+# Checked at execution time against the live order book; fails closed when
+# the book cannot be fetched. MarketMake legs are exempt.
+EXIT_LIQUIDITY_GATE_ENABLED = _env_bool("EXIT_LIQUIDITY_GATE_ENABLED", "true")
+MIN_EXIT_BID_DEPTH = _env_int("MIN_EXIT_BID_DEPTH", "10")
 ALLOW_BETTER_REENTRY = _env_bool("ALLOW_BETTER_REENTRY", "true")
 REENTRY_IMPROVEMENT_THRESHOLD = _env_float("REENTRY_IMPROVEMENT_THRESHOLD", "0.20")
 
@@ -1096,6 +1104,10 @@ def validate_config() -> list[str]:
     if not (0 <= MIN_ENTRY_PRICE < 1):
         raise ConfigError(
             f"MIN_ENTRY_PRICE={MIN_ENTRY_PRICE} must be in [0, 1)"
+        )
+    if MIN_EXIT_BID_DEPTH < 0:
+        raise ConfigError(
+            f"MIN_EXIT_BID_DEPTH={MIN_EXIT_BID_DEPTH} must be >= 0"
         )
     if not (0 < SEMANTIC_MATCH_THRESHOLD <= 1):
         raise ConfigError(
