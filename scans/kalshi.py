@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kalshi_api import KalshiClient
+from config import KALSHI_MULTI_MIN_SUM as _KALSHI_MULTI_MIN_SUM
 from fees import net_profit_kalshi_binary, net_profit_kalshi_multi
 from scans.helpers import _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
@@ -234,12 +235,17 @@ def scan_kalshi_multi(
         if not valid or not yes_prices:
             continue
 
-        # Sanity check: very low total with many outcomes likely means missing markets
+        # Completeness guard: for a true single-winner market the YES asks sum to
+        # just under/over 1.0. A sum well below the floor means missing/closed
+        # legs or stale quotes — not a real arb. Applies to every outcome count,
+        # including the 2-leg events the old ``>= 3`` heuristic ignored.
         total_yes = sum(yes_prices)
-        if len(yes_prices) >= 3 and total_yes < 0.50:
+        if total_yes < _KALSHI_MULTI_MIN_SUM:
             event_title = event_titles.get(event_ticker, "Unknown")[:60]
-            logger.warning("Likely missing outcomes: '%s' (%d outcomes sum to %.3f)",
-                          event_title, len(yes_prices), total_yes)
+            logger.warning(
+                "Implausible multi sum (missing/stale legs): '%s' (%d outcomes sum to %.3f, floor=%.2f)",
+                event_title, len(yes_prices), total_yes, _KALSHI_MULTI_MIN_SUM,
+            )
             continue
 
         result = net_profit_kalshi_multi(yes_prices)
