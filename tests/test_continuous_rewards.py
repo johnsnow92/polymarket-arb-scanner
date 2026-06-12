@@ -91,6 +91,45 @@ class TestRewardsContinuousMode:
         assert callable(scan_polymarket_rewards)
         assert callable(scan_kalshi_rewards)
 
+    def test_polymarket_rewards_includes_maker_rebate_stream(self, reward_tracker):
+        """Reward opps must carry the maker-rebate income estimate (stacks with
+        liquidity rewards; 25% of category taker fee, 20% crypto)."""
+        from unittest.mock import patch as _patch
+        from scans import scan_polymarket_rewards
+        from scans import rewards as rewards_mod
+
+        market = {
+            "conditionId": "cond-rebate-1",
+            "question": "Will X happen?",
+            "category": "politics",
+            "incentives": {
+                "min_incentive_size": 5.0,
+                "max_incentive_spread": 0.04,
+                "pool_size_usdc": 100.0,
+            },
+            "outcomePrices": [0.50, 0.50],
+            "volume": "1000",
+        }
+
+        def _fake_refine(opps, markets_by_key, price_cache=None):
+            # The real refiner attaches net_profit (expected daily reward);
+            # without it filter_dust would drop every opp.
+            for o in opps:
+                o["net_profit"] = 1.0
+            return opps
+
+        with _patch.object(rewards_mod, "_refine_rewards_with_clob", side_effect=_fake_refine):
+            opps = scan_polymarket_rewards(
+                markets=[market], reward_tracker=reward_tracker, min_pool_usdc=10.0,
+            )
+
+        assert len(opps) == 1
+        opp = opps[0]
+        assert opp["_category"] == "politics"
+        # Politics taker at the optimal bid b: 0.04 * b * (1-b); rebate = 25%.
+        b = opp["optimal_bid"]
+        assert opp["maker_rebate_per_contract"] == pytest.approx(0.25 * 0.04 * b * (1 - b))
+
     def test_polymarket_rewards_integration(self, reward_tracker):
         """Mock Polymarket API and verify rewards scan called."""
         from scans import scan_polymarket_rewards

@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fees import (
     polymarket_fee,
     polymarket_taker_fee,
+    polymarket_maker_rebate,
     kalshi_taker_fee,
     kalshi_maker_fee,
     net_profit_binary_internal,
@@ -59,6 +60,38 @@ class TestPolymarketFee:
     def test_zero_buy_price(self):
         # Net winnings = 1.0 - 0.0 = 1.0; fee = 0.02
         assert polymarket_fee(0.0, 1.0) == pytest.approx(0.02)
+
+
+# ---------------------------------------------------------------------------
+# polymarket_maker_rebate
+# ---------------------------------------------------------------------------
+
+class TestPolymarketMakerRebate:
+    def test_default_share_is_25_percent_of_taker_fee(self):
+        # Politics: taker = 0.04 * 1 * 0.5 * 0.5 = 0.01; rebate = 25% = 0.0025
+        assert polymarket_maker_rebate(0.50, 1, category="politics") == pytest.approx(0.0025)
+
+    def test_crypto_share_is_20_percent(self):
+        # Crypto: taker = 0.07 * 1 * 0.5 * 0.5 = 0.0175; rebate = 20% = 0.0035
+        assert polymarket_maker_rebate(0.50, 1, category="crypto") == pytest.approx(0.0035)
+
+    def test_geopolitics_fee_free_means_zero_rebate(self):
+        assert polymarket_maker_rebate(0.50, 100, category="geopolitics") == 0.0
+
+    def test_scales_with_contracts(self):
+        one = polymarket_maker_rebate(0.30, 1, category="sports")
+        ten = polymarket_maker_rebate(0.30, 10, category="sports")
+        assert ten == pytest.approx(10 * one)
+
+    def test_unknown_category_uses_default_taker_rate_and_share(self):
+        # Unknown-category fallback is POLYMARKET_DEFAULT_TAKER_RATE (0.04),
+        # applied inside polymarket_taker_fee; rebate share 25%.
+        expected = 0.25 * polymarket_taker_fee(0.40, 1, category="mystery")
+        assert polymarket_maker_rebate(0.40, 1, category="mystery") == pytest.approx(expected)
+
+    def test_extreme_prices_have_zero_rebate(self):
+        assert polymarket_maker_rebate(0.0, 1, category="politics") == 0.0
+        assert polymarket_maker_rebate(1.0, 1, category="politics") == 0.0
 
 
 # ---------------------------------------------------------------------------

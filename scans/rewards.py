@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from polymarket_api import get_clob_prices
+from fees import polymarket_maker_rebate
 from scans.helpers import _fetch_clob_for_market, filter_dust
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,12 @@ def scan_polymarket_rewards(markets: list[dict], reward_tracker, min_pool_usdc: 
         # Check if single-sided is allowed based on midpoint range
         single_sided_ok = 0.10 <= mid_price <= 0.90
 
+        # Maker-rebate stream (stacks with liquidity rewards): expected rebate
+        # income per contract if the resting bid fills. Category drives both
+        # the taker rate and the rebate share (25%, crypto 20%).
+        category = market.get("category") or ""
+        rebate_per_contract = polymarket_maker_rebate(optimal["bid"], 1, category=category)
+
         # Create opportunity
         markets_by_key[market_key] = market
         opportunities.append({
@@ -251,6 +258,8 @@ def scan_polymarket_rewards(markets: list[dict], reward_tracker, min_pool_usdc: 
             "optimal_ask": optimal["ask"],
             "optimal_spread": optimal["spread"],
             "single_sided_ok": single_sided_ok,
+            "maker_rebate_per_contract": rebate_per_contract,
+            "_category": category,
             "_market_key": market_key,
             "_market_volume": float(market.get("volume", 0) or 0),
         })
