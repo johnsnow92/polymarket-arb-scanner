@@ -308,6 +308,24 @@ def check_settlements(
         return
 
     logger.info("Checking %d open positions for settlement...", len(open_positions))
+
+    # Account-scoped Kalshi reconciliation (June 2026 audit): the account's
+    # /portfolio/settlements feed is the authoritative record of what settled —
+    # one API call covers every open Kalshi position and cannot miss a
+    # resolution the way per-market polling did. Build a ticker → result map
+    # up front; per-market /markets/{ticker} lookup remains as fallback for
+    # positions not (yet) present in the settlement feed.
+    kalshi_settlements: dict[str, str] = {}
+    if kalshi_client and any(p["platform"] == "kalshi" for p in open_positions):
+        try:
+            for s in kalshi_client.get_settlements():
+                ticker = s.get("ticker", "")
+                result = s.get("market_result", "")
+                if ticker and result and ticker not in kalshi_settlements:
+                    kalshi_settlements[ticker] = result
+        except Exception as e:
+            logger.warning("Kalshi settlements fetch failed (falling back to per-market lookups): %s", e)
+
     settled = 0
     for pos in open_positions:
         platform = pos["platform"]
@@ -318,15 +336,17 @@ def check_settlements(
 
         try:
             if platform == "kalshi" and kalshi_client:
-                resp = kalshi_client._request("GET", f"/markets/{market_id}")
-                if resp and resp.status_code == 200:
-                    data = resp.json()
-                    market_data = data.get("market", data)
-                    result = market_data.get("result", "")
-                    if result:
-                        realized = _calc_realized_pnl(db, pos, winning_side=result)
-                        db.settle_position(pos["id"], realized_pnl=realized, status="settled")
-                        settled += 1
+                result = kalshi_settlements.get(market_id, "")
+                if not result:
+                    resp = kalshi_client._request("GET", f"/markets/{market_id}")
+                    if resp and resp.status_code == 200:
+                        data = resp.json()
+                        market_data = data.get("market", data)
+                        result = market_data.get("result", "")
+                if result:
+                    realized = _calc_realized_pnl(db, pos, winning_side=result)
+                    db.settle_position(pos["id"], realized_pnl=realized, status="settled")
+                    settled += 1
             elif platform in ("polymarket", "cross"):
                 try:
                     from polymarket_api import _get_with_retry, GAMMA_BASE

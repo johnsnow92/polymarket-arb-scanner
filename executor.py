@@ -17,7 +17,7 @@ from config import (
     REVALIDATION_MIN_FLOOR as CONFIG_REVALIDATION_MIN_FLOOR,
     REVAL_FLOORS, get_layer,
     NEWS_SNIPE_CONFIDENCE_THRESHOLD, TIME_DECAY_MIN_CONSENSUS,
-    MIN_ENTRY_PRICE,
+    MIN_ENTRY_PRICE, EXIT_LIQUIDITY_GATE_ENABLED, MIN_EXIT_BID_DEPTH,
 )
 
 
@@ -366,6 +366,14 @@ class ArbitrageExecutor:
             self._log_skipped(opportunity, "min_entry_price")
             return False
 
+        # 4c. Entry-discipline gate #2: verify a live exit bid exists under
+        # every buy leg (live order-book check; fails closed on fetch error).
+        ok_exit, exit_reason = self._check_exit_liquidity(opportunity, legs)
+        if not ok_exit:
+            logger.info(f"{prefix}Entry blocked: {exit_reason}")
+            self._log_skipped(opportunity, "exit_liquidity")
+            return False
+
         # 5. Display plan
         self._print_plan(opportunity, legs, size, prefix)
 
@@ -410,6 +418,101 @@ class ArbitrageExecutor:
                 self._failed_cooldowns[cooldown_key] = time.time() + self._FAILED_COOLDOWN_SECS
                 logger.info(f"Cooldown set for {cooldown_key} ({self._FAILED_COOLDOWN_SECS}s)")
             return result
+
+    def _check_exit_liquidity(self, opportunity: dict, legs: list[dict]) -> tuple[bool, str]:
+        """Entry-discipline gate #2: require a live exit bid under every buy leg.
+
+        MIN_ENTRY_PRICE blocks penny longshots; this gate blocks one-sided
+        books at any price. Production evidence (June 2026): partial fills
+        could not be hedged because the entered markets had no resting bids —
+        the fix is to never enter a market the hedger could not exit. Fails
+        CLOSED when an order book cannot be fetched (no verification → no
+        entry).
+
+        Only Kalshi and Polymarket legs are checked (the venues with live
+        execution paths today). MarketMake is exempt: it exits via
+        cancel/replace, and resting quotes on thin books is how liquidity
+        rewards are farmed.
+        """
+        if not EXIT_LIQUIDITY_GATE_ENABLED:
+            return True, ""
+        if self.dry_run:
+            # Dry-run places no orders and creates no positions to hedge;
+            # skipping avoids per-candidate live book fetches in paper mode.
+            return True, ""
+        if opportunity.get("type", "").startswith("MarketMake"):
+            return True, ""
+
+        book_cache: dict = {}
+        for leg in legs:
+            side = str(leg.get("side", "")).upper()
+            action = str(leg.get("action", "buy")).lower()
+            is_buy = side == "BUY" or (side in ("YES", "NO") and action == "buy")
+            if not is_buy:
+                continue
+            price = leg.get("price")
+            if not isinstance(price, (int, float)) or not (0 < price < 1):
+                continue
+
+            platform = leg.get("platform", "")
+            if platform == "kalshi":
+                if not self.kalshi_client:
+                    # No client means no way to verify exit liquidity — and no
+                    # way to place the order later. Fail closed, don't skip.
+                    return False, "kalshi leg present but no Kalshi client (fail closed)"
+                ticker = leg.get("_ticker") or opportunity.get("_kalshi_ticker") or ""
+                if not ticker:
+                    continue
+                from kalshi_api import parse_orderbook, best_yes_bid, best_no_bid
+                if ticker in book_cache:
+                    parsed = book_cache[ticker]
+                else:
+                    try:
+                        book = self.kalshi_client.fetch_order_book(ticker)
+                        parsed = parse_orderbook(book) if book else None
+                    except Exception as exc:
+                        logger.warning(f"Exit-liquidity book fetch raised for {ticker}: {exc}")
+                        parsed = None
+                    if not parsed:
+                        return False, f"could not fetch order book for {ticker} (fail closed)"
+                    book_cache[ticker] = parsed
+                kalshi_side = str(leg.get("side", "")).lower()
+                exit_bid = best_yes_bid(parsed) if kalshi_side == "yes" else best_no_bid(parsed)
+                if not exit_bid or exit_bid[0] <= 0:
+                    return False, f"no resting {kalshi_side} bid on {ticker} — one-sided book"
+                if exit_bid[1] < MIN_EXIT_BID_DEPTH:
+                    return False, (
+                        f"exit bid depth {exit_bid[1]:.0f} < MIN_EXIT_BID_DEPTH "
+                        f"{MIN_EXIT_BID_DEPTH} on {ticker}"
+                    )
+            elif platform == "polymarket":
+                token_id = leg.get("_token_id") or ""
+                if not token_id:
+                    continue
+                if token_id in book_cache:
+                    best = book_cache[token_id]
+                else:
+                    try:
+                        book = fetch_order_book(token_id)
+                        best = get_best_bid_ask(book) if book else None
+                    except Exception as exc:
+                        logger.warning(f"Exit-liquidity CLOB fetch raised for {token_id[:16]}: {exc}")
+                        best = None
+                    if not best:
+                        return False, f"could not fetch CLOB book for token {token_id[:16]} (fail closed)"
+                    book_cache[token_id] = best
+                bid = best.get("bid")
+                bid_size = best.get("bid_size") or 0
+                if not bid or bid <= 0:
+                    return False, f"no resting bid on token {token_id[:16]} — one-sided book"
+                if bid_size < MIN_EXIT_BID_DEPTH:
+                    return False, (
+                        f"exit bid depth {bid_size:.0f} < MIN_EXIT_BID_DEPTH "
+                        f"{MIN_EXIT_BID_DEPTH} on token {token_id[:16]}"
+                    )
+            # Other platforms: no wired exit-side book check; MIN_ENTRY_PRICE
+            # and the per-platform risk gates still apply.
+        return True, ""
 
     def _revalidate(self, opportunity: dict, price_cache: dict | None = None) -> bool:
         """Re-fetch current prices and verify the opportunity still exists.

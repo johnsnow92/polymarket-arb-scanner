@@ -470,6 +470,7 @@ class TestExecuteDispatch:
 
         # Stub all the gates so execute() reaches the dispatch
         executor_concurrent._revalidate = MagicMock(return_value=True)
+        executor_concurrent._check_exit_liquidity = MagicMock(return_value=(True, ""))
         executor_concurrent.risk.check = MagicMock(return_value=(True, ""))
         executor_concurrent._fetch_balances = MagicMock(return_value={})
         executor_concurrent._per_leg_budget = MagicMock(return_value=10.0)
@@ -488,6 +489,7 @@ class TestExecuteDispatch:
         opp = self._make_binary_opp()
 
         executor_sequential._revalidate = MagicMock(return_value=True)
+        executor_sequential._check_exit_liquidity = MagicMock(return_value=(True, ""))
         executor_sequential.risk.check = MagicMock(return_value=(True, ""))
         executor_sequential._fetch_balances = MagicMock(return_value={})
         executor_sequential._per_leg_budget = MagicMock(return_value=10.0)
@@ -534,6 +536,7 @@ class TestExecuteDispatch:
         ]
 
         executor._revalidate = MagicMock(return_value=True)
+        executor._check_exit_liquidity = MagicMock(return_value=(True, ""))
         executor.risk.check = MagicMock(return_value=(True, ""))
         executor._fetch_balances = MagicMock(return_value={})
         executor._per_leg_budget = MagicMock(return_value=10.0)
