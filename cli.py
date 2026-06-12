@@ -44,6 +44,7 @@ from continuous import run_continuous, check_settlements
 from scans import (
     scan_binary_internal,
     scan_negrisk_internal,
+    scan_negrisk_no_side,
     scan_cross_platform,
     scan_cross_all,
     scan_kalshi_binary,
@@ -123,7 +124,7 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
     with ThreadPoolExecutor(max_workers=3) as pool:
         if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "gemini", "ibkr", "triangular"):
             fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
-        if args.mode in ("all", "negrisk"):
+        if args.mode in ("all", "negrisk", "negrisk-no"):
             fetch_futures["poly_events"] = pool.submit(fetch_events)
         if args.mode in ("all", "kalshi", "cross", "spread") and kalshi_client:
             fetch_futures["kalshi_data"] = pool.submit(_fetch_kalshi_data, kalshi_client)
@@ -153,6 +154,8 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             scan_futures["binary"] = pool.submit(scan_binary_internal, poly_markets, min_profit)
         if args.mode in ("all", "negrisk") and poly_events:
             scan_futures["negrisk"] = pool.submit(scan_negrisk_internal, poly_events, min_profit)
+        if args.mode in ("all", "negrisk-no") and poly_events:
+            scan_futures["negrisk_no"] = pool.submit(scan_negrisk_no_side, poly_events, min_profit)
         if args.mode in ("all", "kalshi") and kalshi_client:
             scan_futures["kalshi_binary"] = pool.submit(
                 scan_kalshi_binary, kalshi_client, min_profit, kalshi_data=kalshi_data)
@@ -1092,7 +1095,7 @@ def main():
     parser = argparse.ArgumentParser(description="Polymarket Arbitrage Scanner")
     parser.add_argument(
         "--mode",
-        choices=["all", "binary", "negrisk", "cross", "kalshi", "cross-all",
+        choices=["all", "binary", "negrisk", "negrisk-no", "cross", "kalshi", "cross-all",
                  "spread", "betfair", "smarkets", "sxbet", "matchbook",
                  "gemini", "ibkr", "event", "triangular", "nway",
                  "multi-cross",
@@ -1102,7 +1105,7 @@ def main():
                  "fee-promo", "cross-mm",
                  "lead-lag-mm", "toxic-flow", "vol-mm"],
         default="all",
-        help="Scan mode: all, binary, negrisk, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm",
+        help="Scan mode: all, binary, negrisk, negrisk-no, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm",
     )
     parser.add_argument(
         "--min-profit",

@@ -252,6 +252,38 @@ def net_profit_negrisk_internal(yes_prices: list[float],
     }
 
 
+def net_profit_negrisk_no_side(no_prices: list[float]) -> dict:
+    """Calculate net profit for a NegRisk NO-side arbitrage.
+
+    Buy one NO share of every outcome in a mutually-exclusive N-outcome event.
+    Exactly one outcome resolves YES, so exactly (N-1) of the NO shares pay $1.00.
+    Guaranteed payout = (N - 1). Profit = (N - 1) - sum(no_prices) - fees.
+
+    March 2026 model: every leg pays the Polymarket taker entry fee at trade time.
+    """
+    n = len(no_prices)
+    if n < 2:
+        return {"gross_spread": 0.0, "fees": 0, "net_profit": 0.0}
+
+    total_cost = sum(no_prices)
+    gross_spread = float(n - 1) - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    # Entry fees: each NO leg pays taker fee at trade time
+    fee = sum(polymarket_taker_fee(p) for p in no_prices)
+
+    # Gas cost: one Polygon transaction per outcome
+    gas = POLYGON_GAS_ESTIMATE * n
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fee + gas,
+        "net_profit": gross_spread - fee - gas,
+    }
+
+
 def net_profit_kalshi_binary(yes_price: float, no_price: float) -> dict:
     """Calculate net profit for a Kalshi binary arbitrage.
 

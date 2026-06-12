@@ -38,6 +38,8 @@ Mathematically guaranteed profit. Buy a complete outcome set for less than payou
 
 CLAUDE.md categorizes #21 under Layer 5 because the detection feeds MM spread sizing. Mechanically the opp type is pure arb (bid > ask), so it lives in Layer 1 here with a Layer 5 dual-use note.
 
+**Addition (2026-06-08, Plan 01):** **NegRisk NO-side** (`NegRiskNO` opp type — buy 1 NO on every outcome when Σ NO < (N−1)) shipped as the risk-free *complement* to #2 (same-platform multi-outcome). Modules: `scans/negrisk.py:scan_negrisk_no_side` + `_refine_negrisk_no_side_with_clob`, `fees.net_profit_negrisk_no_side`, `executor._build_legs`/`_revalidate_negrisk_no`, mode `--mode negrisk-no`, flag `NEGRISK_NO_SIDE_ENABLED` (default off). Recorded as a variant of #2 rather than a new taxonomy number to keep the status rollup stable; build details in [`docs/plans/01-negrisk-no-side.md`](plans/01-negrisk-no-side.md).
+
 ---
 
 ### Layer 2 — Near-Arbitrage (Near Risk-Free)
@@ -120,7 +122,7 @@ Net change vs prior v2: +4 BUILT (#9, #11, #19 corrected, plus #18 lifted from N
 
 **2026-05-20 audit update:** +4 additional BUILT (#26, #27, #28, #29 — each has a first-class Stage 2 refiner with substantial test coverage; the earlier "dead refiner" / "TODO marker" notes were stale by the time of this audit). −3 PARTIAL (#26, #27, #28 promoted). −1 STUB (#29 promoted).
 
-**2026-05-31 content audit:** counts unchanged (26 BUILT / 3 PARTIAL / 0 STUB). #20 note refreshed to reflect the in-flight tuning-loop implementation (still PARTIAL — manual-apply only). Open follow-up: this 29-strategy taxonomy does **not** 1:1 map the **32 `--mode` scan values** in `cli.py` (excluding `all`). The surplus modes (`nway`, `rewards`, `imbalance`, `news-snipe`, `correlated`, `time-decay`, `logical-arb`, `whale-copy`, `lead-lag-mm`, `toxic-flow`, `vol-mm`) are runnable scans that map onto the layer strategies above (or are execution variants of them) but are not separately enumerated here. A 1:1 mode→strategy reconciliation table is a tracked TODO; until then, treat `cli.py` `--mode` choices as the source of truth for *runnable scans* and this table as the source of truth for the *risk-layer taxonomy*.
+**2026-05-31 content audit:** counts unchanged (26 BUILT / 3 PARTIAL / 0 STUB). #20 note refreshed to reflect the in-flight tuning-loop implementation (still PARTIAL — manual-apply only). Open follow-up: this 29-strategy taxonomy does **not** 1:1 map the **33 `--mode` scan values** in `cli.py` (excluding `all`). The surplus modes (`negrisk-no`, `nway`, `rewards`, `imbalance`, `news-snipe`, `correlated`, `time-decay`, `logical-arb`, `whale-copy`, `lead-lag-mm`, `toxic-flow`, `vol-mm`) are runnable scans that map onto the layer strategies above (or are execution variants of them) but are not separately enumerated here. A 1:1 mode→strategy reconciliation table is a tracked TODO; until then, treat `cli.py` `--mode` choices as the source of truth for *runnable scans* and this table as the source of truth for the *risk-layer taxonomy*.
 
 ---
 

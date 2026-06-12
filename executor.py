@@ -54,6 +54,7 @@ from ibkr_api import IBKRClient
 from fees import (
     net_profit_binary_internal,
     net_profit_negrisk_internal,
+    net_profit_negrisk_no_side,
     net_profit_cross_platform,
     net_profit_kalshi_binary,
     net_profit_kalshi_multi,
@@ -557,6 +558,9 @@ class ArbitrageExecutor:
             if opp_type == "Binary":
                 passed, reval_profit, reason = self._revalidate_binary(
                     opportunity, original_profit, price_cache)
+            elif opp_type.startswith("NegRiskNO"):
+                passed, reval_profit, reason = self._revalidate_negrisk_no(
+                    opportunity, original_profit, price_cache)
             elif opp_type.startswith("NegRisk"):
                 passed, reval_profit, reason = self._revalidate_negrisk(
                     opportunity, original_profit, price_cache)
@@ -908,6 +912,57 @@ class ArbitrageExecutor:
             )
             return False, reval_profit, "profit_below_floor"
         opp["net_profit"] = reval_profit
+        return True, reval_profit, "passed"
+
+    def _revalidate_negrisk_no(
+        self, opp: dict, original_profit: float, price_cache: dict | None
+    ) -> tuple[bool, float, str]:
+        """Revalidate a Polymarket NegRisk NO-side opportunity.
+
+        The opp's _token_ids are the NO tokens, so the fetched asks are NO asks.
+
+        Returns:
+            (passed, reval_profit, reason)
+        """
+        token_ids = opp.get("_token_ids", [])
+        if not token_ids:
+            raise _RevalidationAPIError("no token IDs for negrisk_no")
+
+        no_asks = []
+        for tid in token_ids:
+            if not tid:
+                raise _RevalidationAPIError("empty token ID in negrisk_no")
+            cached = self._check_ws_cache(price_cache, "polymarket", tid)
+
+            # Check for stale feed
+            if cached and cached.get("_stale", False):
+                logger.info("Skipping revalidation: polymarket token %s stale for >30s", tid)
+                return False, 0.0, "feed_stale"
+
+            if cached and cached.get("price") is not None:
+                no_asks.append(cached["price"])
+            else:
+                book = fetch_order_book(tid)
+                if not book:
+                    raise _RevalidationAPIError(f"failed to fetch order book for negrisk_no token {tid}")
+                data = get_best_bid_ask(book)
+                if data["ask"] is None:
+                    raise _RevalidationAPIError(f"no ask price for negrisk_no token {tid}")
+                no_asks.append(data["ask"])
+
+        result = net_profit_negrisk_no_side(no_asks)
+        reval_profit = result["net_profit"]
+        threshold = self._get_revalidation_threshold(original_profit, opp)
+        if reval_profit < threshold:
+            logger.info(
+                "Revalidation: negrisk_no profit degraded %.4f -> %.4f (threshold=%.4f)",
+                original_profit, reval_profit, threshold,
+            )
+            return False, reval_profit, "profit_below_floor"
+        opp["net_profit"] = reval_profit
+        # Propagate refreshed asks so _build_legs prices orders from the
+        # revalidated book, not the stale scan-time snapshot.
+        opp["_no_prices"] = no_asks
         return True, reval_profit, "passed"
 
     def _revalidate_cross(
@@ -1561,6 +1616,24 @@ class ArbitrageExecutor:
                 {"platform": "polymarket", "side": "BUY", "token": "no",
                  "price": no_price, "_token_id": no_token},
             ]
+        elif opp_type.startswith("NegRiskNO"):
+            # Buy NO on each outcome — Σ NO < (N-1) arbitrage.
+            # Read the full price list from _no_prices (not the truncated summary string).
+            no_prices = opportunity.get("_no_prices", [])
+            # Every leg must have a real token ID: an empty list or any empty
+            # string would produce invalid order-book fetches at execution.
+            if not no_prices or len(no_prices) != len(token_ids) or not all(token_ids):
+                logger.warning(f"NegRiskNO invalid legs: {len(no_prices)} prices vs {len(token_ids)} token IDs "
+                               f"(empty IDs: {sum(1 for t in token_ids if not t)}). Skipping.")
+                return []
+            for i, price in enumerate(no_prices):
+                legs.append({
+                    "platform": "polymarket",
+                    "side": "BUY",
+                    "token": f"no_{i}",
+                    "price": price,
+                    "_token_id": token_ids[i],
+                })
         elif opp_type.startswith("NegRisk"):
             # Buy YES on each outcome — prices are comma-separated in the opp
             prices_str = opportunity.get("prices", "")

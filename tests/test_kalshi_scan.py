@@ -240,8 +240,9 @@ class TestScanKalshiMulti:
         from scans.kalshi import scan_kalshi_multi
 
         client = MagicMock()
+        # YES asks sum to 0.98 — plausible for a complete single-winner market.
         client.get_market_price.side_effect = [
-            (0.25, 0.75), (0.30, 0.70), (0.20, 0.80),
+            (0.35, 0.65), (0.33, 0.67), (0.30, 0.70),
         ]
         client.get_order_book_depth.return_value = {"yes_ask_size": 50}
 
@@ -275,7 +276,8 @@ class TestScanKalshiMulti:
 
     def _gate_fixture(self, mutually_exclusive):
         client = MagicMock()
-        client.get_market_price.side_effect = [(0.25, 0.75), (0.30, 0.70), (0.20, 0.80)]
+        # Sum = 0.90: a real arb (< 1.0) that clears the completeness floor (>= 0.85).
+        client.get_market_price.side_effect = [(0.35, 0.65), (0.30, 0.70), (0.25, 0.75)]
         client.get_order_book_depth.return_value = {"yes_ask_size": 50}
         markets = [
             {"ticker": f"K-{x}", "title": x, "close_time": "2030-01-01T00:00:00Z",
@@ -311,3 +313,28 @@ class TestScanKalshiMulti:
         result = self._run_gate(True)
         assert len(result) >= 1
         assert result[0]["type"].startswith("KalshiMulti")
+
+    def test_skips_mutually_exclusive_with_implausible_sum(self):
+        """MECE event whose YES asks sum far below 1.0 → missing/stale legs, not arb."""
+        from scans.kalshi import scan_kalshi_multi
+
+        client = MagicMock()
+        # 3 legs summing to 0.30 — implausible for a complete single-winner market.
+        client.get_market_price.side_effect = [(0.10, 0.90), (0.10, 0.90), (0.10, 0.90)]
+
+        markets = [
+            {"ticker": "K-A", "title": "A", "close_time": "2030-01-01T00:00:00Z"},
+            {"ticker": "K-B", "title": "B", "close_time": "2030-01-01T00:00:00Z"},
+            {"ticker": "K-C", "title": "C", "close_time": "2030-01-01T00:00:00Z"},
+        ]
+        kalshi_data = (
+            [{"event_ticker": "EV1", "title": "Sparse", "mutually_exclusive": True}],
+            {"EV1": markets},
+            {"EV1": "Sparse"},
+        )
+
+        with patch("scans.kalshi._within_resolution_window", return_value=True), \
+             patch("scans.kalshi.filter_dust", side_effect=lambda x: x):
+            result = scan_kalshi_multi(client, 0.01, kalshi_data=kalshi_data)
+
+        assert result == []

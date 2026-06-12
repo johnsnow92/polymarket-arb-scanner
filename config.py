@@ -423,10 +423,17 @@ REWARDS_MIN_RESTING_TIME = _env_int("REWARDS_MIN_RESTING_TIME", "300")
 # Kalshi multi-outcome execution gating (kill-switch + depth check)
 # Set to false to disable KalshiMulti scanning/execution entirely.
 KALSHI_MULTI_ENABLED = _env_bool("KALSHI_MULTI_ENABLED", "true")
+
+# S1: NegRisk NO-side arbitrage (buy all NO when Σ NO < N-1). Layer 1, default off.
+NEGRISK_NO_SIDE_ENABLED = _env_bool("NEGRISK_NO_SIDE_ENABLED", "false")
 # Minimum resting yes-side contracts required at the best ask on EACH leg
 # before the executor will even attempt a KalshiMulti trade. Prevents the
 # Fill-or-Kill partial-fill trap on thin multi-outcome markets.
 KALSHI_MULTI_MIN_DEPTH = _env_int("KALSHI_MULTI_MIN_DEPTH", "10")
+# Completeness floor for multi-outcome scans: a true single-winner event's
+# YES asks sum to just under/over 1.0. A sum well below this means missing,
+# closed, or stale legs — not a real arb.
+KALSHI_MULTI_MIN_SUM = _env_float("KALSHI_MULTI_MIN_SUM", "0.85")
 
 # Multi-outcome cross-platform execution gating (kill-switch + depth check)
 # MultiCross places N legs concurrently across Polymarket + Kalshi. Same
