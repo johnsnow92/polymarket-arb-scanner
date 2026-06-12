@@ -93,6 +93,43 @@ def polymarket_taker_fee(price: float, contracts: int = 1,
     return rate * contracts * price * (1.0 - price)
 
 
+# Polymarket maker rebate program (docs.polymarket.com, verified 2026-06-10):
+# makers receive back a share of the taker fees their resting orders generate,
+# paid daily in USDC — 25% of the taker fee in most categories, 20% in crypto.
+# Geopolitics has a 0% taker fee, so its rebate is also 0.
+POLYMARKET_MAKER_REBATE_SHARE = {
+    "crypto": 0.20,
+}
+POLYMARKET_DEFAULT_MAKER_REBATE_SHARE = 0.25
+
+
+def polymarket_maker_rebate(price: float, contracts: int = 1,
+                            category: str | None = None) -> float:
+    """Expected maker-rebate income when a resting order fills.
+
+    The rebate is a share of the taker fee the counterparty pays against the
+    maker's resting order: rebate_share * taker_rate * C * P * (1 - P).
+    This is income (positive), to be netted against MM costs in yield models —
+    it stacks with liquidity rewards, which pay for resting presence whether
+    or not the order fills.
+
+    Args:
+        price: Fill price in [0, 1].
+        contracts: Number of contracts filled.
+        category: Market category (drives both the taker rate and the
+            rebate share; crypto rebates at 20%, everything else at 25%).
+
+    Returns:
+        Rebate income in dollars (0.0 for fee-free categories).
+    """
+    taker = polymarket_taker_fee(price, contracts, category=category)
+    if taker <= 0:
+        return 0.0
+    share = POLYMARKET_MAKER_REBATE_SHARE.get(
+        (category or "").strip().lower(), POLYMARKET_DEFAULT_MAKER_REBATE_SHARE)
+    return share * taker
+
+
 def polymarket_fee(buy_price: float, sell_price: float = 1.0) -> float:
     """DEPRECATED: Use polymarket_taker_fee() instead.
 
@@ -244,6 +281,38 @@ def net_profit_negrisk_internal(yes_prices: list[float],
 
     # Gas cost: one Polygon transaction per outcome
     gas = POLYGON_GAS_ESTIMATE * len(yes_prices)
+
+    return {
+        "gross_spread": gross_spread,
+        "fees": fee + gas,
+        "net_profit": gross_spread - fee - gas,
+    }
+
+
+def net_profit_negrisk_no_side(no_prices: list[float]) -> dict:
+    """Calculate net profit for a NegRisk NO-side arbitrage.
+
+    Buy one NO share of every outcome in a mutually-exclusive N-outcome event.
+    Exactly one outcome resolves YES, so exactly (N-1) of the NO shares pay $1.00.
+    Guaranteed payout = (N - 1). Profit = (N - 1) - sum(no_prices) - fees.
+
+    March 2026 model: every leg pays the Polymarket taker entry fee at trade time.
+    """
+    n = len(no_prices)
+    if n < 2:
+        return {"gross_spread": 0.0, "fees": 0, "net_profit": 0.0}
+
+    total_cost = sum(no_prices)
+    gross_spread = float(n - 1) - total_cost
+
+    if gross_spread <= 0:
+        return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
+
+    # Entry fees: each NO leg pays taker fee at trade time
+    fee = sum(polymarket_taker_fee(p) for p in no_prices)
+
+    # Gas cost: one Polygon transaction per outcome
+    gas = POLYGON_GAS_ESTIMATE * n
 
     return {
         "gross_spread": gross_spread,

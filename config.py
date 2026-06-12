@@ -110,6 +110,14 @@ MIN_NET_ROI = _env_float("MIN_NET_ROI", "0")
 # into — the hedger cannot save a position the market won't buy back.
 # MarketMake legs are exempt (resting cheap quotes is how rewards are farmed).
 MIN_ENTRY_PRICE = _env_float("MIN_ENTRY_PRICE", "0.05")
+# Entry discipline, part 2: require a live exit bid on every buy leg before
+# placing orders. MIN_ENTRY_PRICE blocks penny longshots; this blocks any
+# market (at any price) whose book is one-sided, where a partial fill could
+# not be hedged or unwound. Depth is contracts resting at the best exit bid.
+# Checked at execution time against the live order book; fails closed when
+# the book cannot be fetched. MarketMake legs are exempt.
+EXIT_LIQUIDITY_GATE_ENABLED = _env_bool("EXIT_LIQUIDITY_GATE_ENABLED", "true")
+MIN_EXIT_BID_DEPTH = _env_int("MIN_EXIT_BID_DEPTH", "10")
 ALLOW_BETTER_REENTRY = _env_bool("ALLOW_BETTER_REENTRY", "true")
 REENTRY_IMPROVEMENT_THRESHOLD = _env_float("REENTRY_IMPROVEMENT_THRESHOLD", "0.20")
 
@@ -415,10 +423,17 @@ REWARDS_MIN_RESTING_TIME = _env_int("REWARDS_MIN_RESTING_TIME", "300")
 # Kalshi multi-outcome execution gating (kill-switch + depth check)
 # Set to false to disable KalshiMulti scanning/execution entirely.
 KALSHI_MULTI_ENABLED = _env_bool("KALSHI_MULTI_ENABLED", "true")
+
+# S1: NegRisk NO-side arbitrage (buy all NO when Σ NO < N-1). Layer 1, default off.
+NEGRISK_NO_SIDE_ENABLED = _env_bool("NEGRISK_NO_SIDE_ENABLED", "false")
 # Minimum resting yes-side contracts required at the best ask on EACH leg
 # before the executor will even attempt a KalshiMulti trade. Prevents the
 # Fill-or-Kill partial-fill trap on thin multi-outcome markets.
 KALSHI_MULTI_MIN_DEPTH = _env_int("KALSHI_MULTI_MIN_DEPTH", "10")
+# Completeness floor for multi-outcome scans: a true single-winner event's
+# YES asks sum to just under/over 1.0. A sum well below this means missing,
+# closed, or stale legs — not a real arb.
+KALSHI_MULTI_MIN_SUM = _env_float("KALSHI_MULTI_MIN_SUM", "0.85")
 
 # Multi-outcome cross-platform execution gating (kill-switch + depth check)
 # MultiCross places N legs concurrently across Polymarket + Kalshi. Same
@@ -1146,6 +1161,10 @@ def validate_config() -> list[str]:
     if not (0 <= MIN_ENTRY_PRICE < 1):
         raise ConfigError(
             f"MIN_ENTRY_PRICE={MIN_ENTRY_PRICE} must be in [0, 1)"
+        )
+    if MIN_EXIT_BID_DEPTH < 0:
+        raise ConfigError(
+            f"MIN_EXIT_BID_DEPTH={MIN_EXIT_BID_DEPTH} must be >= 0"
         )
     if not (0 < SEMANTIC_MATCH_THRESHOLD <= 1):
         raise ConfigError(

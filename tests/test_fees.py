@@ -10,10 +10,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fees import (
     polymarket_fee,
     polymarket_taker_fee,
+    polymarket_maker_rebate,
     kalshi_taker_fee,
     kalshi_maker_fee,
     net_profit_binary_internal,
     net_profit_negrisk_internal,
+    net_profit_negrisk_no_side,
     net_profit_kalshi_binary,
     net_profit_kalshi_multi,
     net_profit_cross_platform,
@@ -58,6 +60,38 @@ class TestPolymarketFee:
     def test_zero_buy_price(self):
         # Net winnings = 1.0 - 0.0 = 1.0; fee = 0.02
         assert polymarket_fee(0.0, 1.0) == pytest.approx(0.02)
+
+
+# ---------------------------------------------------------------------------
+# polymarket_maker_rebate
+# ---------------------------------------------------------------------------
+
+class TestPolymarketMakerRebate:
+    def test_default_share_is_25_percent_of_taker_fee(self):
+        # Politics: taker = 0.04 * 1 * 0.5 * 0.5 = 0.01; rebate = 25% = 0.0025
+        assert polymarket_maker_rebate(0.50, 1, category="politics") == pytest.approx(0.0025)
+
+    def test_crypto_share_is_20_percent(self):
+        # Crypto: taker = 0.07 * 1 * 0.5 * 0.5 = 0.0175; rebate = 20% = 0.0035
+        assert polymarket_maker_rebate(0.50, 1, category="crypto") == pytest.approx(0.0035)
+
+    def test_geopolitics_fee_free_means_zero_rebate(self):
+        assert polymarket_maker_rebate(0.50, 100, category="geopolitics") == 0.0
+
+    def test_scales_with_contracts(self):
+        one = polymarket_maker_rebate(0.30, 1, category="sports")
+        ten = polymarket_maker_rebate(0.30, 10, category="sports")
+        assert ten == pytest.approx(10 * one)
+
+    def test_unknown_category_uses_default_taker_rate_and_share(self):
+        # Unknown-category fallback is POLYMARKET_DEFAULT_TAKER_RATE (0.04),
+        # applied inside polymarket_taker_fee; rebate share 25%.
+        expected = 0.25 * polymarket_taker_fee(0.40, 1, category="mystery")
+        assert polymarket_maker_rebate(0.40, 1, category="mystery") == pytest.approx(expected)
+
+    def test_extreme_prices_have_zero_rebate(self):
+        assert polymarket_maker_rebate(0.0, 1, category="politics") == 0.0
+        assert polymarket_maker_rebate(1.0, 1, category="politics") == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +230,39 @@ class TestNetProfitNegriskInternal:
         # March 2026: sum of entry fees for all legs
         expected_fees = sum(polymarket_taker_fee(p) for p in prices)
         assert result["fees"] == pytest.approx(expected_fees + gas)
+
+
+# ---------------------------------------------------------------------------
+# net_profit_negrisk_no_side
+# ---------------------------------------------------------------------------
+
+class TestNetProfitNegriskNoSide:
+    def test_profitable_three_outcome(self):
+        from config import POLYGON_GAS_ESTIMATE
+        # 3 outcomes, buy all NO at 0.50/0.65/0.80 -> sum 1.95 < (N-1)=2, gross 0.05
+        no_prices = [0.50, 0.65, 0.80]
+        result = net_profit_negrisk_no_side(no_prices)
+        gas = POLYGON_GAS_ESTIMATE * 3
+        assert result["gross_spread"] == pytest.approx(0.05)
+        # March 2026: each NO leg pays entry fee
+        expected_fees = sum(polymarket_taker_fee(p) for p in no_prices)
+        assert result["fees"] == pytest.approx(expected_fees + gas)
+        assert result["net_profit"] == pytest.approx(0.05 - expected_fees - gas)
+
+    def test_payout_is_n_minus_one(self):
+        # 4 outcomes all NO at 0.50 -> sum 2.0, payout (N-1)=3 -> gross 1.0
+        result = net_profit_negrisk_no_side([0.50, 0.50, 0.50, 0.50])
+        assert result["gross_spread"] == pytest.approx(1.0)
+        assert result["net_profit"] > 0
+
+    def test_no_edge_at_floor(self):
+        # N=2, both NO at 1.0 -> sum 2.0, payout (N-1)=1 -> gross -1.0, fees suppressed
+        result = net_profit_negrisk_no_side([1.0, 1.0])
+        assert result["gross_spread"] == pytest.approx(-1.0)
+        assert result["fees"] == 0
+
+    def test_degenerate_single_outcome(self):
+        assert net_profit_negrisk_no_side([0.5]) == {"gross_spread": 0.0, "fees": 0, "net_profit": 0.0}
 
 
 # ---------------------------------------------------------------------------

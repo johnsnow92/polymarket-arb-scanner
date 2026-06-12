@@ -21,7 +21,7 @@ import sys  # noqa: F401 — tests access scanner.sys.modules
 # Re-export scan functions so existing imports (e.g. ``import scanner``) keep working.
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi  # noqa: F401
 from scans.binary import scan_binary_internal, _refine_binary_with_clob  # noqa: F401
-from scans.negrisk import scan_negrisk_internal, _refine_negrisk_with_clob  # noqa: F401
+from scans.negrisk import scan_negrisk_internal, _refine_negrisk_with_clob, scan_negrisk_no_side  # noqa: F401
 from scans.cross import (  # noqa: F401
     scan_cross_platform,
     scan_cross_all,

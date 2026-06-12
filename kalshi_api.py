@@ -277,6 +277,38 @@ class KalshiClient:
         data = resp.json()
         return data.get("market_positions", [])
 
+    def get_settlements(self, limit: int = 200, max_pages: int = 5) -> list[dict]:
+        """Fetch account settlement history from /portfolio/settlements.
+
+        This is the authoritative record of what actually settled and for how
+        much — unlike per-market /markets/{ticker} polling, it cannot miss a
+        resolution and it reflects this account's real fills. Used by
+        check_settlements to reconcile open DB positions (June 2026 audit:
+        per-market polling keyed on titles never settled anything; 19 stale
+        positions accumulated while true P&L was −$11.18).
+
+        Returns a list of settlement records, newest first, each including
+        ticker, market_result, yes_count/no_count, revenue, settled_time.
+        """
+        settlements: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            params: dict = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._request("GET", "/portfolio/settlements", params=params)
+            if not resp or resp.status_code != 200:
+                logger.warning("Kalshi get_settlements failed: %s",
+                               resp.status_code if resp is not None else "no response")
+                break
+            data = resp.json()
+            page = data.get("settlements", [])
+            settlements.extend(page)
+            cursor = data.get("cursor")
+            if not cursor or not page:
+                break
+        return settlements
+
     def place_order(
         self,
         ticker: str,
