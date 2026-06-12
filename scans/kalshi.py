@@ -190,16 +190,29 @@ def scan_kalshi_multi(
         return opportunities
 
     if kalshi_data:
-        _, markets_by_event, event_titles = kalshi_data
+        events, markets_by_event, event_titles = kalshi_data
     else:
-        _, markets_by_event, event_titles = _fetch_kalshi_data(kalshi_client)
+        events, markets_by_event, event_titles = _fetch_kalshi_data(kalshi_client)
 
     if not markets_by_event:
         return opportunities
 
+    # Complete-set gate (June 2026 audit): a multi-outcome "arb" is only real
+    # when EXACTLY ONE outcome pays $1 — i.e. the event is mutually exclusive.
+    # Kalshi groups non-exclusive market ladders (e.g. soccer "Spreads": wins
+    # by 1+, by 2+, ...) under one event; buying YES on each is NOT a complete
+    # set, and treating it as one produced ~296K phantom detections over three
+    # months in production. Only events the API marks mutually_exclusive=True
+    # qualify; missing/False is skipped.
+    me_by_event = {e.get("event_ticker"): e.get("mutually_exclusive") for e in events}
+
     filtered_resolution = 0
+    skipped_non_exclusive = 0
     for event_ticker, markets in markets_by_event.items():
         if len(markets) < 2:
+            continue
+        if me_by_event.get(event_ticker) is not True:
+            skipped_non_exclusive += 1
             continue
 
         yes_prices = []
@@ -255,6 +268,8 @@ def scan_kalshi_multi(
 
     if filtered_resolution:
         logger.info("Filtered %d Kalshi multi-outcome events outside resolution window.", filtered_resolution)
+    if skipped_non_exclusive:
+        logger.info("Skipped %d non-mutually-exclusive Kalshi events (not complete sets).", skipped_non_exclusive)
 
     # Stage 2: Re-fetch order book depth for candidates (parallel, min depth across all legs)
     if opportunities:

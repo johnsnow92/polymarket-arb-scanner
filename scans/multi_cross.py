@@ -248,10 +248,10 @@ def scan_multi_cross(
 
     # Get Kalshi multi-outcome events
     if kalshi_data:
-        _, kalshi_by_event, kalshi_event_titles = kalshi_data
+        kalshi_events, kalshi_by_event, kalshi_event_titles = kalshi_data
     elif kalshi_client:
         from scans.helpers import _parallel_fetch_kalshi
-        _, kalshi_by_event, kalshi_event_titles = _parallel_fetch_kalshi(kalshi_client)
+        kalshi_events, kalshi_by_event, kalshi_event_titles = _parallel_fetch_kalshi(kalshi_client)
     else:
         logger.info("No Kalshi credentials — multi-cross scan requires at least 2 platforms.")
         return opportunities
@@ -260,8 +260,16 @@ def scan_multi_cross(
         logger.info("No Kalshi events found for multi-cross matching.")
         return opportunities
 
-    # Filter Kalshi to multi-outcome events only
-    kalshi_multi = {k: v for k, v in kalshi_by_event.items() if len(v) >= 2}
+    # Complete-set gate: only mutually-exclusive Kalshi events qualify as
+    # multi-outcome complete sets (see scan_kalshi_multi for the rationale —
+    # non-exclusive market ladders produced phantom arbs in production).
+    me_by_event = {e.get("event_ticker"): e.get("mutually_exclusive") for e in kalshi_events}
+
+    # Filter Kalshi to multi-outcome, mutually-exclusive events only
+    kalshi_multi = {
+        k: v for k, v in kalshi_by_event.items()
+        if len(v) >= 2 and me_by_event.get(k) is True
+    }
 
     # Match events across platforms
     matched_events = _match_events_by_title(pm_negrisk, kalshi_multi, kalshi_event_titles)
