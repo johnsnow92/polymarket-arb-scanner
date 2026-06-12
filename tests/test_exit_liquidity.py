@@ -212,13 +212,15 @@ class TestExitLiquidityGateExemptions(unittest.TestCase):
         ok, _ = self.ex._check_exit_liquidity(opp, legs)
         self.assertTrue(ok)
 
-    def test_missing_kalshi_client_skips_kalshi_legs(self):
-        # No client wired — cannot check, and execution would fail later anyway.
+    def test_missing_kalshi_client_fails_closed(self):
+        # No client wired — no verification possible means no entry,
+        # and order placement would fail later anyway.
         self.ex.kalshi_client = None
         opp = {"type": "KalshiBinary"}
         legs = [{"platform": "kalshi", "side": "yes", "action": "buy", "price": 0.40, "_ticker": "K-T"}]
-        ok, _ = self.ex._check_exit_liquidity(opp, legs)
-        self.assertTrue(ok)
+        ok, reason = self.ex._check_exit_liquidity(opp, legs)
+        self.assertFalse(ok)
+        self.assertIn("no Kalshi client", reason)
 
 
 if __name__ == "__main__":

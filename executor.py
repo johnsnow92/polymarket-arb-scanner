@@ -454,7 +454,11 @@ class ArbitrageExecutor:
                 continue
 
             platform = leg.get("platform", "")
-            if platform == "kalshi" and self.kalshi_client:
+            if platform == "kalshi":
+                if not self.kalshi_client:
+                    # No client means no way to verify exit liquidity — and no
+                    # way to place the order later. Fail closed, don't skip.
+                    return False, "kalshi leg present but no Kalshi client (fail closed)"
                 ticker = leg.get("_ticker") or opportunity.get("_kalshi_ticker") or ""
                 if not ticker:
                     continue
