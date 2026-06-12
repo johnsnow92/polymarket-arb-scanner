@@ -32,15 +32,25 @@ the gates do the gatekeeping.
 
 ## Hard rules
 
-- Never `gh pr merge --admin` (blocked by a local PreToolUse hook anyway).
-- Never force-push to `master` (blocked twice: deny rule + danger-blocker).
+- Never `gh pr merge --admin` — a local Claude Code PreToolUse hook
+  (`~/.claude/hooks/danger-blocker.js`) pattern-matches the command and rejects
+  it before it executes, so the branch-protection bypass can't be used.
+- Never force-push to `master` — blocked twice locally: a permission deny rule
+  in Claude Code's `settings.local.json` rejects `git push --force`, and the
+  same danger-blocker hook blocks force pushes that target protected branches.
 - Failing tests are fixed at the root cause, never skipped.
 
 ## New repo setup
 
 ```bash
-bash ~/.claude/scripts/setup-repo-automations.sh [branch] [required-check]
+# bash ~/.claude/scripts/setup-repo-automations.sh [branch] [required-check]
+bash ~/.claude/scripts/setup-repo-automations.sh master test
 ```
+
+- `branch` — the branch to protect (defaults to the repo's default branch).
+- `required-check` — the name of the CI check that must pass before merge,
+  matching the job name in your workflow file (defaults to `test`, the job
+  name in `.github/workflows/test.yml`).
 
 Sets the branch protection above, enables repo auto-merge, and commits
 `.coderabbit.yaml` to the default branch.
