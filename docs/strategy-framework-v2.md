@@ -38,6 +38,8 @@ Mathematically guaranteed profit. Buy a complete outcome set for less than payou
 
 CLAUDE.md categorizes #21 under Layer 5 because the detection feeds MM spread sizing. Mechanically the opp type is pure arb (bid > ask), so it lives in Layer 1 here with a Layer 5 dual-use note.
 
+**Addition (2026-06-08, Plan 01):** **NegRisk NO-side** (`NegRiskNO` opp type — buy 1 NO on every outcome when Σ NO < (N−1)) shipped as the risk-free *complement* to #2 (same-platform multi-outcome). Modules: `scans/negrisk.py:scan_negrisk_no_side` + `_refine_negrisk_no_side_with_clob`, `fees.net_profit_negrisk_no_side`, `executor._build_legs`/`_revalidate_negrisk_no`, mode `--mode negrisk-no`, flag `NEGRISK_NO_SIDE_ENABLED` (default off). Recorded as a variant of #2 rather than a new taxonomy number to keep the status rollup stable; build details in [`docs/plans/01-negrisk-no-side.md`](plans/01-negrisk-no-side.md).
+
 ---
 
 ### Layer 2 — Near-Arbitrage (Near Risk-Free)

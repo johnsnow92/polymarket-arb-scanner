@@ -95,7 +95,7 @@ python scanner.py
 # Continuous mode
 python scanner.py --continuous --interval 60
 
-# Specific modes: binary, negrisk, cross, kalshi, cross-all, spread,
+# Specific modes: binary, negrisk, negrisk-no, cross, kalshi, cross-all, spread,
 #   betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular,
 #   multi-cross, stale, resolution, convergence, mm,
 #   fee-promo (Strategy #9), cross-mm (Strategy #11)
@@ -326,6 +326,22 @@ The `opticodds` CLI (`~/.local/bin/opticodds`) provides unified access to real-t
 Auth: `OPTICODDS_API_KEY` is set globally in `~/.claude/settings.json`. Full reference: `~/.claude/references/opticodds-cli.md`.
 
 Prefer `opticodds` over direct HTTP when you need normalized cross-platform data. Prefer direct platform API clients (`*_api.py`) for execution and platform-specific operations (order placement, position management).
+
+## Polymarket CLI + Skill Integration
+
+The official `polymarket` CLI (`/opt/homebrew/bin/polymarket`, installed via the trusted `polymarket/polymarket-cli` brew tap) wraps Gamma, CLOB, Data API, Bridge, and on-chain CTF operations. Every command supports `-o json`. Use it for ad-hoc inspection, debugging, and validating scanner output against live data:
+
+- **Market lookup**: `polymarket -o json markets search "<query>" --limit 5`, `polymarket -o json markets get <slug-or-id>`
+- **Orderbook validation**: `polymarket -o json clob book <TOKEN_ID>`, `clob midpoints "T1,T2"`, `clob spreads "T1,T2"` — cross-check `_refine_*_with_clob()` results
+- **Price history**: `polymarket -o json clob price-history <TOKEN_ID> --interval 1d` — backtesting data spot-checks
+- **Portfolio reconciliation**: `polymarket -o json data positions <WALLET>`, `data trades <WALLET>` — verify against `trades.db` and `recovery.py`
+- **Metadata**: `clob tick-size`, `clob neg-risk`, `clob fee-rate` per token
+
+Keep using `polymarket_api.py` / `py-clob-client` for execution paths — the CLI is for inspection and tooling, not the executor.
+
+The `web3-polymarket` agent skill (`~/.claude/skills/web3-polymarket/`) carries the full integration reference: L1/L2 auth, order types (GTC/GTD/FOK/FAK), tick-size/neg-risk semantics, WebSocket channels, CTF split/merge/redeem, and gasless relayer patterns. Load its reference files when working on `polymarket_api.py`, `ws_feeds.py`, or CTF-related execution.
+
+**Geoblock caveat**: `polymarket clob geoblock` reports this machine's residential IP (US/MI) as blocked for trading endpoints — local order placement via CLI will fail. Read-only commands (markets, books, prices, data) work fine. Production execution runs from Railway (see `POLYMARKET_PROXY_URL` in config). Never store a private key in `~/.config/polymarket/config.json` (plaintext) — the CLI also reads `POLYMARKET_PRIVATE_KEY`, which this project already manages via Infisical.
 
 ## Agent Team Notes
 

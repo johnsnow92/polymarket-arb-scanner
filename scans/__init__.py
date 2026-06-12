@@ -1,7 +1,7 @@
 """Scan modules for different arbitrage types."""
 
 from scans.binary import scan_binary_internal, _refine_binary_with_clob
-from scans.negrisk import scan_negrisk_internal, _refine_negrisk_with_clob
+from scans.negrisk import scan_negrisk_internal, _refine_negrisk_with_clob, scan_negrisk_no_side
 from scans.cross import (
     scan_cross_platform,
     scan_cross_all,

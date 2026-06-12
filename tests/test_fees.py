@@ -14,6 +14,7 @@ from fees import (
     kalshi_maker_fee,
     net_profit_binary_internal,
     net_profit_negrisk_internal,
+    net_profit_negrisk_no_side,
     net_profit_kalshi_binary,
     net_profit_kalshi_multi,
     net_profit_cross_platform,
@@ -196,6 +197,39 @@ class TestNetProfitNegriskInternal:
         # March 2026: sum of entry fees for all legs
         expected_fees = sum(polymarket_taker_fee(p) for p in prices)
         assert result["fees"] == pytest.approx(expected_fees + gas)
+
+
+# ---------------------------------------------------------------------------
+# net_profit_negrisk_no_side
+# ---------------------------------------------------------------------------
+
+class TestNetProfitNegriskNoSide:
+    def test_profitable_three_outcome(self):
+        from config import POLYGON_GAS_ESTIMATE
+        # 3 outcomes, buy all NO at 0.50/0.65/0.80 -> sum 1.95 < (N-1)=2, gross 0.05
+        no_prices = [0.50, 0.65, 0.80]
+        result = net_profit_negrisk_no_side(no_prices)
+        gas = POLYGON_GAS_ESTIMATE * 3
+        assert result["gross_spread"] == pytest.approx(0.05)
+        # March 2026: each NO leg pays entry fee
+        expected_fees = sum(polymarket_taker_fee(p) for p in no_prices)
+        assert result["fees"] == pytest.approx(expected_fees + gas)
+        assert result["net_profit"] == pytest.approx(0.05 - expected_fees - gas)
+
+    def test_payout_is_n_minus_one(self):
+        # 4 outcomes all NO at 0.50 -> sum 2.0, payout (N-1)=3 -> gross 1.0
+        result = net_profit_negrisk_no_side([0.50, 0.50, 0.50, 0.50])
+        assert result["gross_spread"] == pytest.approx(1.0)
+        assert result["net_profit"] > 0
+
+    def test_no_edge_at_floor(self):
+        # N=2, both NO at 1.0 -> sum 2.0, payout (N-1)=1 -> gross -1.0, fees suppressed
+        result = net_profit_negrisk_no_side([1.0, 1.0])
+        assert result["gross_spread"] == pytest.approx(-1.0)
+        assert result["fees"] == 0
+
+    def test_degenerate_single_outcome(self):
+        assert net_profit_negrisk_no_side([0.5]) == {"gross_spread": 0.0, "fees": 0, "net_profit": 0.0}
 
 
 # ---------------------------------------------------------------------------

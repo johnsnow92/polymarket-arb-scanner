@@ -19,6 +19,11 @@ _KALSHI_DATA_CACHE_TTL = float(os.getenv("KALSHI_DATA_CACHE_TTL", "60"))
 _kalshi_data_cache: dict = {"ts": 0.0, "value": None}
 _kalshi_data_cache_lock = threading.Lock()
 
+# Minimum plausible sum of YES asks for a mutually-exclusive multi-outcome event.
+# A real single-winner market's YES legs sum to just under/over 1.0; a much lower
+# sum means missing/closed legs or stale quotes, not a risk-free arb. Tunable.
+_KALSHI_MULTI_MIN_SUM = float(os.getenv("KALSHI_MULTI_MIN_SUM", "0.85"))
+
 
 def _split_nested_events(events: list[dict]) -> tuple[list[dict], dict]:
     """Split events with nested ``markets`` field into (events_only, markets_by_event).
@@ -234,12 +239,17 @@ def scan_kalshi_multi(
         if not valid or not yes_prices:
             continue
 
-        # Sanity check: very low total with many outcomes likely means missing markets
+        # Completeness guard: for a true single-winner market the YES asks sum to
+        # just under/over 1.0. A sum well below the floor means missing/closed
+        # legs or stale quotes — not a real arb. Applies to every outcome count,
+        # including the 2-leg events the old ``>= 3`` heuristic ignored.
         total_yes = sum(yes_prices)
-        if len(yes_prices) >= 3 and total_yes < 0.50:
+        if total_yes < _KALSHI_MULTI_MIN_SUM:
             event_title = event_titles.get(event_ticker, "Unknown")[:60]
-            logger.warning("Likely missing outcomes: '%s' (%d outcomes sum to %.3f)",
-                          event_title, len(yes_prices), total_yes)
+            logger.warning(
+                "Implausible multi sum (missing/stale legs): '%s' (%d outcomes sum to %.3f, floor=%.2f)",
+                event_title, len(yes_prices), total_yes, _KALSHI_MULTI_MIN_SUM,
+            )
             continue
 
         result = net_profit_kalshi_multi(yes_prices)
