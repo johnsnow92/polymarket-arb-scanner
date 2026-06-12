@@ -93,6 +93,43 @@ def polymarket_taker_fee(price: float, contracts: int = 1,
     return rate * contracts * price * (1.0 - price)
 
 
+# Polymarket maker rebate program (docs.polymarket.com, verified 2026-06-10):
+# makers receive back a share of the taker fees their resting orders generate,
+# paid daily in USDC — 25% of the taker fee in most categories, 20% in crypto.
+# Geopolitics has a 0% taker fee, so its rebate is also 0.
+POLYMARKET_MAKER_REBATE_SHARE = {
+    "crypto": 0.20,
+}
+POLYMARKET_DEFAULT_MAKER_REBATE_SHARE = 0.25
+
+
+def polymarket_maker_rebate(price: float, contracts: int = 1,
+                            category: str | None = None) -> float:
+    """Expected maker-rebate income when a resting order fills.
+
+    The rebate is a share of the taker fee the counterparty pays against the
+    maker's resting order: rebate_share * taker_rate * C * P * (1 - P).
+    This is income (positive), to be netted against MM costs in yield models —
+    it stacks with liquidity rewards, which pay for resting presence whether
+    or not the order fills.
+
+    Args:
+        price: Fill price in [0, 1].
+        contracts: Number of contracts filled.
+        category: Market category (drives both the taker rate and the
+            rebate share; crypto rebates at 20%, everything else at 25%).
+
+    Returns:
+        Rebate income in dollars (0.0 for fee-free categories).
+    """
+    taker = polymarket_taker_fee(price, contracts, category=category)
+    if taker <= 0:
+        return 0.0
+    share = POLYMARKET_MAKER_REBATE_SHARE.get(
+        (category or "").strip().lower(), POLYMARKET_DEFAULT_MAKER_REBATE_SHARE)
+    return share * taker
+
+
 def polymarket_fee(buy_price: float, sell_price: float = 1.0) -> float:
     """DEPRECATED: Use polymarket_taker_fee() instead.
 
