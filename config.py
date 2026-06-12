@@ -412,6 +412,21 @@ MM_MAX_INVENTORY = _env_float("MM_MAX_INVENTORY", "500.0")  # $500 per market ca
 MM_MAX_TOTAL_EXPOSURE = _env_float("MM_MAX_TOTAL_EXPOSURE", "500.0")
 MM_REFRESH_INTERVAL = _env_float("MM_REFRESH_INTERVAL", "10.0")
 
+# Kalshi Liquidity Incentive Program (LIP) market making — the MM lead
+# strategy per docs/plans/02-kalshi-lip-mm-scope.md. Program expires
+# 2026-09-01; pools come from GET /incentive_programs.
+KALSHI_LIP_ENABLED = _env_bool("KALSHI_LIP_ENABLED", "false")
+LIP_MIN_POOL = _env_float("LIP_MIN_POOL", "10.0")  # ignore pools under $10/period
+LIP_MAX_MARKETS = _env_int("LIP_MAX_MARKETS", "5")
+LIP_SELECT_INTERVAL = _env_float("LIP_SELECT_INTERVAL", "3600.0")  # re-rank hourly
+LIP_EXCLUDED_CATEGORIES = tuple(
+    c.strip() for c in os.getenv("LIP_EXCLUDED_CATEGORIES", "Sports").split(",") if c.strip()
+)
+LIP_PRICE_BAND_LOW = _env_float("LIP_PRICE_BAND_LOW", "0.10")
+LIP_PRICE_BAND_HIGH = _env_float("LIP_PRICE_BAND_HIGH", "0.90")
+LIP_MIN_HOURS_REMAINING = _env_float("LIP_MIN_HOURS_REMAINING", "24.0")
+LIP_DEPTH_PROBE_LIMIT = _env_int("LIP_DEPTH_PROBE_LIMIT", "25")  # max book fetches per selection pass
+
 # Liquidity rewards (Polymarket + Kalshi)
 REWARDS_ENABLED = _env_bool("REWARDS_ENABLED", "false")
 REWARDS_MAX_EXPOSURE = _env_float("REWARDS_MAX_EXPOSURE", "200.0")

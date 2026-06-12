@@ -309,6 +309,47 @@ class KalshiClient:
                 break
         return settlements
 
+    def fetch_incentive_programs(self, status: str = "active",
+                                 incentive_type: str = "liquidity",
+                                 max_pages: int = 20) -> list[dict]:
+        """Fetch Kalshi incentive programs (the per-market LIP pool list).
+
+        GET /incentive_programs with cursor pagination. Each program dict
+        gains a normalized ``period_reward_dollars`` field — the API's
+        ``period_reward`` is in centi-cents (verified live 2026-06-11:
+        1150000 -> $115.00). Other fields of interest: ``market_ticker``,
+        ``discount_factor_bps``, ``target_size_fp``, ``start_date``,
+        ``end_date``, ``incentive_description``.
+
+        Args:
+            status: Program status filter (default "active").
+            incentive_type: Program type filter (default "liquidity" = LIP).
+            max_pages: Pagination safety cap (200 programs/page).
+
+        Returns:
+            List of program dicts; empty list on request failure.
+        """
+        programs: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            params: dict = {"status": status, "type": incentive_type, "limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._request("GET", "/incentive_programs", params=params)
+            if resp is None or resp.status_code != 200:
+                logger.warning("Kalshi fetch_incentive_programs failed: %s",
+                               resp.status_code if resp is not None else "no response")
+                break
+            data = resp.json()
+            page = data.get("incentive_programs", [])
+            for p in page:
+                p["period_reward_dollars"] = (p.get("period_reward") or 0) / 10000.0
+            programs.extend(page)
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
+        return programs
+
     def place_order(
         self,
         ticker: str,

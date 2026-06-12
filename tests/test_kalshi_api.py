@@ -557,3 +557,64 @@ class TestBestAskBidHelpers:
         result = best_yes_ask({"yes_bids": [], "no_bids": [(0.40, 100.0)]})
         assert result[0] == pytest.approx(0.60)
         assert result[1] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# TestFetchIncentivePrograms
+# ---------------------------------------------------------------------------
+
+class TestFetchIncentivePrograms:
+    """LIP pool list via GET /incentive_programs (verified live 2026-06-11)."""
+
+    def _client(self):
+        c = KalshiClient()
+        c.authenticated = True
+        return c
+
+    def test_normalizes_period_reward_to_dollars(self):
+        c = self._client()
+        page = {"incentive_programs": [
+            {"market_ticker": "KXCPI-26JUN", "period_reward": 1150000,
+             "discount_factor_bps": 5000},
+        ], "next_cursor": None}
+        with patch.object(c, "_request", return_value=_mock_response(200, page)):
+            progs = c.fetch_incentive_programs()
+        assert len(progs) == 1
+        assert progs[0]["period_reward_dollars"] == pytest.approx(115.0)
+
+    def test_paginates_until_cursor_exhausted(self):
+        c = self._client()
+        p1 = {"incentive_programs": [{"market_ticker": "A", "period_reward": 400000}],
+              "next_cursor": "abc"}
+        p2 = {"incentive_programs": [{"market_ticker": "B", "period_reward": 100000}],
+              "next_cursor": None}
+        with patch.object(c, "_request",
+                          side_effect=[_mock_response(200, p1), _mock_response(200, p2)]) as req:
+            progs = c.fetch_incentive_programs()
+        assert [p["market_ticker"] for p in progs] == ["A", "B"]
+        assert req.call_count == 2
+        # Second call must carry the cursor
+        assert req.call_args_list[1][1]["params"]["cursor"] == "abc"
+
+    def test_passes_status_and_type_filters(self):
+        c = self._client()
+        page = {"incentive_programs": [], "next_cursor": None}
+        with patch.object(c, "_request", return_value=_mock_response(200, page)) as req:
+            c.fetch_incentive_programs(status="active", incentive_type="liquidity")
+        params = req.call_args[1]["params"]
+        assert params["status"] == "active"
+        assert params["type"] == "liquidity"
+
+    def test_returns_empty_on_failure(self):
+        c = self._client()
+        with patch.object(c, "_request", return_value=_mock_response(500)):
+            assert c.fetch_incentive_programs() == []
+        with patch.object(c, "_request", return_value=None):
+            assert c.fetch_incentive_programs() == []
+
+    def test_missing_period_reward_defaults_zero(self):
+        c = self._client()
+        page = {"incentive_programs": [{"market_ticker": "X"}], "next_cursor": None}
+        with patch.object(c, "_request", return_value=_mock_response(200, page)):
+            progs = c.fetch_incentive_programs()
+        assert progs[0]["period_reward_dollars"] == 0.0
