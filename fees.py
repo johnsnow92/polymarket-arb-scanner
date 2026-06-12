@@ -2,6 +2,7 @@
 
 import logging
 import math
+import os
 
 from config import (
     FEE_MODEL,
@@ -34,25 +35,61 @@ def _select_fees(case_a_fees: float, case_b_fees: float, price_a: float) -> floa
     return max(case_a_fees, case_b_fees)
 
 
+# Polymarket taker fee rates by market category, verified against
+# docs.polymarket.com on 2026-06-10. Geopolitics is fee-free; the rest use
+# rate * C * P * (1 - P). Categories not listed fall back to
+# POLYMARKET_DEFAULT_TAKER_RATE.
+POLYMARKET_CATEGORY_TAKER_RATES = {
+    "crypto": 0.07,
+    "sports": 0.03,
+    "finance": 0.04,
+    "politics": 0.04,
+    "mentions": 0.04,
+    "tech": 0.04,
+    "economics": 0.05,
+    "culture": 0.05,
+    "weather": 0.05,
+    "other": 0.05,
+    "geopolitics": 0.0,
+}
+
+
+def polymarket_rate_for_category(category: str | None) -> float:
+    """Resolve the Polymarket taker fee rate for a market category.
+
+    Matches case-insensitively against POLYMARKET_CATEGORY_TAKER_RATES;
+    unknown or missing categories use POLYMARKET_DEFAULT_TAKER_RATE.
+    """
+    if category:
+        rate = POLYMARKET_CATEGORY_TAKER_RATES.get(category.strip().lower())
+        if rate is not None:
+            return rate
+    return POLYMARKET_DEFAULT_TAKER_RATE
+
+
 def polymarket_taker_fee(price: float, contracts: int = 1,
-                         fee_rate: float | None = None) -> float:
+                         fee_rate: float | None = None,
+                         category: str | None = None) -> float:
     """Polymarket dynamic taker fee (March 2026 model).
 
     Formula: fee_rate * C * P * (1 - P).
-    Makers pay 0%. Default rate 0.04 (politics/tech), overridable per market.
+    Makers pay 0%. Rate is category-dependent (see
+    POLYMARKET_CATEGORY_TAKER_RATES); geopolitics is fee-free.
     Fee is charged at trade entry, not at settlement.
 
     Args:
         price: Trade price in [0, 1].
         contracts: Number of contracts (default 1).
-        fee_rate: Override fee rate; uses POLYMARKET_DEFAULT_TAKER_RATE if None.
+        fee_rate: Explicit rate override; wins over category.
+        category: Market category for rate lookup; falls back to
+            POLYMARKET_DEFAULT_TAKER_RATE when unknown.
 
     Returns:
         Total fee in dollars.
     """
     if price <= 0 or price >= 1:
         return 0.0
-    rate = fee_rate if fee_rate is not None else POLYMARKET_DEFAULT_TAKER_RATE
+    rate = fee_rate if fee_rate is not None else polymarket_rate_for_category(category)
     return rate * contracts * price * (1.0 - price)
 
 
@@ -69,52 +106,102 @@ def polymarket_fee(buy_price: float, sell_price: float = 1.0) -> float:
     return 0.02 * net_winnings
 
 
-def kalshi_taker_fee(price: float, contracts: int = 1) -> float:
+# Kalshi series with non-standard fees, verified against the official
+# schedule (kalshi.com/fee-schedule, effective Feb 5, 2026) on 2026-06-10:
+# - Most markets: taker fee only (0.07 coefficient); makers pay $0.
+# - ~93 flagged series additionally charge makers the 0.0175 coefficient.
+# - S&P 500 (INX*) and Nasdaq-100 (NASDAQ100*) series use a HALVED taker
+#   coefficient (0.035).
+# Both lists are env-overridable; the maker list ships with the known
+# flagged examples and should be refreshed from the fee-schedule page.
+KALSHI_MAKER_FEE_SERIES = tuple(
+    p.strip().upper()
+    for p in os.getenv(
+        "KALSHI_MAKER_FEE_SERIES",
+        "KXAAAGASM,KXATPMATCH,KXCPI,KXCPIYOY,KXBALLONDOR,KXCONNSMYTHE,KXBTCMAX150",
+    ).split(",")
+    if p.strip()
+)
+KALSHI_HALF_TAKER_SERIES = tuple(
+    p.strip().upper()
+    for p in os.getenv("KALSHI_HALF_TAKER_SERIES", "INX,NASDAQ100").split(",")
+    if p.strip()
+)
+
+
+def _kalshi_series_matches(ticker: str | None, prefixes: tuple[str, ...]) -> bool:
+    if not ticker:
+        return False
+    t = ticker.upper()
+    return any(t.startswith(p) for p in prefixes)
+
+
+def kalshi_taker_fee(price: float, contracts: int = 1,
+                     ticker: str | None = None) -> float:
     """Calculate Kalshi taker fee.
 
-    Formula: ceil(0.07 * C * P * (1 - P)) per contract, in cents.
-    Minimum: $0.02 per contract (2 cents).
-    Maximum: 1.75 cents per contract (some tiers).
+    Verified 2026-06-10 against the official schedule (effective Feb 5,
+    2026): fees = roundup(0.07 * C * P * (1 - P)), rounded up to the next
+    cent ONCE PER ORDER — not per contract. The previous per-contract
+    ceil + 2-cent floor overstated the real fee by up to 6x at price
+    extremes (e.g. P=0.05, C=100: real $0.33 vs charged $2.00),
+    suppressing legitimate long-tail detections.
+
+    S&P 500 / Nasdaq-100 series (KALSHI_HALF_TAKER_SERIES) use a halved
+    coefficient (0.035). Capped at KALSHI_FEE_CAP_CENTS per contract.
 
     Returns total fee in dollars.
     """
     if price <= 0 or price >= 1:
         return 0.0
-    # Fee per contract in cents
-    fee_cents = max(2, math.ceil(7 * price * (1 - price)))
-    # Cap per contract in cents (default 175 = $1.75, effectively no cap for retail)
-    fee_cents = min(fee_cents, KALSHI_FEE_CAP_CENTS)
-    return (fee_cents * contracts) / 100.0
+    rate = 0.035 if _kalshi_series_matches(ticker, KALSHI_HALF_TAKER_SERIES) else 0.07
+    # Round up to the next cent on the order total, per the schedule.
+    # Epsilon guards against float artifacts (175.0000000003 -> 176).
+    fee_cents = math.ceil(rate * contracts * price * (1 - price) * 100 - 1e-9)
+    # Per-contract cap retained as a safety bound (cannot bind in practice).
+    fee_cents = min(fee_cents, KALSHI_FEE_CAP_CENTS * contracts)
+    return fee_cents / 100.0
 
 
-def kalshi_maker_fee(price: float, contracts: int = 1) -> float:
-    """Kalshi maker fee — lower than taker. Returns total in dollars.
+def kalshi_maker_fee(price: float, contracts: int = 1,
+                     ticker: str | None = None) -> float:
+    """Kalshi maker fee. Returns total in dollars.
 
-    Formula: ceil(KALSHI_MAKER_MULTIPLIER * P * (1 - P)) per contract in cents.
-    Minimum 1 cent per contract. Capped at KALSHI_FEE_CAP_CENTS per contract.
+    Verified 2026-06-10 against the official schedule (effective Feb 5,
+    2026): makers pay $0 on most markets. The
+    ceil(KALSHI_MAKER_MULTIPLIER * P * (1 - P)) formula applies ONLY to the
+    series explicitly flagged on kalshi.com/fee-schedule
+    (KALSHI_MAKER_FEE_SERIES). Unknown/unflagged tickers — including calls
+    that pass no ticker — pay $0, matching the schedule's default.
 
     Args:
         price: Trade price in [0, 1].
         contracts: Number of contracts (default 1).
+        ticker: Market ticker; flagged series are charged the maker formula.
 
     Returns:
         Total fee in dollars.
     """
     if price <= 0 or price >= 1:
         return 0.0
-    fee_cents = max(1, math.ceil(KALSHI_MAKER_MULTIPLIER * price * (1 - price)))
-    fee_cents = min(fee_cents, KALSHI_FEE_CAP_CENTS)
-    return (fee_cents * contracts) / 100.0
+    if not _kalshi_series_matches(ticker, KALSHI_MAKER_FEE_SERIES):
+        return 0.0
+    # Round up to the next cent on the order total, per the schedule.
+    fee_cents = math.ceil(KALSHI_MAKER_MULTIPLIER * contracts * price * (1 - price) - 1e-9)
+    fee_cents = min(fee_cents, KALSHI_FEE_CAP_CENTS * contracts)
+    return fee_cents / 100.0
 
 
-def net_profit_binary_internal(yes_price: float, no_price: float) -> dict:
+def net_profit_binary_internal(yes_price: float, no_price: float,
+                               category: str | None = None) -> dict:
     """Calculate net profit for a Polymarket binary arbitrage.
 
     Buy YES + NO. One always pays $1.00.
     Profit = $1.00 - (yes_price + no_price) - fees.
 
     March 2026 model: fee is charged at entry (rate * P * (1-P)), not on winnings.
-    Both legs pay the taker entry fee.
+    Both legs pay the taker entry fee. The rate is category-dependent
+    (geopolitics 0% ... crypto 7%); pass the Gamma market category.
     """
     total_cost = yes_price + no_price
     gross_spread = 1.0 - total_cost
@@ -123,7 +210,8 @@ def net_profit_binary_internal(yes_price: float, no_price: float) -> dict:
         return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
 
     # Entry fees: both YES and NO legs pay taker fee at trade time
-    fee = polymarket_taker_fee(yes_price) + polymarket_taker_fee(no_price)
+    fee = (polymarket_taker_fee(yes_price, category=category)
+           + polymarket_taker_fee(no_price, category=category))
 
     # Gas cost: two Polygon transactions (buy YES + buy NO)
     gas = POLYGON_GAS_ESTIMATE * 2
@@ -135,13 +223,15 @@ def net_profit_binary_internal(yes_price: float, no_price: float) -> dict:
     }
 
 
-def net_profit_negrisk_internal(yes_prices: list[float]) -> dict:
+def net_profit_negrisk_internal(yes_prices: list[float],
+                                category: str | None = None) -> dict:
     """Calculate net profit for a NegRisk (multi-outcome) arbitrage.
 
     Buy one YES share of every outcome. Exactly one pays $1.00.
     Profit = $1.00 - sum(prices) - fees.
 
-    March 2026 model: all legs pay taker entry fee at trade time.
+    March 2026 model: all legs pay taker entry fee at trade time. The rate
+    is category-dependent (geopolitics 0% ... crypto 7%).
     """
     total_cost = sum(yes_prices)
     gross_spread = 1.0 - total_cost
@@ -150,7 +240,7 @@ def net_profit_negrisk_internal(yes_prices: list[float]) -> dict:
         return {"gross_spread": gross_spread, "fees": 0, "net_profit": gross_spread}
 
     # Entry fees: each outcome leg pays taker fee at trade time
-    fee = sum(polymarket_taker_fee(p) for p in yes_prices)
+    fee = sum(polymarket_taker_fee(p, category=category) for p in yes_prices)
 
     # Gas cost: one Polygon transaction per outcome
     gas = POLYGON_GAS_ESTIMATE * len(yes_prices)

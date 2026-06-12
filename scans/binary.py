@@ -55,7 +55,8 @@ def _refine_binary_with_clob(opportunities: list[dict], markets_by_question: dic
 
         yes_ask = clob["yes_ask"]
         no_ask = clob["no_ask"]
-        result = net_profit_binary_internal(yes_ask, no_ask)
+        result = net_profit_binary_internal(yes_ask, no_ask,
+                                            category=market.get("category"))
 
         if result["net_profit"] >= min_profit:
             opp["prices"] = f"Y={yes_ask:.3f} N={no_ask:.3f}"
@@ -103,7 +104,8 @@ def scan_binary_internal(markets: list[dict], min_profit: float,
         if (yes_price >= 0.99 or no_price >= 0.99) and (yes_price + no_price) > 0.98:
             continue
 
-        result = net_profit_binary_internal(yes_price, no_price)
+        result = net_profit_binary_internal(yes_price, no_price,
+                                            category=m.get("category"))
 
         if result["net_profit"] >= min_profit:
             market_key = m.get("conditionId", m.get("question", ""))

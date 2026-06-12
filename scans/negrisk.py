@@ -82,7 +82,8 @@ def _refine_negrisk_with_clob(opportunities: list[dict], events_by_title: dict, 
             refined.append(opp)
             continue
 
-        result = net_profit_negrisk_internal(yes_asks)
+        category = event.get("category") or (markets[0].get("category") if markets else None)
+        result = net_profit_negrisk_internal(yes_asks, category=category)
         if result["net_profit"] >= min_profit:
             total = sum(yes_asks)
             price_summary = ", ".join(f"{p:.3f}" for p in sorted(yes_asks, reverse=True)[:5])
@@ -161,7 +162,8 @@ def scan_negrisk_internal(events: list[dict], min_profit: float,
             logger.warning("Likely missing outcomes: '%s' (%d outcomes sum to %.3f)",
                           event_title, len(yes_prices), total_yes)
 
-        result = net_profit_negrisk_internal(yes_prices)
+        category = event.get("category") or (markets[0].get("category") if markets else None)
+        result = net_profit_negrisk_internal(yes_prices, category=category)
 
         if result["net_profit"] >= min_profit:
             total = sum(yes_prices)
