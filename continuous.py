@@ -974,6 +974,38 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     except Exception:
         _alert_manager = None
 
+    # Strategy #20 (B3): surface backtest-tuning status at startup. The
+    # override values already took effect at config import (behind
+    # BACKTEST_TUNING_ENABLED + the recommendation-age gate); this makes the
+    # shift visible in logs and fires an alert so threshold changes between
+    # restarts never pass silently.
+    if config.BACKTEST_TUNING_ENABLED:
+        _tuning_applied = getattr(config, "BACKTEST_RECOMMENDATIONS_APPLIED", False)
+        # recommended_by_strategy_count is bookkeeping, not an override — a
+        # dict containing only it means nothing actually changed.
+        _overrides = {
+            k: v for k, v in _tuning_applied.items()
+            if not isinstance(v, (dict, list)) and k != "recommended_by_strategy_count"
+        } if isinstance(_tuning_applied, dict) else {}
+        _n_strategies = len(getattr(config, "RECOMMENDED_BY_STRATEGY", {}) or {})
+        if _overrides or _n_strategies:
+            _scalar_summary = ", ".join(f"{k}={v}" for k, v in _overrides.items())
+            _tuning_msg = (
+                f"Backtest tuning applied at startup: {_scalar_summary or 'no global overrides'}"
+                f" ({_n_strategies} per-strategy overrides)"
+            )
+            logger.info(_tuning_msg)
+            if _alert_manager:
+                _alert_manager.alert(
+                    "BACKTEST_TUNING_APPLIED", "INFO", _tuning_msg,
+                    details=_overrides,
+                )
+        else:
+            logger.info(
+                "BACKTEST_TUNING_ENABLED is on but no recommendations were "
+                "applied (file missing, stale, invalid, or contained no usable "
+                "overrides) — running on env/default thresholds.")
+
     # Initialize credential health checker
     platform_clients = {
         "polymarket": None,  # Will be set from polymarket_api module functions

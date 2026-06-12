@@ -830,6 +830,12 @@ BACKTEST_RECOMMENDATIONS_PATH = os.getenv(
     "BACKTEST_RECOMMENDATIONS_PATH",
     os.path.join(DATA_DIR, "backtest_recommendations.json"),
 )
+# Age sanity gate: recommendations older than this are NOT applied — a tuning
+# file from weeks ago reflects a different fee/market regime. Files with a
+# missing or unparseable generated_at are treated as stale (cannot verify
+# freshness → do not auto-apply).
+BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS = _env_float(
+    "BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS", "72")
 # Populated by apply_backtest_recommendations() when the flag is on.
 # Keys are strategy names (e.g. "Binary"); values are dicts with optional
 # "MIN_NET_ROI" / "FUZZY_MATCH_THRESHOLD" overrides. Strategies not in this
@@ -868,17 +874,60 @@ def load_backtest_recommendations(path: str | None = None) -> dict | None:
     return data
 
 
+def _recommendation_age_hours(generated_at: str) -> float | None:
+    """Hours elapsed since a recommendation file's generated_at timestamp.
+
+    Accepts the ISO-8601 UTC format written by backtest.build_recommendations
+    (naive isoformat + 'Z'). Returns None when the timestamp is missing or
+    unparseable — callers treat that as stale.
+    """
+    if not generated_at or not isinstance(generated_at, str):
+        return None
+    from datetime import datetime, timezone
+    raw = generated_at.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
+
+
 def apply_backtest_recommendations(path: str | None = None) -> dict:
     """Load backtest recommendations and surface them as module globals.
 
     Updates MIN_NET_ROI, FUZZY_MATCH_THRESHOLD, and RECOMMENDED_BY_STRATEGY
     in-place. Defensive — out-of-range or missing values fall back to the
-    existing defaults. Returns the applied recommendations dict (empty
-    when no file or no usable values were loaded).
+    existing defaults, and recommendations older than
+    BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS (or with no verifiable timestamp)
+    are skipped entirely. Returns the applied recommendations dict (empty
+    when no file, stale file, or no usable values were loaded).
     """
     global MIN_NET_ROI, FUZZY_MATCH_THRESHOLD, RECOMMENDED_BY_STRATEGY
     data = load_backtest_recommendations(path)
     if data is None:
+        return {}
+
+    age_hours = _recommendation_age_hours(data.get("generated_at", ""))
+    if age_hours is None or age_hours < 0:
+        # A negative age means generated_at is in the future (clock skew or a
+        # malformed file) — that must not bypass the freshness gate.
+        logger.warning(
+            "Backtest recommendations at %s have invalid generated_at=%r "
+            "(unparseable or in the future) — cannot verify freshness, not applying",
+            path or BACKTEST_RECOMMENDATIONS_PATH,
+            data.get("generated_at"),
+        )
+        return {}
+    if age_hours > BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS:
+        logger.warning(
+            "Backtest recommendations are %.1fh old (max %.0fh) — stale tuning "
+            "not applied; re-run scripts/tune.py to refresh",
+            age_hours, BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS,
+        )
         return {}
 
     applied: dict = {}
@@ -1039,6 +1088,7 @@ def validate_config() -> list[str]:
         "ALERT_RATE_LIMIT_SECONDS": ALERT_RATE_LIMIT_SECONDS,
         "ALERT_LOSS_STREAK_THRESHOLD": ALERT_LOSS_STREAK_THRESHOLD,
         "STALE_PRICE_THRESHOLD": STALE_PRICE_THRESHOLD,
+        "BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS": BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS,
     }
     for name, val in _positive.items():
         if val <= 0:
