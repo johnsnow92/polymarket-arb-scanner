@@ -195,6 +195,27 @@ class TestScanMultiCross:
         assert "_outcome_legs" in opp
         assert opp["net_profit"] > 0
 
+    def test_non_mutually_exclusive_kalshi_events_excluded_from_matching(self):
+        """The complete-set gate must drop non-exclusive Kalshi events before
+        title matching — non-exclusive ladders are not complete sets."""
+        from scans.multi_cross import scan_multi_cross
+
+        fake_event = {"title": "Test Election", "negRisk": True,
+                      "markets": [{"question": "A"}, {"question": "B"}]}
+        kalshi_markets = [{"title": "A", "ticker": "K-A"}, {"title": "B", "ticker": "K-B"}]
+
+        def run(me_flag):
+            events_list = [{"event_ticker": "EV-1", "mutually_exclusive": me_flag}]
+            kalshi_data = (events_list, {"EV-1": kalshi_markets}, {"EV-1": "Test Election"})
+            with patch("scans.multi_cross.get_negrisk_events", return_value=[fake_event]), \
+                 patch("scans.multi_cross._match_events_by_title", return_value=[]) as matcher:
+                scan_multi_cross([fake_event], kalshi_client=MagicMock(),
+                                 min_profit=0.01, kalshi_data=kalshi_data)
+            return matcher.call_args[0][1]  # the kalshi_multi dict passed in
+
+        assert run(False) == {}                      # gated out
+        assert "EV-1" in run(True)                   # passes the gate
+
 
 # ---------------------------------------------------------------------------
 # Executor integration — MultiCross _build_legs and _revalidate

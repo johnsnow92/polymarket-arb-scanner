@@ -254,7 +254,7 @@ class TestScanKalshiMulti:
              "expiration_time": "2030-01-01T00:00:00Z"},
         ]
         kalshi_data = (
-            [{"event_ticker": "EV1", "title": "Multi Event"}],
+            [{"event_ticker": "EV1", "title": "Multi Event", "mutually_exclusive": True}],
             {"EV1": markets},
             {"EV1": "Multi Event"},
         )
@@ -272,3 +272,42 @@ class TestScanKalshiMulti:
         assert opp["net_profit"] > 0
         assert "_kalshi_tickers" in opp
         assert "_kalshi_prices" in opp
+
+    def _gate_fixture(self, mutually_exclusive):
+        client = MagicMock()
+        client.get_market_price.side_effect = [(0.25, 0.75), (0.30, 0.70), (0.20, 0.80)]
+        client.get_order_book_depth.return_value = {"yes_ask_size": 50}
+        markets = [
+            {"ticker": f"K-{x}", "title": x, "close_time": "2030-01-01T00:00:00Z",
+             "expiration_time": "2030-01-01T00:00:00Z"}
+            for x in ("A", "B", "C")
+        ]
+        event = {"event_ticker": "EV1", "title": "Multi Event"}
+        if mutually_exclusive is not None:
+            event["mutually_exclusive"] = mutually_exclusive
+        return client, ([event], {"EV1": markets}, {"EV1": "Multi Event"})
+
+    def _run_gate(self, mutually_exclusive):
+        from scans.kalshi import scan_kalshi_multi
+        client, kalshi_data = self._gate_fixture(mutually_exclusive)
+        with patch("scans.kalshi._within_resolution_window", return_value=True), \
+             patch("scans.kalshi.filter_dust", side_effect=lambda x: x), \
+             patch("scans.kalshi.net_profit_kalshi_multi", return_value={
+                 "gross_spread": 0.15, "fees": 0.03, "net_profit": 0.12,
+             }):
+            return scan_kalshi_multi(client, 0.01, kalshi_data=kalshi_data)
+
+    def test_non_mutually_exclusive_event_skipped(self):
+        # Non-exclusive market ladders (e.g. soccer "Spreads") are NOT
+        # complete sets — buying YES on each does not guarantee a $1 payout.
+        # This was the source of ~296K phantom detections in production.
+        assert self._run_gate(False) == []
+
+    def test_missing_mutually_exclusive_flag_skipped(self):
+        # Unknown exclusivity is treated as not-a-complete-set (strict gate).
+        assert self._run_gate(None) == []
+
+    def test_mutually_exclusive_event_passes_gate(self):
+        result = self._run_gate(True)
+        assert len(result) >= 1
+        assert result[0]["type"].startswith("KalshiMulti")
