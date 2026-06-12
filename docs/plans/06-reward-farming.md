@@ -44,7 +44,7 @@ This is the highest-leverage piece: it also closes the existing SX Bet #6 gap. B
 
 ## Task 2 — `limitless_api.py` (new venue client)
 
-Mirror `gemini_api.py` exactly (it's the closest reference: HMAC/auth, full buy+sell, USDC, circuit breaker, `_RateLimitError`, `authenticated` attribute the hedger checks). Minimum surface to plug into the reward/MM/hedge machinery:
+Mirror `gemini_api.py`'s **public surface and control flow only** (class shape, method names, `PlatformCircuitBreaker`, `tenacity` retry, the `authenticated` attribute the hedger checks) — do NOT reuse Gemini's HMAC-SHA384/nonce request signing: Limitless orders are **EIP-712 typed-data signed** via `eip712_signer.sign_order` inside `place_order`. Minimum surface to plug into the reward/MM/hedge machinery:
 
 ```python
 class LimitlessClient:
@@ -59,7 +59,7 @@ class LimitlessClient:
     def get_reward_program(self, market_id) -> dict|None: ...   # spread band + reward rate
 ```
 
-Use `eip712_signer.sign_order` inside `place_order`. Add module-level `_RateLimitError`, `tenacity` retry, and a `PlatformCircuitBreaker` per the house pattern.
+Use `eip712_signer.sign_order` inside `place_order`. Per the three-custom-exceptions rule (`ConfigError`, plus `_RateLimitError` only in `kalshi_api.py`/`polymarket_api.py`), do not define a new exception class — raise `tenacity`-retryable stdlib/requests exceptions and route backoff through `PlatformCircuitBreaker` per the house pattern.
 
 ## Task 3 — real order placement in `market_maker.py`
 

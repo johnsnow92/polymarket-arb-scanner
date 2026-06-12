@@ -247,7 +247,12 @@ def scan_negrisk_no_side(events: list[dict], min_profit: float,
                 break
             no_prices.append(no_price)
             tids = _extract_token_ids(m)
-            no_token_ids.append(tids[1] if len(tids) > 1 else "")
+            # Every leg must be executable: a missing NO token ID means the
+            # opportunity would pass scan/refine and then fail at execution.
+            if len(tids) <= 1 or not tids[1]:
+                valid = False
+                break
+            no_token_ids.append(tids[1])
 
         if not valid or len(no_prices) < 2:
             continue

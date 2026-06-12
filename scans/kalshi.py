@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kalshi_api import KalshiClient
+from config import KALSHI_MULTI_MIN_SUM as _KALSHI_MULTI_MIN_SUM
 from fees import net_profit_kalshi_binary, net_profit_kalshi_multi
 from scans.helpers import _parallel_fetch_kalshi, _within_resolution_window, filter_dust, _days_to_resolution
 
@@ -18,11 +19,6 @@ logger = logging.getLogger(__name__)
 _KALSHI_DATA_CACHE_TTL = float(os.getenv("KALSHI_DATA_CACHE_TTL", "60"))
 _kalshi_data_cache: dict = {"ts": 0.0, "value": None}
 _kalshi_data_cache_lock = threading.Lock()
-
-# Minimum plausible sum of YES asks for a mutually-exclusive multi-outcome event.
-# A real single-winner market's YES legs sum to just under/over 1.0; a much lower
-# sum means missing/closed legs or stale quotes, not a risk-free arb. Tunable.
-_KALSHI_MULTI_MIN_SUM = float(os.getenv("KALSHI_MULTI_MIN_SUM", "0.85"))
 
 
 def _split_nested_events(events: list[dict]) -> tuple[list[dict], dict]:

@@ -857,6 +857,9 @@ class ArbitrageExecutor:
             )
             return False, reval_profit, "profit_below_floor"
         opp["net_profit"] = reval_profit
+        # Propagate refreshed asks so _build_legs prices orders from the
+        # revalidated book, not the stale scan-time snapshot.
+        opp["_no_prices"] = no_asks
         return True, reval_profit, "passed"
 
     def _revalidate_cross(

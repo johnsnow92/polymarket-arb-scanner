@@ -100,7 +100,7 @@ Constructor (after the existing `config.get(...)` block):
         self.dispute_gate_enabled = config.get("dispute_gate_enabled", False)
 ```
 
-Add a class-level set of opp types the gate applies to (resolution-held only):
+Add a class-level set of opp types the gate applies to (resolution-held only). Opp type strings are parametric (`NegRiskNO(4)`), so matching strips the `(N)` suffix and then requires exact membership — no prefix matching:
 
 ```python
     _DISPUTE_GATED_TYPES = frozenset({
@@ -113,7 +113,7 @@ Insert as gate #8 in `check()`, immediately before `return True, "OK"`:
 
 ```python
         # 8. UMA dispute gate — block resolution-held Polymarket arbs on disputed markets
-        if self.dispute_gate_enabled and any(opp_type.startswith(t) for t in self._DISPUTE_GATED_TYPES):
+        if self.dispute_gate_enabled and opp_type.split("(")[0] in self._DISPUTE_GATED_TYPES:
             cid = opportunity.get("_condition_id") or opportunity.get("_market_key", "")
             ds = db.get_dispute_state(cid) if cid else None
             if ds and ds["blocked"]:

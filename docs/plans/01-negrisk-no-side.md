@@ -11,7 +11,7 @@ A Polymarket NegRisk event is a set of **N mutually-exclusive binary outcome mar
 
 So the arbitrage condition is:
 
-```
+```text
 Σ(no_ask_i)  <  (N − 1) − fees − gas      ⟹  risk-free profit
 ```
 

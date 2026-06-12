@@ -43,6 +43,7 @@ from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_
 __all__ = [
     "scan_binary_internal",
     "scan_negrisk_internal",
+    "scan_negrisk_no_side",
     "scan_cross_platform",
     "scan_cross_all",
     "scan_kalshi_binary",

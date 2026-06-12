@@ -28,7 +28,7 @@ These six plans implement the strategies recommended in the 2026-06-08 expansion
 Confirmed against the code, this is the canonical pattern every detection plan follows:
 
 1. **Scan** — `scans/<name>.py` with a Stage-1 mid-price `scan_*()` + Stage-2 `_refine_*_with_clob()` (mirror `scans/negrisk.py`). Emit plain opportunity dicts: `type`, `_layer`, `market`, `prices`, `total_cost`, `net_profit`, `net_roi`, `_token_ids`, `_clob_depth`, `_market_key`. Internal keys are `_`-prefixed.
-2. **Fees** — `fees.py:net_profit_<name>()` returning `{"gross_spread", "fees", "net_profit"}` (mirror `net_profit_negrisk_internal`).
+2. **Fees** — `fees.py:net_profit_<name>()` returning `{"gross_spread", "fees", "net_profit"}` (mirror `net_profit_negrisk_no_side`).
 3. **Execute** — add a branch in `executor.py:_build_legs()` (switches on `opp["type"]`) and a matching `_revalidate_<name>` case in `executor.py:_revalidate()`.
 4. **Wire** — import + dispatch in `cli.py:_run_oneshot()`, add the mode string to the argparse `choices` list (cli.py:1095-1103), and add to `continuous.py` if it should run live.
 5. **Flag** — `config.py:<NAME>_ENABLED = _env_bool("<NAME>_ENABLED", "false")` (string default), validate in `validate_config()`.

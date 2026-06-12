@@ -61,7 +61,7 @@ All original-framework strategies (#1-#20) are first-class as of the May 2026 mi
 
 *Updated 2026-05-20 after audit revealed #26 / #27 / #28 / #29 all have first-class Stage 2 refiners with substantial test coverage (48 / 36 / 76 / 58 passing tests respectively) — the prior PARTIAL/STUB labels were stale.*
 
-> **Mode-vs-taxonomy note (2026-05-31 audit):** the canonical taxonomy is 29 strategies, but `cli.py` exposes **32 `--mode` scan values** (excluding `all`). The extra modes are execution variants / Layer-4 sub-strategies — `nway`, `rewards`, `imbalance`, `news-snipe`, `correlated`, `time-decay`, `logical-arb`, `whale-copy`, `lead-lag-mm`, `toxic-flow`, `vol-mm` — that grew alongside the framework. The `--mode` set in `cli.py` is the source of truth for *runnable scans*; the 29-strategy table is the source of truth for the *risk-layer taxonomy*. A full mode→strategy reconciliation in `docs/strategy-framework-v2.md` is a tracked follow-up.
+> **Mode-vs-taxonomy note (2026-05-31 audit):** the canonical taxonomy is 29 strategies, but `cli.py` exposes **33 `--mode` scan values** (excluding `all`). The extra modes are execution variants / Layer-4 sub-strategies — `negrisk-no` (Strategy #2a), `nway`, `rewards`, `imbalance`, `news-snipe`, `correlated`, `time-decay`, `logical-arb`, `whale-copy`, `lead-lag-mm`, `toxic-flow`, `vol-mm` — that grew alongside the framework. The `--mode` set in `cli.py` is the source of truth for *runnable scans*; the 29-strategy table is the source of truth for the *risk-layer taxonomy*. A full mode→strategy reconciliation in `docs/strategy-framework-v2.md` is a tracked follow-up.
 
 Each first-class strategy has a feature flag defaulting to `false`. The four flags added in PR #10:
 
