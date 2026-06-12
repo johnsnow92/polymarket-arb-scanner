@@ -462,10 +462,14 @@ class ArbitrageExecutor:
                 if ticker in book_cache:
                     parsed = book_cache[ticker]
                 else:
-                    book = self.kalshi_client.fetch_order_book(ticker)
-                    if not book:
+                    try:
+                        book = self.kalshi_client.fetch_order_book(ticker)
+                        parsed = parse_orderbook(book) if book else None
+                    except Exception as exc:
+                        logger.warning(f"Exit-liquidity book fetch raised for {ticker}: {exc}")
+                        parsed = None
+                    if not parsed:
                         return False, f"could not fetch order book for {ticker} (fail closed)"
-                    parsed = parse_orderbook(book)
                     book_cache[ticker] = parsed
                 kalshi_side = str(leg.get("side", "")).lower()
                 exit_bid = best_yes_bid(parsed) if kalshi_side == "yes" else best_no_bid(parsed)
@@ -483,10 +487,14 @@ class ArbitrageExecutor:
                 if token_id in book_cache:
                     best = book_cache[token_id]
                 else:
-                    book = fetch_order_book(token_id)
-                    if not book:
+                    try:
+                        book = fetch_order_book(token_id)
+                        best = get_best_bid_ask(book) if book else None
+                    except Exception as exc:
+                        logger.warning(f"Exit-liquidity CLOB fetch raised for {token_id[:16]}: {exc}")
+                        best = None
+                    if not best:
                         return False, f"could not fetch CLOB book for token {token_id[:16]} (fail closed)"
-                    best = get_best_bid_ask(book)
                     book_cache[token_id] = best
                 bid = best.get("bid")
                 bid_size = best.get("bid_size") or 0

@@ -25,7 +25,7 @@ class TestPositionTickerStorage(unittest.TestCase):
         self.db = TradeDB(self.tmp.name)
 
     def tearDown(self):
-        self.db.close() if hasattr(self.db, "close") else None
+        self.db.close()
         os.unlink(self.tmp.name)
 
     def test_market_ticker_column_exists_and_persists(self):
@@ -59,6 +59,7 @@ class TestCheckSettlementsUsesTicker(unittest.TestCase):
         self.db = TradeDB(self.tmp.name)
 
     def tearDown(self):
+        self.db.close()
         os.unlink(self.tmp.name)
 
     def _make_kalshi_client(self):
@@ -116,6 +117,7 @@ class TestPortfolioSettlementsReconciliation(unittest.TestCase):
         self.db = TradeDB(self.tmp.name)
 
     def tearDown(self):
+        self.db.close()
         os.unlink(self.tmp.name)
 
     def _position(self, ticker, title="Some Market", side="yes", price=0.40):

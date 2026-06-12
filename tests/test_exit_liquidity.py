@@ -36,6 +36,16 @@ def _patch_gate_global(name, value):
     return patch.dict(_GATE_GLOBALS, {name: value})
 
 
+def _pin_gate_defaults(testcase: unittest.TestCase):
+    """Pin gate globals so ambient env (e.g. EXIT_LIQUIDITY_GATE_ENABLED=false
+    in CI) can't silently invert test expectations."""
+    for name, value in (("EXIT_LIQUIDITY_GATE_ENABLED", True),
+                        ("MIN_EXIT_BID_DEPTH", 10)):
+        patcher = patch.dict(_GATE_GLOBALS, {name: value})
+        patcher.start()
+        testcase.addCleanup(patcher.stop)
+
+
 def _make_executor(kalshi_client=None):
     """Bare executor instance without running __init__ (no file handles, no deps)."""
     ex = ArbitrageExecutor.__new__(ArbitrageExecutor)
@@ -56,6 +66,7 @@ def _kalshi_book(yes_bids=None, no_bids=None):
 
 class TestExitLiquidityGateKalshi(unittest.TestCase):
     def setUp(self):
+        _pin_gate_defaults(self)
         self.client = MagicMock()
         self.ex = _make_executor(kalshi_client=self.client)
 
@@ -93,8 +104,7 @@ class TestExitLiquidityGateKalshi(unittest.TestCase):
         )
         opp = {"type": "KalshiBinary"}
         legs = [{"platform": "kalshi", "side": "yes", "action": "buy", "price": 0.40, "_ticker": "K-THIN"}]
-        with _patch_gate_global("MIN_EXIT_BID_DEPTH", 10):
-            ok, reason = self.ex._check_exit_liquidity(opp, legs)
+        ok, reason = self.ex._check_exit_liquidity(opp, legs)
         self.assertFalse(ok)
         self.assertIn("MIN_EXIT_BID_DEPTH", reason)
 
@@ -130,6 +140,7 @@ class TestExitLiquidityGateKalshi(unittest.TestCase):
 
 class TestExitLiquidityGatePolymarket(unittest.TestCase):
     def setUp(self):
+        _pin_gate_defaults(self)
         self.ex = _make_executor()
 
     def test_healthy_bid_passes(self):
@@ -153,8 +164,7 @@ class TestExitLiquidityGatePolymarket(unittest.TestCase):
         book = {"bids": [{"price": "0.30", "size": "3"}], "asks": [{"price": "0.35", "size": "30"}]}
         opp = {"type": "Binary"}
         legs = [{"platform": "polymarket", "side": "BUY", "token": "yes", "price": 0.35, "_token_id": "tok-3"}]
-        with _patch_gate_global("fetch_order_book", MagicMock(return_value=book)), \
-             _patch_gate_global("MIN_EXIT_BID_DEPTH", 10):
+        with _patch_gate_global("fetch_order_book", MagicMock(return_value=book)):
             ok, reason = self.ex._check_exit_liquidity(opp, legs)
         self.assertFalse(ok)
         self.assertIn("MIN_EXIT_BID_DEPTH", reason)
@@ -170,6 +180,7 @@ class TestExitLiquidityGatePolymarket(unittest.TestCase):
 
 class TestExitLiquidityGateExemptions(unittest.TestCase):
     def setUp(self):
+        _pin_gate_defaults(self)
         self.ex = _make_executor()
 
     def test_gate_disabled_passes_everything(self):
