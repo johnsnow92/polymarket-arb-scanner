@@ -83,7 +83,8 @@ class TestPolymarketMakerRebate:
         assert ten == pytest.approx(10 * one)
 
     def test_unknown_category_uses_default_taker_rate_and_share(self):
-        # Default taker 0.05 fallback handled by polymarket_taker_fee; share 25%.
+        # Unknown-category fallback is POLYMARKET_DEFAULT_TAKER_RATE (0.04),
+        # applied inside polymarket_taker_fee; rebate share 25%.
         expected = 0.25 * polymarket_taker_fee(0.40, 1, category="mystery")
         assert polymarket_maker_rebate(0.40, 1, category="mystery") == pytest.approx(expected)
 
