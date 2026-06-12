@@ -215,6 +215,7 @@ def scan_negrisk_no_side(events: list[dict], min_profit: float,
     """
     from config import NEGRISK_NO_SIDE_ENABLED
     if not NEGRISK_NO_SIDE_ENABLED:
+        logger.info("NegRisk NO-side scan skipped: NEGRISK_NO_SIDE_ENABLED=false")
         return []
 
     opportunities = []

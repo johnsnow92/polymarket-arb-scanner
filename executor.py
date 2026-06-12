@@ -1517,8 +1517,11 @@ class ArbitrageExecutor:
             # Buy NO on each outcome — Σ NO < (N-1) arbitrage.
             # Read the full price list from _no_prices (not the truncated summary string).
             no_prices = opportunity.get("_no_prices", [])
-            if token_ids and len(no_prices) != len(token_ids):
-                logger.warning(f"NegRiskNO price count ({len(no_prices)}) != token ID count ({len(token_ids)}). Skipping.")
+            # Every leg must have a real token ID: an empty list or any empty
+            # string would produce invalid order-book fetches at execution.
+            if not no_prices or len(no_prices) != len(token_ids) or not all(token_ids):
+                logger.warning(f"NegRiskNO invalid legs: {len(no_prices)} prices vs {len(token_ids)} token IDs "
+                               f"(empty IDs: {sum(1 for t in token_ids if not t)}). Skipping.")
                 return []
             for i, price in enumerate(no_prices):
                 legs.append({
@@ -1526,7 +1529,7 @@ class ArbitrageExecutor:
                     "side": "BUY",
                     "token": f"no_{i}",
                     "price": price,
-                    "_token_id": token_ids[i] if i < len(token_ids) else "",
+                    "_token_id": token_ids[i],
                 })
         elif opp_type.startswith("NegRisk"):
             # Buy YES on each outcome — prices are comma-separated in the opp

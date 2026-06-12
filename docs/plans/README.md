@@ -1,7 +1,7 @@
 # Strategy Expansion — Implementation Plans
 
 > Created 2026-06-08. Author: planning pass off `docs/audit/` expansion research.
-> **Status: PLANS ONLY — nothing here is implemented.** Each plan is gated on operator go-ahead.
+> **Status: Plan 01 (NegRisk NO-side) is implemented** (`scans/negrisk.py:scan_negrisk_no_side`, behind `NEGRISK_NO_SIDE_ENABLED=false`). Plans 02-06 are not yet implemented. Each remaining plan is gated on operator go-ahead.
 > Every new strategy ships behind a `*_ENABLED=false` feature flag per the CLAUDE.md "first-class strategy" convention.
 
 These six plans implement the strategies recommended in the 2026-06-08 expansion research. They are ordered by **(risk-free certainty × feasibility on this stack)** — ship top-down.
