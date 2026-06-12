@@ -151,7 +151,10 @@ class TestConfigLoader:
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, "rec.json")
+                from datetime import datetime, timezone
+                fresh_ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
                 payload = {
+                    "generated_at": fresh_ts,
                     "recommended": {
                         "MIN_NET_ROI": 0.0123,
                         "FUZZY_MATCH_THRESHOLD": 78,
@@ -219,7 +222,10 @@ class TestConfigLoader:
         with tempfile.TemporaryDirectory() as tmp:
             rec_path = os.path.join(tmp, "backtest_recommendations.json")
             with open(rec_path, "w", encoding="utf-8") as fh:
+                from datetime import datetime, timezone
+                fresh_ts = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
                 json.dump({
+                    "generated_at": fresh_ts,
                     "recommended": {
                         "MIN_NET_ROI": 0.0321,
                         "FUZZY_MATCH_THRESHOLD": 81,

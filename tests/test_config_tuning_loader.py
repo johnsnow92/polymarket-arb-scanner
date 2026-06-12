@@ -93,6 +93,82 @@ class TestApplyGracefulFallback:
             config.MIN_NET_ROI = original_roi
 
 
+class TestRecommendationAgeGate:
+    """Stale or unverifiable recommendations must never be applied (B3)."""
+
+    def _write_rec(self, tmp, generated_at, min_net_roi=0.02):
+        path = os.path.join(tmp, "rec.json")
+        payload = {"recommended": {"MIN_NET_ROI": min_net_roi}}
+        if generated_at is not None:
+            payload["generated_at"] = generated_at
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        return path
+
+    def test_fresh_recommendation_applies(self):
+        import config
+        from datetime import datetime, timezone
+        original_roi = config.MIN_NET_ROI
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                fresh = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+                path = self._write_rec(tmp, fresh, min_net_roi=0.02)
+                applied = config.apply_backtest_recommendations(path)
+            assert applied.get("MIN_NET_ROI") == 0.02
+            assert config.MIN_NET_ROI == 0.02
+        finally:
+            config.MIN_NET_ROI = original_roi
+
+    def test_stale_recommendation_not_applied(self):
+        import config
+        from datetime import datetime, timedelta, timezone
+        original_roi = config.MIN_NET_ROI
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                stale_dt = datetime.now(timezone.utc) - timedelta(
+                    hours=config.BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS + 1)
+                stale = stale_dt.replace(tzinfo=None).isoformat() + "Z"
+                path = self._write_rec(tmp, stale, min_net_roi=0.03)
+                applied = config.apply_backtest_recommendations(path)
+            assert applied == {}
+            assert config.MIN_NET_ROI == original_roi
+        finally:
+            config.MIN_NET_ROI = original_roi
+
+    def test_missing_generated_at_not_applied(self):
+        import config
+        original_roi = config.MIN_NET_ROI
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = self._write_rec(tmp, None, min_net_roi=0.03)
+                applied = config.apply_backtest_recommendations(path)
+            assert applied == {}
+            assert config.MIN_NET_ROI == original_roi
+        finally:
+            config.MIN_NET_ROI = original_roi
+
+    def test_unparseable_generated_at_not_applied(self):
+        import config
+        original_roi = config.MIN_NET_ROI
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = self._write_rec(tmp, "yesterday-ish", min_net_roi=0.03)
+                applied = config.apply_backtest_recommendations(path)
+            assert applied == {}
+            assert config.MIN_NET_ROI == original_roi
+        finally:
+            config.MIN_NET_ROI = original_roi
+
+    def test_age_helper_parses_utc_z_format(self):
+        import config
+        from datetime import datetime, timezone
+        fresh = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+        age = config._recommendation_age_hours(fresh)
+        assert age is not None and 0 <= age < 0.1
+        assert config._recommendation_age_hours("") is None
+        assert config._recommendation_age_hours("not-a-date") is None
+
+
 class TestModuleLevelAttribute:
     """BACKTEST_RECOMMENDATIONS_APPLIED must always be defined."""
 
