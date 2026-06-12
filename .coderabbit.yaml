@@ -1,0 +1,10 @@
+# CodeRabbit configuration
+# request_changes_workflow makes CodeRabbit submit formal GitHub reviews:
+# "Request changes" while findings are open, "Approve" once all comments are
+# resolved — which is what satisfies the required-review gate and lets
+# GitHub native auto-merge fire.
+reviews:
+  request_changes_workflow: true
+  auto_review:
+    enabled: true
+    drafts: false
