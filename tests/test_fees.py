@@ -65,11 +65,15 @@ class TestPolymarketFee:
 # ---------------------------------------------------------------------------
 
 class TestKalshiTakerFee:
-    def test_minimum_2_cents_per_contract(self):
-        # For price near boundary, the formula may yield < 2 cents, so min kicks in
-        # price=0.01: ceil(7*0.01*0.99) = ceil(0.0693) = 1 -> min(2,1) = 2
+    def test_per_order_rounding_at_extremes(self):
+        # Verified schedule (Feb 5, 2026): round up once per ORDER, no
+        # per-contract minimum. price=0.01, 1 contract:
+        # ceil(0.07 * 1 * 0.01 * 0.99 * 100) = ceil(0.0693) = 1 cent.
         fee = kalshi_taker_fee(0.01, 1)
-        assert fee == pytest.approx(0.02)
+        assert fee == pytest.approx(0.01)
+        # 100 contracts at 0.05: ceil(0.07 * 100 * 0.0475 * 100) = 34 cents —
+        # the old per-contract 2-cent floor would have charged $2.00 (~6x).
+        assert kalshi_taker_fee(0.05, 100) == pytest.approx(0.34)
 
     def test_correct_formula_mid_price(self):
         # price=0.50: ceil(7*0.50*0.50) = ceil(1.75) = 2 cents
@@ -90,9 +94,10 @@ class TestKalshiTakerFee:
         assert fee == pytest.approx(expected_cents / 100.0)
 
     def test_multiple_contracts(self):
-        fee_1 = kalshi_taker_fee(0.50, 1)
-        fee_10 = kalshi_taker_fee(0.50, 10)
-        assert fee_10 == pytest.approx(fee_1 * 10)
+        # Per-order rounding: 10 contracts at 0.50 ->
+        # ceil(0.07 * 10 * 0.25 * 100) = ceil(17.5) = 18 cents.
+        # (Per-contract rounding would have given 2 cents x 10 = 20.)
+        assert kalshi_taker_fee(0.50, 10) == pytest.approx(0.18)
 
     def test_zero_price_returns_zero(self):
         assert kalshi_taker_fee(0.0) == 0.0
@@ -702,35 +707,105 @@ class TestPolymarketTakerFee:
 # ---------------------------------------------------------------------------
 
 class TestKalshiMakerFee:
-    """Tests for the Kalshi maker fee: ceil(KALSHI_MAKER_MULTIPLIER * P * (1-P)) per contract."""
+    """Kalshi maker fee per the verified schedule (effective Feb 5, 2026):
+    $0 on most markets; ceil(KALSHI_MAKER_MULTIPLIER * P * (1-P)) per
+    contract ONLY on flagged series (KALSHI_MAKER_FEE_SERIES)."""
 
-    def test_symmetric_at_half(self):
+    FLAGGED = "KXCPI-26JUN"  # KXCPI is in the default flagged-series list
+
+    def test_default_is_free_without_ticker(self):
+        # Most Kalshi markets charge makers nothing — and callers that don't
+        # pass a ticker must get the schedule's default ($0), not a charge.
+        assert kalshi_maker_fee(0.50) == 0.0
+
+    def test_unflagged_ticker_is_free(self):
+        assert kalshi_maker_fee(0.50, ticker="KXEPLSPREAD-26MAY19") == 0.0
+
+    def test_flagged_symmetric_at_half(self):
         # ceil(1.75 * 0.50 * 0.50) = ceil(0.4375) = 1 -> max(1, 1) = 1 cent
-        assert kalshi_maker_fee(0.50) == pytest.approx(0.01)
+        assert kalshi_maker_fee(0.50, ticker=self.FLAGGED) == pytest.approx(0.01)
 
-    def test_multiple_contracts(self):
-        # 1 cent * 10 = 10 cents = 0.10
-        assert kalshi_maker_fee(0.50, 10) == pytest.approx(0.10)
+    def test_flagged_multiple_contracts(self):
+        # Per-order rounding: ceil(1.75 * 10 * 0.25) = ceil(4.375) = 5 cents
+        assert kalshi_maker_fee(0.50, 10, ticker=self.FLAGGED) == pytest.approx(0.05)
 
     def test_zero_price_returns_zero(self):
-        assert kalshi_maker_fee(0.0) == 0.0
+        assert kalshi_maker_fee(0.0, ticker=self.FLAGGED) == 0.0
 
     def test_one_price_returns_zero(self):
-        assert kalshi_maker_fee(1.0) == 0.0
+        assert kalshi_maker_fee(1.0, ticker=self.FLAGGED) == 0.0
 
-    def test_minimum_one_cent(self):
+    def test_flagged_minimum_one_cent(self):
         # At a very low probability, formula yields < 1 cent, so min(1, ...) kicks in
         # price=0.01: 1.75 * 0.01 * 0.99 = 0.017325 -> ceil = 1 cent
-        fee = kalshi_maker_fee(0.01, 1)
+        fee = kalshi_maker_fee(0.01, 1, ticker=self.FLAGGED)
         assert fee == pytest.approx(0.01)
 
-    def test_cap_enforced(self):
+    def test_flagged_cap_enforced(self):
         # Verify cap is applied (KALSHI_FEE_CAP_CENTS = 175)
         from config import KALSHI_FEE_CAP_CENTS, KALSHI_MAKER_MULTIPLIER
         import math as _math
         fee_cents = max(1, _math.ceil(KALSHI_MAKER_MULTIPLIER * 0.50 * 0.50))
         fee_cents = min(fee_cents, KALSHI_FEE_CAP_CENTS)
-        assert kalshi_maker_fee(0.50, 1) == pytest.approx(fee_cents / 100.0)
+        assert kalshi_maker_fee(0.50, 1, ticker=self.FLAGGED) == pytest.approx(fee_cents / 100.0)
+
+
+class TestKalshiIndexTakerFee:
+    """S&P 500 / Nasdaq-100 series use a halved taker coefficient (0.035)."""
+
+    def test_index_series_halved(self):
+        from fees import kalshi_taker_fee
+        # Standard at 0.50 x100: ceil(0.07*100*0.25*100) = 175 cents = $1.75
+        # Index at 0.50 x100:    ceil(0.035*100*0.25*100) = 88 cents = $0.88
+        assert kalshi_taker_fee(0.50, 100) == pytest.approx(1.75)
+        assert kalshi_taker_fee(0.50, 100, ticker="INX-26JUN10") == pytest.approx(0.88)
+
+    def test_nasdaq_prefix_matches(self):
+        from fees import kalshi_taker_fee
+        assert kalshi_taker_fee(0.50, 100, ticker="NASDAQ100-26JUN") < kalshi_taker_fee(0.50, 100)
+
+    def test_non_index_unchanged(self):
+        from fees import kalshi_taker_fee
+        assert kalshi_taker_fee(0.50, 100, ticker="KXCPI-26JUN") == kalshi_taker_fee(0.50, 100)
+
+
+class TestPolymarketCategoryRates:
+    """Category-based Polymarket taker rates, verified 2026-06-10."""
+
+    def test_geopolitics_is_free(self):
+        from fees import polymarket_taker_fee
+        assert polymarket_taker_fee(0.50, category="geopolitics") == 0.0
+
+    def test_crypto_highest(self):
+        from fees import polymarket_taker_fee
+        assert polymarket_taker_fee(0.50, category="crypto") == pytest.approx(0.07 * 0.25)
+
+    def test_sports_lowest_nonzero(self):
+        from fees import polymarket_taker_fee
+        assert polymarket_taker_fee(0.50, category="Sports") == pytest.approx(0.03 * 0.25)
+
+    def test_unknown_category_uses_default(self):
+        from fees import polymarket_taker_fee
+        from config import POLYMARKET_DEFAULT_TAKER_RATE
+        assert polymarket_taker_fee(0.50, category="mystery") == pytest.approx(
+            POLYMARKET_DEFAULT_TAKER_RATE * 0.25)
+
+    def test_explicit_rate_wins_over_category(self):
+        from fees import polymarket_taker_fee
+        assert polymarket_taker_fee(0.50, fee_rate=0.10, category="geopolitics") == pytest.approx(0.025)
+
+    def test_binary_internal_geopolitics_feeless(self):
+        from fees import net_profit_binary_internal
+        from config import POLYGON_GAS_ESTIMATE
+        result = net_profit_binary_internal(0.45, 0.50, category="geopolitics")
+        # Only gas remains as cost
+        assert result["fees"] == pytest.approx(POLYGON_GAS_ESTIMATE * 2)
+
+    def test_negrisk_internal_category_changes_profit(self):
+        from fees import net_profit_negrisk_internal
+        cheap = net_profit_negrisk_internal([0.30, 0.30, 0.30], category="geopolitics")
+        dear = net_profit_negrisk_internal([0.30, 0.30, 0.30], category="crypto")
+        assert cheap["net_profit"] > dear["net_profit"]
 
 
 # ---------------------------------------------------------------------------
