@@ -25,10 +25,18 @@ jobs:
 
       - name: Run Kalshi LIP market scan
         run: |
-          python scripts/kalshi_rewards_monitor.py --limit 25
-          echo "## Kalshi LIP Market Scan" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          cat data/kalshi-rewards/latest.md >> "$GITHUB_STEP_SUMMARY"
+          # The scan monitor (scripts/kalshi_rewards_monitor.py) is a follow-up to
+          # this PR. Skip gracefully until it lands so the weekly cron does not fail.
+          if [ -f scripts/kalshi_rewards_monitor.py ]; then
+            python scripts/kalshi_rewards_monitor.py --limit 25
+            echo "## Kalshi LIP Market Scan" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            cat data/kalshi-rewards/latest.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Kalshi LIP Market Scan" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_Monitor script \`scripts/kalshi_rewards_monitor.py\` not present yet — scan skipped._" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload digest artifacts
         uses: actions/upload-artifact@v4
@@ -36,3 +44,4 @@ jobs:
           name: kalshi-lip-digest
           path: data/kalshi-rewards/
           retention-days: 30
+          if-no-files-found: ignore
