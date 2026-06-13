@@ -154,6 +154,22 @@ def _check_min_entry_price(opportunity: dict, legs: list[dict]) -> tuple[bool, s
     return True, ""
 
 
+def _off_allowlist_venues(legs: list[dict], enabled: frozenset[str]) -> list[str]:
+    """Return the sorted, distinct leg platforms that are NOT execution-enabled.
+
+    Venue-legality hard gate: if this is non-empty, the whole opportunity must be
+    vetoed before any leg fills. A per-leg skip would let an executable leg fill
+    while a blocked leg is dropped, stranding a naked position. Guardrails:
+    off-allowlist orders = 0, naked-leg events = 0.
+    """
+    blocked = {
+        leg.get("platform")
+        for leg in legs
+        if leg.get("platform") and leg.get("platform") not in enabled
+    }
+    return sorted(blocked)
+
+
 class ArbitrageExecutor:
     """Executes arbitrage trades with risk controls, dry-run, and semi/full-auto modes."""
 
@@ -395,6 +411,25 @@ class ArbitrageExecutor:
                 _metrics.inc("trades_executed", {"strategy": opp_type, "status": "dry_run"})
             return result
         else:
+            # 6b. Venue-legality HARD gate (live only). An off-allowlist leg would
+            # otherwise be skipped mid-execution by the per-leg guard, stranding any
+            # already-filled leg as a naked position. Veto the whole opportunity
+            # atomically — place zero orders. Guardrails: off-allowlist orders = 0,
+            # naked-leg events = 0.
+            _blocked = _off_allowlist_venues(legs, ENABLED_EXECUTION_PLATFORMS)
+            if _blocked:
+                logger.warning(
+                    "%sVETO (venue-legality): leg(s) on non-executable venue(s) %s; "
+                    "enabled=%s. Placing zero orders.",
+                    prefix, ", ".join(_blocked), ", ".join(sorted(ENABLED_EXECUTION_PLATFORMS)),
+                )
+                self._log_skipped(opportunity, "off_allowlist_venue")
+                if _metrics:
+                    _metrics.inc(
+                        "trades_failed",
+                        {"strategy": opp_type, "reason": "off_allowlist_venue"},
+                    )
+                return False
             # Use concurrent execution when enabled and all legs support cancellation
             if self.concurrent_execution and self._supports_concurrent(legs):
                 result = self._execute_legs_concurrent(opportunity, legs, size)

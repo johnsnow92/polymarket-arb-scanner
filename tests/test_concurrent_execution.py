@@ -503,8 +503,15 @@ class TestExecuteDispatch:
         executor_sequential._execute_legs.assert_called_once()
         executor_sequential._execute_legs_concurrent.assert_not_called()
 
-    def test_concurrent_enabled_but_ibkr_falls_back_to_sequential(self, ArbitrageExecutor, db, risk_manager):
+    def test_concurrent_enabled_but_ibkr_falls_back_to_sequential(self, ArbitrageExecutor, db, risk_manager, monkeypatch):
         """When concurrent is enabled but legs include IBKR, fall back to sequential."""
+        # IBKR is the dispatch vehicle under test; enable it so the venue-legality
+        # hard gate doesn't veto the opportunity before the concurrent-vs-sequential
+        # decision is reached.
+        monkeypatch.setattr(
+            "executor.ENABLED_EXECUTION_PLATFORMS",
+            frozenset({"kalshi", "polymarket", "ibkr"}),
+        )
         ibkr_client = MagicMock()
         executor = ArbitrageExecutor(
             pm_trader=MagicMock(),
