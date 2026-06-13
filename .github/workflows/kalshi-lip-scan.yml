@@ -24,18 +24,26 @@ jobs:
           python-version: '3.12'
 
       - name: Run Kalshi LIP market scan
+        # The monitor uses only the Python standard library (urllib/csv/json),
+        # so no dependency install step is required.
         run: |
+          set -euo pipefail
+          mkdir -p data/kalshi-rewards
           # The scan monitor (scripts/kalshi_rewards_monitor.py) is a follow-up to
           # this PR. Skip gracefully until it lands so the weekly cron does not fail.
           if [ -f scripts/kalshi_rewards_monitor.py ]; then
             python scripts/kalshi_rewards_monitor.py --limit 25
-            echo "## Kalshi LIP Market Scan" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            cat data/kalshi-rewards/latest.md >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "## Kalshi LIP Market Scan"
+              echo ""
+              cat data/kalshi-rewards/latest.md
+            } >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "## Kalshi LIP Market Scan" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "_Monitor script \`scripts/kalshi_rewards_monitor.py\` not present yet — scan skipped._" >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "## Kalshi LIP Market Scan"
+              echo ""
+              echo "_Monitor script \`scripts/kalshi_rewards_monitor.py\` not present yet — scan skipped._"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload digest artifacts
