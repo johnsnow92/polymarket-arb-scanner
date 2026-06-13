@@ -102,6 +102,16 @@ class TradeDB:
                 idempotency_key TEXT NOT NULL UNIQUE,
                 error TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                epoch REAL NOT NULL,
+                alert_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details TEXT
+            );
         """)
         self.conn.commit()
 
@@ -117,6 +127,8 @@ class TradeDB:
                 ON partial_fills(hedge_status, created_at);
             CREATE INDEX IF NOT EXISTS idx_opportunities_timestamp
                 ON opportunities(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_alerts_type_epoch
+                ON alerts(alert_type, epoch);
         """)
         self.conn.commit()
 
@@ -163,6 +175,60 @@ class TradeDB:
                 self.conn.commit()
             except sqlite3.OperationalError:
                 logger.debug("Migration: %s column already exists on partial_fills", col)
+
+    def log_alert(self, alert_type: str, severity: str, message: str,
+                  details: str | None = None, timestamp: str | None = None,
+                  epoch: float | None = None) -> int | None:
+        """Persist an alert for the ops_alerts view + KPI digest. Best-effort: never
+        raises (a failed alert-write must not break alerting or recurse into it)."""
+        try:
+            now = datetime.now(timezone.utc)
+            with self._lock:
+                cur = self.conn.execute(
+                    "INSERT INTO alerts (timestamp, epoch, alert_type, severity, message, details) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        timestamp or now.isoformat(),
+                        epoch if epoch is not None else now.timestamp(),
+                        alert_type,
+                        severity,
+                        message,
+                        details,
+                    ),
+                )
+                self.conn.commit()
+                return cur.lastrowid
+        except Exception:
+            logger.warning("Failed to persist alert (%s)", alert_type, exc_info=True)
+            return None
+
+    def get_alerts_since(self, since_epoch: float) -> list[dict]:
+        """Return alerts with epoch >= since_epoch, newest first."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT timestamp, epoch, alert_type, severity, message, details "
+                "FROM alerts WHERE epoch >= ? ORDER BY epoch DESC",
+                (since_epoch,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def guardrail_kpi_counts(self, window_hours: float = 24.0) -> dict[str, int]:
+        """Count guardrail/ops alert events in the trailing window for the KPI digest.
+        Hard-guardrail targets: off_allowlist_attempts = 0, naked_leg_events = 0."""
+        since = datetime.now(timezone.utc).timestamp() - window_hours * 3600
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT alert_type, COUNT(*) AS n FROM alerts WHERE epoch >= ? GROUP BY alert_type",
+                (since,),
+            ).fetchall()
+        by_type = {r["alert_type"]: r["n"] for r in rows}
+        return {
+            "off_allowlist_attempts": by_type.get("OFF_ALLOWLIST", 0),
+            "naked_leg_events": by_type.get("PARTIAL_FILL", 0),
+            "db_write_failures": by_type.get("DB_WRITE_FAILURE", 0),
+            "rate_limits": by_type.get("RATE_LIMIT", 0),
+            "total": sum(by_type.values()),
+        }
 
     def _commit_or_alert(self, operation: str) -> None:
         """Commit the current transaction; on failure fire a DB_WRITE_FAILURE alert

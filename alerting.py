@@ -4,6 +4,7 @@ Integrates with the existing notifier.py webhook system and provides
 rate-limited alerts with severity levels.
 """
 
+import json
 import logging
 import threading
 import time
@@ -56,6 +57,7 @@ class AlertManager:
         rate_limit_seconds: float = 300,
         loss_streak_threshold: int = 5,
         balance_low_threshold: float = 10.0,
+        db=None,
     ):
         """
         Args:
@@ -65,6 +67,7 @@ class AlertManager:
             balance_low_threshold: Dollar amount below which BALANCE_LOW fires.
         """
         self.notifier = notifier
+        self._db = db
         self.rate_limit_seconds = rate_limit_seconds
         self.loss_streak_threshold = loss_streak_threshold
         self.balance_low_threshold = balance_low_threshold
@@ -94,6 +97,11 @@ class AlertManager:
         self._trade_losses: deque[float] = deque(maxlen=20)
         # Count of consecutive scans that returned zero opportunities
         self._zero_opp_count: int = 0
+
+    def set_db(self, db) -> None:
+        """Attach a TradeDB so alerts are durably persisted for the ops_alerts view
+        and the KPI digest. Safe to call once at startup."""
+        self._db = db
 
     def alert(
         self,
@@ -137,6 +145,20 @@ class AlertManager:
         }
 
         self._recent_alerts.append(alert_record)
+
+        # Durable persistence for the ops_alerts view + KPI digest (best-effort).
+        if self._db is not None:
+            try:
+                self._db.log_alert(
+                    alert_type=alert_type_str,
+                    severity=severity_str,
+                    message=message,
+                    details=json.dumps(details or {}),
+                    timestamp=alert_record["timestamp"],
+                    epoch=alert_record["epoch"],
+                )
+            except Exception:
+                logger.debug("alert persistence failed", exc_info=True)
 
         # Log it
         log_level = {

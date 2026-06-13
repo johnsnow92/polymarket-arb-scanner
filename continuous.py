@@ -982,6 +982,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     # Import alert_manager for daily resets
     try:
         from alerting import alert_manager as _alert_manager
+        # Attach the DB so alerts are durably persisted (ops_alerts view + KPI digest).
+        if _alert_manager is not None:
+            _alert_manager.set_db(db)
     except Exception:
         _alert_manager = None
 
