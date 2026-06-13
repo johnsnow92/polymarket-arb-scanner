@@ -30,6 +30,7 @@ class AlertType(str, Enum):
     PARTIAL_FILL = "PARTIAL_FILL"
     DB_WRITE_FAILURE = "DB_WRITE_FAILURE"
     HEARTBEAT = "HEARTBEAT"
+    OFF_ALLOWLIST = "OFF_ALLOWLIST"
 
 
 class Severity(str, Enum):
@@ -202,6 +203,22 @@ class AlertManager:
             AlertType.HEARTBEAT, Severity.INFO,
             f"heartbeat: {component} alive",
             {"component": component, **(extra or {})},
+        )
+
+    def alert_off_allowlist(
+        self, venue: str, opp_type: str | None = None, market: str | None = None
+    ) -> bool:
+        """Fire a CRITICAL off-allowlist-attempt alert: an opportunity tried to route to a
+        venue outside the execution allowlist (it was vetoed — zero orders placed). Hard
+        guardrail (target: off-allowlist orders = 0) → immediate page."""
+        msg = f"OFF-ALLOWLIST attempt vetoed: venue(s) {venue}"
+        if opp_type:
+            msg += f" [{opp_type}]"
+        if market:
+            msg += f" on {market}"
+        return self.alert(
+            AlertType.OFF_ALLOWLIST, Severity.CRITICAL, msg,
+            {"venue": venue, "opp_type": opp_type, "market": market},
         )
 
     def check_loss_streak(self, trade_won: bool) -> bool:

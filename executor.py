@@ -424,6 +424,15 @@ class ArbitrageExecutor:
                     prefix, ", ".join(_blocked), ", ".join(sorted(ENABLED_EXECUTION_PLATFORMS)),
                 )
                 self._log_skipped(opportunity, "off_allowlist_venue")
+                if _alert_manager:
+                    try:
+                        _alert_manager.alert_off_allowlist(
+                            venue=", ".join(_blocked),
+                            opp_type=opp_type,
+                            market=opportunity.get("market"),
+                        )
+                    except Exception as _alert_err:
+                        logger.debug("off-allowlist alert failed: %s", _alert_err)
                 if _metrics:
                     _metrics.inc(
                         "trades_failed",

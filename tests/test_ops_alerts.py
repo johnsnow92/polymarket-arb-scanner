@@ -112,3 +112,16 @@ def test_db_write_failure_fires_alert_and_reraises(monkeypatch):
 
     assert fired and fired[0][0] == "log_trade"
     assert "disk I/O" in fired[0][1]
+
+
+def test_off_allowlist_alert_is_critical():
+    """The off-allowlist guardrail-breach attempt pages immediately (CRITICAL).
+    Pairs with the executor veto, which fires this when an opportunity routes to a
+    venue outside ENABLED_EXECUTION_PLATFORMS (hard guardrail: off-allowlist orders = 0)."""
+    mgr = _mgr()
+    assert mgr.alert_off_allowlist("polymarket", opp_type="Cross", market="ETH-USD") is True
+    rec = _last(mgr)
+    assert AlertType.OFF_ALLOWLIST.value in str(rec["type"])
+    assert Severity.CRITICAL.value in str(rec["severity"])
+    assert "polymarket" in rec["message"]
+    assert "OFF-ALLOWLIST" in rec["message"]
