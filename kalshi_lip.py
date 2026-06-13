@@ -65,11 +65,14 @@ def distance_multiplier(
 
     Returns:
         Multiplier in [0, 1].
+
+    Raises:
+        ValueError: If discount_factor is outside [0, 1].
     """
-    if discount_factor >= 1.0:
+    if discount_factor < 0.0 or discount_factor > 1.0:
+        raise ValueError(f'discount_factor must be in [0, 1], got {discount_factor!r}')
+    if discount_factor == 1.0:
         return 1.0
-    if discount_factor < 0.0:
-        raise ValueError(f'discount_factor must be >= 0, got {discount_factor!r}')
     ticks = tick_distance(order_price, reference_price, tick)
     if ticks == 0:
         return 1.0
@@ -257,7 +260,9 @@ class KalshiLipScorer:
         """
         if reward_pool <= 0 or participation_share <= 0:
             return 0.0
-        if self._accumulated_score <= 0:
+        with self._lock:
+            score = self._accumulated_score
+        if score <= 0:
             return 0.0
         share = min(1.0, participation_share)
         return max(0.0, share * reward_pool)

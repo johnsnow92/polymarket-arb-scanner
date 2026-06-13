@@ -803,7 +803,6 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         if CONFIG_KALSHI_VIP_TRACK_ENABLED and kalshi_client is not None:
             from kalshi_vip import KalshiVipTracker
             _kalshi_vip_tracker = KalshiVipTracker(kalshi_client)
-            _kalshi_vip_tracker._last_poll = 0.0
             logger.info("Kalshi VIP volume tracking enabled (tracking-only).")
         if CONFIG_KALSHI_LIP_ENABLED:
             logger.info("Kalshi LIP scoring enabled; resting-order scores accrue per period.")
@@ -1501,9 +1500,10 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 # Kalshi VIP: passive volume-rebate tracking (no execution path).
                 if _kalshi_vip_tracker is not None:
                     try:
-                        now_ts = time.time()
-                        if now_ts - _kalshi_vip_tracker._last_poll >= CONFIG_KALSHI_VIP_POLL_INTERVAL:
-                            _kalshi_vip_tracker._last_poll = now_ts
+                        # Monotonic clock: immune to wall-clock jumps over a long run.
+                        now_ts = time.monotonic()
+                        if now_ts - _kalshi_vip_tracker.last_poll_ts >= CONFIG_KALSHI_VIP_POLL_INTERVAL:
+                            _kalshi_vip_tracker.last_poll_ts = now_ts
                             vip_summary = _kalshi_vip_tracker.summarize_since()
                             logger.info(
                                 "Kalshi VIP: %d eligible contracts, est. cap $%.4f",

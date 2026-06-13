@@ -889,8 +889,10 @@ class TradeDB:
         """Read reward_metrics rows for cross-engine sync.
 
         Args:
-            since_ts: Only return rows with timestamp strictly greater than this
-                Unix-seconds value (default 0 = all rows).
+            since_ts: Only return rows with timestamp at or after this
+                Unix-seconds value (default 0 = all rows). Inclusive so rows
+                written in the same second as the last sync are not skipped;
+                the downstream upsert dedupes on (engine, source_key).
 
         Returns:
             A list of dicts, oldest first, each with id, platform, market_key,
@@ -901,7 +903,7 @@ class TradeDB:
                 """SELECT id, platform, market_key, order_id, event, size, spread,
                           resting_seconds, timestamp
                    FROM reward_metrics
-                   WHERE timestamp > ?
+                   WHERE timestamp >= ?
                    ORDER BY timestamp ASC, id ASC""",
                 (since_ts,),
             )

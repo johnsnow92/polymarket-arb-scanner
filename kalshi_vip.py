@@ -62,13 +62,21 @@ def is_eligible_fill(fill: dict) -> bool:
 
 
 def _fill_count(fill: dict) -> int:
-    """Extract the contract count from a fill, defaulting to 0 on bad data."""
+    """Extract the contract count from a fill, defaulting to 0 on bad data.
+
+    Negative counts are clamped to 0 so a bad record can never push the
+    eligible/ineligible totals below zero.
+    """
     raw = fill.get('count', 0)
     try:
-        return int(raw)
+        count = int(raw)
     except (TypeError, ValueError):
         logger.warning('Kalshi fill has non-numeric count=%r', raw)
         return 0
+    if count < 0:
+        logger.warning('Kalshi fill has negative count=%r; clamping to 0', raw)
+        return 0
+    return count
 
 
 def count_eligible_contracts(fills: list[dict]) -> int:
@@ -111,6 +119,8 @@ class KalshiVipTracker:
         """
         self._client = kalshi_client
         self._lock = threading.Lock()
+        # Monotonic timestamp of the last poll; used by continuous-mode throttling.
+        self.last_poll_ts = 0.0
 
     def summarize_fills(self, fills: list[dict]) -> dict:
         """Reduce a list of fills to VIP volume metrics.

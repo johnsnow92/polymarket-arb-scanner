@@ -54,6 +54,10 @@ class TestDistanceMultiplier:
         with pytest.raises(ValueError):
             distance_multiplier(0.49, 0.50, discount_factor=-0.1)
 
+    def test_rejects_discount_factor_above_one(self):
+        with pytest.raises(ValueError):
+            distance_multiplier(0.49, 0.50, discount_factor=1.2)
+
 
 class TestSnapshotScore:
     def test_single_bid_at_best(self):

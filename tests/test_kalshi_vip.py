@@ -72,6 +72,11 @@ class TestCounting:
         fills = [_fill(yes_price=50, count='oops')]
         assert count_eligible_contracts(fills) == 0
 
+    def test_negative_count_clamped_to_zero(self):
+        # A negative count must never drag the total below zero.
+        fills = [_fill(yes_price=50, count=-30), _fill(yes_price=50, count=10)]
+        assert count_eligible_contracts(fills) == 10
+
 
 class TestRewardEstimate:
     def test_capped_at_half_cent_per_contract(self):

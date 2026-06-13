@@ -13,7 +13,7 @@ create table if not exists rewards_events (
   asset        text,
   reward_usd   numeric(14, 4),
   apy_snapshot numeric(8, 4),
-  source_key   text,                          -- dedupe key from the source engine (e.g. sqlite row id)
+  source_key   text not null,                 -- dedupe key (NOT NULL: NULLs don't dedupe under the unique constraint)
   notes        text,
   created_at   timestamptz not null default now(),
   unique (engine, source_key)

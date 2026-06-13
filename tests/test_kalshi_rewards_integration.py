@@ -52,17 +52,20 @@ class TestVipPollThrottle:
     """Replicates the continuous.py VIP poll-throttle contract."""
 
     def _poll_if_due(self, tracker, now_ts, interval):
-        if now_ts - tracker._last_poll >= interval:
-            tracker._last_poll = now_ts
+        if now_ts - tracker.last_poll_ts >= interval:
+            tracker.last_poll_ts = now_ts
             tracker.summarize_since()
             return True
         return False
+
+    def test_tracker_exposes_public_last_poll_ts(self):
+        tracker = KalshiVipTracker(MagicMock())
+        assert tracker.last_poll_ts == 0.0
 
     def test_throttle_skips_within_interval_and_fires_after(self):
         client = MagicMock()
         client.get_fills.return_value = []
         tracker = KalshiVipTracker(client)
-        tracker._last_poll = 0.0
         interval = 1800
         base = 1_700_000_000.0
 

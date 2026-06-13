@@ -108,15 +108,18 @@ class TestSyncFromDb:
     def test_sync_reads_db_and_upserts(self, tmp_path):
         from db import TradeDB
         db = TradeDB(db_path=str(tmp_path / 'trades.db'))
-        db.log_reward_metric('kalshi', 'KXBTC-26', 'ord-1', 'placed', 100.0, 0.02, 0)
-        db.log_reward_metric('kalshi', 'KXETH-26', 'ord-2', 'placed', 50.0, 0.03, 0)
+        try:
+            db.log_reward_metric('kalshi', 'KXBTC-26', 'ord-1', 'placed', 100.0, 0.02, 0)
+            db.log_reward_metric('kalshi', 'KXETH-26', 'ord-2', 'placed', 50.0, 0.03, 0)
 
-        client = _FakeClient()
-        sync = RewardSync(client, db=db)
-        n = sync.sync_reward_metrics()
-        assert n == 2
-        assert len(client.recorder['rows']) == 2
-        assert all(r['engine'] == 'kalshi-lip' for r in client.recorder['rows'])
+            client = _FakeClient()
+            sync = RewardSync(client, db=db)
+            n = sync.sync_reward_metrics()
+            assert n == 2
+            assert len(client.recorder['rows']) == 2
+            assert all(r['engine'] == 'kalshi-lip' for r in client.recorder['rows'])
+        finally:
+            db.close()
 
     def test_sync_without_db_raises(self):
         sync = RewardSync(_FakeClient())
