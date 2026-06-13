@@ -3,6 +3,8 @@ heartbeat. These are the Week-1 observability rails routed to ClaudeClaw.
 """
 from __future__ import annotations
 
+import pytest
+
 from alerting import AlertManager, AlertType, Severity
 
 
@@ -74,3 +76,39 @@ def test_helpers_record_detail_context():
     details = rec.get("details") or {}
     assert details.get("filled_legs") == 1
     assert details.get("total_legs") == 3
+
+
+def test_db_write_failure_fires_alert_and_reraises(monkeypatch):
+    """A failed commit on a critical write (db.py) fires DB_WRITE_FAILURE via the
+    lazily-imported alert_manager and re-raises so the caller still knows."""
+    import sqlite3
+
+    import alerting
+    from db import TradeDB
+
+    fired = []
+
+    class _FakeAM:
+        def alert_db_write_failure(self, operation, error):
+            fired.append((operation, str(error)))
+            return True
+
+    monkeypatch.setattr(alerting, "alert_manager", _FakeAM())
+    db = TradeDB(":memory:")
+
+    real_conn = db.conn
+
+    class _FailingCommitConn:
+        def __getattr__(self, name):
+            return getattr(real_conn, name)
+
+        def commit(self):
+            raise sqlite3.OperationalError("disk I/O error")
+
+    db.conn = _FailingCommitConn()
+
+    with pytest.raises(sqlite3.OperationalError):
+        db.log_trade(1, "kalshi", "yes", 0.5, 10.0, "pending")
+
+    assert fired and fired[0][0] == "log_trade"
+    assert "disk I/O" in fired[0][1]

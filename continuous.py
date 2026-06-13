@@ -2115,6 +2115,14 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     except Exception:
                         pass
 
+                # Process-liveness heartbeat (rate-limited to ~5 min): a dead process is
+                # detected downstream by the ABSENCE of recent heartbeats.
+                if _alert_manager:
+                    try:
+                        _alert_manager.heartbeat("continuous", {"opps": len(all_opportunities)})
+                    except Exception:
+                        pass
+
                 # Rebuild opportunity index for WS-triggered execution
                 opp_index.rebuild(all_opportunities)
 

@@ -164,6 +164,20 @@ class TradeDB:
             except sqlite3.OperationalError:
                 logger.debug("Migration: %s column already exists on partial_fills", col)
 
+    def _commit_or_alert(self, operation: str) -> None:
+        """Commit the current transaction; on failure fire a DB_WRITE_FAILURE alert
+        (a trade/position record may be lost) and re-raise so the caller still knows."""
+        try:
+            self.conn.commit()
+        except Exception as exc:
+            try:
+                from alerting import alert_manager
+                if alert_manager:
+                    alert_manager.alert_db_write_failure(operation, exc)
+            except Exception:
+                pass
+            raise
+
     def log_opportunity(
         self,
         opp_type: str,
@@ -225,7 +239,7 @@ class TradeDB:
                     order_id,
                 ),
             )
-            self.conn.commit()
+            self._commit_or_alert("log_trade")
             return cur.lastrowid
 
     def update_trade_status(self, trade_id: int, status: str, fill_price: float | None = None,
@@ -247,7 +261,7 @@ class TradeDB:
                     "UPDATE trades SET slippage = ? WHERE id = ?",
                     (slippage, trade_id),
                 )
-            self.conn.commit()
+            self._commit_or_alert("update_trade_status")
 
     def get_daily_pnl(self) -> float:
         """Get realized P&L from positions settled today, plus expected P&L from open positions today."""
@@ -332,7 +346,7 @@ class TradeDB:
                     market_ticker,
                 ),
             )
-            self.conn.commit()
+            self._commit_or_alert("create_position")
             return cur.lastrowid
 
     def settle_position(self, position_id: int, realized_pnl: float, status: str = "settled"):

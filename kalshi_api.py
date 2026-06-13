@@ -162,6 +162,17 @@ class KalshiClient:
                 timeout=30,
             )
             if resp.status_code == 429:
+                try:
+                    from alerting import alert_manager
+                    if alert_manager:
+                        _ra = resp.headers.get("Retry-After", "")
+                        try:
+                            _retry = float(_ra)
+                        except (TypeError, ValueError):
+                            _retry = None
+                        alert_manager.alert_rate_limit("kalshi", endpoint=path, retry_after=_retry)
+                except Exception:
+                    pass
                 raise _RateLimitError(f"Rate limited: {method} {path}")
             _circuit.record_success()
             return resp
