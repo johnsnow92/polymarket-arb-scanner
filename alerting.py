@@ -25,6 +25,11 @@ class AlertType(str, Enum):
     ZERO_OPP_PERIOD = "ZERO_OPP_PERIOD"
     ZERO_OPP = "ZERO_OPP"
     CREDENTIAL_FAILURE = "CREDENTIAL_FAILURE"
+    # Ops/observability alerts (Week-1 safety rails → ClaudeClaw)
+    RATE_LIMIT = "RATE_LIMIT"
+    PARTIAL_FILL = "PARTIAL_FILL"
+    DB_WRITE_FAILURE = "DB_WRITE_FAILURE"
+    HEARTBEAT = "HEARTBEAT"
 
 
 class Severity(str, Enum):
@@ -145,6 +150,59 @@ class AlertManager:
             self._send_webhook(alert_record)
 
         return True
+
+    # ------------------------------------------------------------------
+    # Ops/observability helpers (429, partial-fill, DB-write-failure, heartbeat)
+    # ------------------------------------------------------------------
+
+    def alert_rate_limit(
+        self, venue: str, endpoint: str | None = None, retry_after: float | None = None
+    ) -> bool:
+        """Fire a 429 rate-limit alert for a venue/endpoint."""
+        msg = f"HTTP 429 rate-limited on {venue}"
+        if endpoint:
+            msg += f" {endpoint}"
+        if retry_after is not None:
+            msg += f" (retry after {retry_after:.0f}s)"
+        return self.alert(
+            AlertType.RATE_LIMIT, Severity.WARNING, msg,
+            {"venue": venue, "endpoint": endpoint, "retry_after": retry_after},
+        )
+
+    def alert_partial_fill(
+        self, opp_type: str, filled_legs: int, total_legs: int, market: str | None = None
+    ) -> bool:
+        """Fire a CRITICAL partial-fill alert: one or more legs filled while others did
+        not, leaving naked exposure on the filled leg(s). Surfaces every naked-leg event
+        for the hard guardrail (target: naked-leg events = 0)."""
+        msg = (
+            f"PARTIAL FILL on {opp_type}: {filled_legs}/{total_legs} legs filled "
+            f"— naked exposure"
+        )
+        if market:
+            msg += f" on {market}"
+        return self.alert(
+            AlertType.PARTIAL_FILL, Severity.CRITICAL, msg,
+            {"opp_type": opp_type, "filled_legs": filled_legs,
+             "total_legs": total_legs, "market": market},
+        )
+
+    def alert_db_write_failure(self, operation: str, error: object) -> bool:
+        """Fire a CRITICAL DB-write-failure alert (a trade/position record may be lost)."""
+        return self.alert(
+            AlertType.DB_WRITE_FAILURE, Severity.CRITICAL,
+            f"DB write failed during {operation}: {error}",
+            {"operation": operation, "error": str(error)},
+        )
+
+    def heartbeat(self, component: str = "continuous", extra: dict | None = None) -> bool:
+        """Emit a process-liveness heartbeat (INFO). Rate-limited like any alert, so a
+        dead process is detectable by the absence of recent heartbeats downstream."""
+        return self.alert(
+            AlertType.HEARTBEAT, Severity.INFO,
+            f"heartbeat: {component} alive",
+            {"component": component, **(extra or {})},
+        )
 
     def check_loss_streak(self, trade_won: bool) -> bool:
         """Record a trade result and fire an alert if a loss streak is detected.

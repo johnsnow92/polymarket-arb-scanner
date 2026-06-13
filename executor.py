@@ -2666,6 +2666,20 @@ class ArbitrageExecutor:
 
         # Check if all legs succeeded
         all_filled = len(results) == len(legs) and all(results.values())
+        # Naked-leg detector: some legs filled but not all → naked exposure on the
+        # filled leg(s). Surface immediately to ClaudeClaw (guardrail: naked-leg
+        # events = 0). The unfilled legs are already marked aborted/failed above.
+        _filled_count = sum(1 for _v in results.values() if _v)
+        if not all_filled and _filled_count > 0 and _alert_manager:
+            try:
+                _alert_manager.alert_partial_fill(
+                    opp_type=opportunity.get("type", "unknown"),
+                    filled_legs=_filled_count,
+                    total_legs=len(legs),
+                    market=opportunity.get("market"),
+                )
+            except Exception as _alert_err:
+                logger.debug("partial-fill alert failed: %s", _alert_err)
         if all_filled:
             # Create position in DB for lifecycle tracking.
             # Derive platform from legs themselves so settlement checks dispatch
