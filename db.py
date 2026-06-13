@@ -965,6 +965,28 @@ class TradeDB:
             )
             self.conn.commit()
 
+    def get_reward_metrics(self, since_ts: int = 0) -> list[dict]:
+        """Read reward_metrics rows for cross-engine sync.
+
+        Args:
+            since_ts: Only return rows with timestamp strictly greater than this
+                Unix-seconds value (default 0 = all rows).
+
+        Returns:
+            A list of dicts, oldest first, each with id, platform, market_key,
+            order_id, event, size, spread, resting_seconds, timestamp.
+        """
+        with self._lock:
+            cursor = self.conn.execute(
+                """SELECT id, platform, market_key, order_id, event, size, spread,
+                          resting_seconds, timestamp
+                   FROM reward_metrics
+                   WHERE timestamp > ?
+                   ORDER BY timestamp ASC, id ASC""",
+                (since_ts,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     # ---------------------------------------------------------------------
     # Treasury / auto-rebalance audit (Strategy #18)
     # ---------------------------------------------------------------------
