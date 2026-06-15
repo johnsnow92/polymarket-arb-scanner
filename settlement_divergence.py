@@ -21,10 +21,14 @@ fires, and populate the store from a scheduled rule-comparison job.
 """
 from __future__ import annotations
 
+import logging
+import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Protocol
+
+logger = logging.getLogger(__name__)
 
 # A stored MATCH older than this is treated as STALE and vetoed. Finite by design:
 # there is NO "disabled" setting, because an unbounded freshness window would make
@@ -38,13 +42,25 @@ class SettlementVerdict(str, Enum):
     UNCERTAIN = "uncertain"  # comparison inconclusive — treat as unsafe
 
 
+# A verdict may legitimately arrive as the enum OR as a raw string (an LLM wrapper
+# emitting "match", or a row deserialized from the DB); ``_coerce_verdict`` is the
+# validating boundary that turns either into a trusted enum or rejects it.
+VerdictValue = SettlementVerdict | str
+
+
 def _coerce_verdict(value: object) -> SettlementVerdict | None:
-    """Best-effort coerce a stored/produced verdict to the enum, else None.
+    """Best-effort coerce a stored/produced verdict to the enum, else ``None``.
 
     A verdict can arrive as a plain string — an LLM wrapper returning ``"match"``,
     or a row deserialized from the DB. It must not crash the gate on ``.value`` or
-    slip through unchecked. Unrecognized values return None so the caller fails
+    slip through unchecked; unrecognized values return ``None`` so the caller fails
     closed rather than trusting malformed data.
+
+    Args:
+        value: A ``SettlementVerdict`` or any value to coerce (typically a string).
+
+    Returns:
+        The matching ``SettlementVerdict``, or ``None`` if unrecognized.
     """
     if isinstance(value, SettlementVerdict):
         return value
@@ -54,17 +70,47 @@ def _coerce_verdict(value: object) -> SettlementVerdict | None:
         return None
 
 
+def _finite_float(value: object) -> float | None:
+    """Coerce a timing value to a finite ``float``, or ``None`` when malformed.
+
+    A ``NaN`` compares False against every bound (so it would slip past both the
+    future-dated and stale checks), and ``inf`` would disable the freshness window
+    — both must be rejected so the gate stays fail-closed on bad config or rows.
+
+    Args:
+        value: A value expected to be a finite number of seconds.
+
+    Returns:
+        The value as a finite ``float``, or ``None`` if non-numeric or non-finite.
+    """
+    try:
+        result = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 @dataclass(frozen=True)
 class RuleComparison:
     """The stored result of one offline settlement-rule comparison."""
     pair_key: str
-    verdict: SettlementVerdict
+    verdict: VerdictValue
     rationale: str
     compared_at: float       # unix seconds when the comparison was made
 
 
 def pair_key(venue_a: str, id_a: str, venue_b: str, id_b: str) -> str:
-    """Canonical, order-independent key for a cross-venue market pair."""
+    """Canonical, order-independent key for a cross-venue market pair.
+
+    Args:
+        venue_a: First venue slug (e.g. ``"polymarket"``).
+        id_a: First venue's market id.
+        venue_b: Second venue slug (e.g. ``"kalshi"``).
+        id_b: Second venue's market id.
+
+    Returns:
+        A stable ``"lo|hi"`` key, identical regardless of argument order.
+    """
     a = f"{venue_a.strip().lower()}:{id_a.strip()}"
     b = f"{venue_b.strip().lower()}:{id_b.strip()}"
     lo, hi = sorted((a, b))
@@ -107,16 +153,22 @@ def settlement_divergence_veto(
 ) -> tuple[bool, str]:
     """Deterministic fail-closed veto for one cross-venue pair.
 
-    Returns ``(vetoed, reason)``. The pair may fire ONLY when a fresh MATCH
-    verdict is on file; everything else vetoes:
-      * no verdict on file         -> veto (never pair blind),
-      * unrecognized verdict value -> veto (don't trust malformed data),
-      * DIVERGE / UNCERTAIN        -> veto,
-      * future-dated verdict       -> veto (clock/config error — don't trust it),
-      * MATCH older than max_age_s -> veto (settlement rules can change).
-
+    The pair may fire ONLY when a fresh MATCH verdict is on file; everything else
+    vetoes — a missing verdict, an unrecognized value, DIVERGE / UNCERTAIN, a
+    non-finite or future-dated timestamp, or a MATCH older than ``max_age_s``.
     ``max_age_s`` is always enforced — there is no "disabled" setting, so a config
     or clock mistake can never turn the gate fail-open.
+
+    Args:
+        key: The canonical pair key (see :func:`pair_key`).
+        store: The verdict store to read from.
+        max_age_s: Max age in seconds for a MATCH to count as fresh. Must be a
+            finite, non-negative number; a malformed value vetoes.
+        now: Current unix time, injectable for tests; defaults to ``time.time()``.
+
+    Returns:
+        ``(vetoed, reason)`` — ``(False, "")`` only on a fresh MATCH, otherwise
+        ``(True, <human-readable reason>)``.
     """
     comparison = store.get(key)
     if comparison is None:
@@ -128,21 +180,32 @@ def settlement_divergence_veto(
     if verdict is not SettlementVerdict.MATCH:
         return True, f"settlement {verdict.value} for {key}: {comparison.rationale}"
 
-    age = (now if now is not None else time.time()) - comparison.compared_at
+    # Validate timing is finite before comparing — a NaN slips past every numeric
+    # bound and inf would disable the window, so either must veto (fail-closed).
+    max_age = _finite_float(max_age_s)
+    if max_age is None or max_age < 0:
+        return True, f"invalid settlement max_age_s {max_age_s!r} for {key} — veto (fail-closed)"
+    compared_at = _finite_float(comparison.compared_at)
+    current_time = _finite_float(now if now is not None else time.time())
+    if compared_at is None or current_time is None:
+        return True, f"invalid settlement timestamp for {key} — veto (fail-closed)"
+
+    age = current_time - compared_at
     if age < 0:
         return True, f"settlement MATCH for {key} is future-dated ({age:.0f}s) — veto (clock/config error)"
-    if age > max_age_s:
-        return True, f"settlement MATCH for {key} is stale ({age:.0f}s > {max_age_s:.0f}s) — re-compare"
+    if age > max_age:
+        return True, f"settlement MATCH for {key} is stale ({age:.0f}s > {max_age:.0f}s) — re-compare"
     return False, ""
 
 
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Offline pre-compute — the ONLY place the (LLM) comparator runs. Never the gate.
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 # Compares two settlement-rule texts → (verdict, rationale). Backed by an LLM in
-# production; injected so the deterministic plumbing is tested without one.
-RuleComparator = Callable[[str, str], "tuple[SettlementVerdict, str]"]
+# production; injected so the deterministic plumbing is tested without one. The
+# verdict may be the enum or a raw string — precompute coerces it before storing.
+RuleComparator = Callable[[str, str], "tuple[VerdictValue, str]"]
 
 
 def precompute_comparison(
@@ -156,9 +219,24 @@ def precompute_comparison(
     """Run the comparator on two rule texts OFFLINE and store the verdict.
 
     This is a scheduled pre-trade job, never the execution path — the gate later
-    reads the stored verdict deterministically (and never holds a comparator).
-    The comparator's verdict is normalized to the enum so a string-returning LLM
+    reads the stored verdict deterministically (and never holds a comparator). The
+    comparator's verdict is normalized to the enum so a string-returning LLM
     wrapper can't persist an invalid type that would later break the gate.
+
+    Args:
+        key: The canonical pair key (see :func:`pair_key`).
+        rules_a: Settlement-rule text for the first venue.
+        rules_b: Settlement-rule text for the second venue.
+        comparator: Callable returning ``(verdict, rationale)``; the verdict may be
+            the enum or a string.
+        store: A writable store to persist the result into.
+        now: Current unix time, injectable for tests; defaults to ``time.time()``.
+
+    Returns:
+        The stored :class:`RuleComparison`.
+
+    Raises:
+        ValueError: If the comparator returns an unrecognized verdict.
     """
     verdict_raw, rationale = comparator(rules_a, rules_b)
     verdict = _coerce_verdict(verdict_raw)

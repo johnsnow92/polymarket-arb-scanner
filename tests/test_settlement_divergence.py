@@ -27,15 +27,15 @@ def _store(verdict=None, rationale="", at=1000.0, key="k"):
 
 
 class TestSettlementDivergence:
-    # -- pair key --------------------------------------------------------------
-
+    # ---------------------------------------------------------------------------
+    # Pair key
     def test_pair_key_is_order_independent(self):
         assert pair_key("polymarket", "0xABC", "kalshi", "KXBTC-Y") == pair_key(
             "kalshi", "KXBTC-Y", "polymarket", "0xABC"
         )
 
-    # -- fail-closed veto ------------------------------------------------------
-
+    # ---------------------------------------------------------------------------
+    # Fail-closed veto
     def test_veto_when_no_verdict_on_file(self):
         vetoed, reason = settlement_divergence_veto("k", _store())
         assert vetoed is True
@@ -60,7 +60,7 @@ class TestSettlementDivergence:
     def test_unrecognized_verdict_is_vetoed(self):
         # A bogus verdict string (e.g. a bad DB row) must veto, not crash on `.value`.
         s = InMemoryVerdictStore()
-        s.put(RuleComparison("k", "totally-bogus", "manual row", 1000.0))  # type: ignore[arg-type]
+        s.put(RuleComparison("k", "totally-bogus", "manual row", 1000.0))
         vetoed, reason = settlement_divergence_veto("k", s, now=1000.0)
         assert vetoed is True
         assert "unrecognized" in reason
@@ -68,11 +68,11 @@ class TestSettlementDivergence:
     def test_string_match_verdict_is_honored(self):
         # A MATCH stored as a plain string (LLM wrapper) is coerced, not rejected.
         s = InMemoryVerdictStore()
-        s.put(RuleComparison("k", "match", "stringy", 1000.0))  # type: ignore[arg-type]
+        s.put(RuleComparison("k", "match", "stringy", 1000.0))
         assert settlement_divergence_veto("k", s, now=1000.0)[0] is False
 
-    # -- staleness (settlement rules can change) -------------------------------
-
+    # ---------------------------------------------------------------------------
+    # Staleness and non-finite timing (settlement rules can change)
     def test_stale_match_is_vetoed(self):
         s = _store(SettlementVerdict.MATCH, "ok", at=0.0)
         vetoed, reason = settlement_divergence_veto("k", s, max_age_s=3600.0, now=10_000.0)
@@ -99,8 +99,28 @@ class TestSettlementDivergence:
         assert vetoed is True
         assert "future-dated" in reason
 
-    # -- offline pre-compute populates the store the gate reads ----------------
+    def test_nan_now_is_vetoed(self):
+        # A NaN timestamp slips past every numeric bound — must veto fail-closed.
+        s = _store(SettlementVerdict.MATCH, "ok", at=1000.0)
+        vetoed, reason = settlement_divergence_veto("k", s, now=float("nan"))
+        assert vetoed is True
+        assert "invalid settlement timestamp" in reason
 
+    def test_inf_max_age_is_vetoed(self):
+        # An infinite window would disable freshness — must veto fail-closed.
+        s = _store(SettlementVerdict.MATCH, "ok", at=1000.0)
+        vetoed, reason = settlement_divergence_veto("k", s, max_age_s=float("inf"), now=1000.0)
+        assert vetoed is True
+        assert "invalid settlement max_age_s" in reason
+
+    def test_nan_compared_at_is_vetoed(self):
+        s = _store(SettlementVerdict.MATCH, "ok", at=float("nan"))
+        vetoed, reason = settlement_divergence_veto("k", s, now=1000.0)
+        assert vetoed is True
+        assert "invalid settlement timestamp" in reason
+
+    # ---------------------------------------------------------------------------
+    # Offline pre-compute populates the store the gate reads
     def test_precompute_stores_verdict_and_gate_then_allows(self):
         store = InMemoryVerdictStore()
 
@@ -120,10 +140,10 @@ class TestSettlementDivergence:
     def test_precompute_normalizes_string_verdict(self):
         # An LLM wrapper returning a plain string is coerced to the enum, stored valid.
         store = InMemoryVerdictStore()
-        c = precompute_comparison("k", "x", "x", lambda a, b: ("match", "stringy"), store, now=1.0)  # type: ignore[arg-type,return-value]
+        c = precompute_comparison("k", "x", "x", lambda a, b: ("match", "stringy"), store, now=1.0)
         assert c.verdict is SettlementVerdict.MATCH
 
     def test_precompute_rejects_unrecognized_verdict(self):
         store = InMemoryVerdictStore()
         with pytest.raises(ValueError, match="unrecognized verdict"):
-            precompute_comparison("k", "x", "y", lambda a, b: ("maybe", "?"), store)  # type: ignore[arg-type,return-value]
+            precompute_comparison("k", "x", "y", lambda a, b: ("maybe", "?"), store)
