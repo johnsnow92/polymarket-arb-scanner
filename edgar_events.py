@@ -17,9 +17,16 @@ with synthetic filings. Amendments (``/A``) are treated as their base form.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Public types and constants
+# ---------------------------------------------------------------------------
 
 class EdgarEventType(str, Enum):
     ODD_LOT_TENDER = "odd_lot_tender"
@@ -35,6 +42,10 @@ ACTIVIST_FILERS = frozenset({
     "bulldog investors",
 })
 
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Filing:
@@ -54,21 +65,40 @@ class EdgarEvent:
     note: str
 
 
-def _canonical_form(form_type: str) -> str:
-    """Normalize a form type: drop the /A amendment suffix, spaces, hyphens, upper.
+# ---------------------------------------------------------------------------
+# Classification
+# ---------------------------------------------------------------------------
 
-    'SC TO-I/A' -> 'SCTOI', 'SC 13E3' -> 'SC13E3', 'S-4' -> 'S4', 'SC 13D/A' -> 'SC13D'.
+def _canonical_form(form_type: str) -> str:
+    """Normalize a form type for matching (drop ``/A``, spaces, hyphens; uppercase).
+
+    Args:
+        form_type: Raw SEC form type (e.g. ``"SC TO-I/A"``, ``"SC 13E3"``).
+
+    Returns:
+        The canonical form: ``"SC TO-I/A" -> "SCTOI"``, ``"S-4" -> "S4"``,
+        ``"SC 13D/A" -> "SC13D"``.
     """
     base = (form_type or "").upper().split("/")[0]
     return base.replace(" ", "").replace("-", "").strip()
 
 
 def classify_filing(filing: Filing, activist_filers=ACTIVIST_FILERS) -> EdgarEvent | None:
-    """Map a filing to an EdgarEvent, or None if it isn't a watched signal."""
+    """Map a filing to an EdgarEvent, or ``None`` if it isn't a watched signal.
+
+    Args:
+        filing: The SEC filing to classify.
+        activist_filers: Watched activist filer substrings for SC 13D matching.
+
+    Returns:
+        An ``EdgarEvent`` for a watched signal, otherwise ``None``.
+    """
     form = _canonical_form(filing.form_type)
 
-    if form == "SCTOI":  # issuer tender offer — only interesting with an odd-lot provision
-        if "odd lot" in (filing.body_excerpt or "").lower():
+    if form == "SCTOI":  # issuer tender offer — only of interest with an odd-lot provision
+        # Normalize hyphens so "odd-lot" (common filing phrasing) matches too.
+        body = (filing.body_excerpt or "").lower().replace("-", " ")
+        if "odd lot" in body:
             return EdgarEvent(
                 EdgarEventType.ODD_LOT_TENDER,
                 filing,
@@ -93,6 +123,10 @@ def classify_filing(filing: Filing, activist_filers=ACTIVIST_FILERS) -> EdgarEve
     return None
 
 
+# ---------------------------------------------------------------------------
+# Alert formatting + batch scan
+# ---------------------------------------------------------------------------
+
 _HEADERS = {
     EdgarEventType.ODD_LOT_TENDER: "🎯 Odd-lot tender",
     EdgarEventType.GOING_PRIVATE: "🏷️ Going-private (13E-3)",
@@ -102,7 +136,14 @@ _HEADERS = {
 
 
 def format_edgar_alert(event: EdgarEvent) -> str:
-    """Render a Telegram ticket. Always ends with the human-only reminder."""
+    """Render a Telegram ticket for an event, ending with the human-only reminder.
+
+    Args:
+        event: The classified EDGAR event to format.
+
+    Returns:
+        A multi-line Telegram-ready alert string.
+    """
     f = event.filing
     lines = [
         f"{_HEADERS[event.type]} — {f.subject}",
@@ -117,7 +158,15 @@ def format_edgar_alert(event: EdgarEvent) -> str:
 
 
 def scan_filings(filings, activist_filers=ACTIVIST_FILERS) -> list[EdgarEvent]:
-    """Classify a batch of filings, dropping non-matches."""
+    """Classify a batch of filings, returning only the matched events.
+
+    Args:
+        filings: Iterable of ``Filing`` records to classify.
+        activist_filers: Watched activist filer substrings for SC 13D matching.
+
+    Returns:
+        The list of ``EdgarEvent`` for filings that matched a watched signal.
+    """
     out: list[EdgarEvent] = []
     for f in filings:
         event = classify_filing(f, activist_filers)
