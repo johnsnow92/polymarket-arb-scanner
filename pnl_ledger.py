@@ -17,15 +17,15 @@ formatter (``digest.py``) are separate.
 """
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date
+
+logger = logging.getLogger(__name__)
 
 # The fixed three-bucket tax model (see command-center 14-TAX-TRACKER).
 TAX_BUCKETS = frozenset({"ordinary", "possible_1256", "gambling"})
-
-
-class PnlError(ValueError):
-    """Raised on a malformed or mis-tagged P&L entry."""
 
 
 @dataclass(frozen=True)
@@ -34,13 +34,17 @@ class PnlEntry:
     lane: str            # 'prediction-markets' | 'perp_carry' | 'sports' | ...
     tax_bucket: str      # must be in TAX_BUCKETS
     amount_usd: float    # signed realized P&L for this fill/period
-    trade_date: str      # ISO date
+    trade_date: str      # ISO date (YYYY-MM-DD)
 
     def __post_init__(self) -> None:
         if self.tax_bucket not in TAX_BUCKETS:
-            raise PnlError(f"tax_bucket {self.tax_bucket!r} not in {sorted(TAX_BUCKETS)}")
-        if not self.engine or not self.lane:
-            raise PnlError("engine and lane are required on every P&L entry")
+            raise ValueError(f"tax_bucket {self.tax_bucket!r} not in {sorted(TAX_BUCKETS)}")
+        if not self.engine.strip() or not self.lane.strip():
+            raise ValueError("engine and lane are required on every P&L entry")
+        try:
+            date.fromisoformat(self.trade_date)
+        except ValueError as exc:
+            raise ValueError("trade_date must be ISO format YYYY-MM-DD") from exc
 
 
 @dataclass(frozen=True)
@@ -81,7 +85,11 @@ def clears_hurdle(
     The policy: a lane that can't beat the 4.70% LOC rate (after tax + labor)
     should send its capital to the LOC instead. Returns ``(cleared, hurdle_usd)``.
     Non-positive capital or days returns ``(False, 0.0)`` — nothing to beat.
+    The hurdle rate is a policy floor; a negative rate is rejected so a config
+    mistake can't silently mark a losing lane as having cleared the bar.
     """
+    if hurdle_rate_annual < 0:
+        raise ValueError("hurdle_rate_annual is a policy floor and must be non-negative")
     if deployed_capital_usd <= 0 or days_held <= 0:
         return False, 0.0
     hurdle_usd = deployed_capital_usd * hurdle_rate_annual * (days_held / 365.0)
