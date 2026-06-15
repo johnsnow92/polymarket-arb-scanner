@@ -22,9 +22,9 @@ def _e(engine, lane, bucket, amount, trade_date="2026-06-13"):
 
 
 class TestPnlLedger:
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
     # Entry validation (tagging must be correct from trade one)
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
 
     def test_rejects_unknown_tax_bucket(self):
         with pytest.raises(ValueError, match="tax_bucket"):
@@ -44,13 +44,20 @@ class TestPnlLedger:
         with pytest.raises(ValueError, match="ISO"):
             _e("arbgrid", "x", "ordinary", 1.0, trade_date="06/13/2026")
 
+    def test_rejects_non_string_inputs(self):
+        # None / int bypass strip() and fromisoformat() — must normalize to ValueError.
+        with pytest.raises(ValueError):
+            PnlEntry(engine=None, lane="x", tax_bucket="ordinary", amount_usd=1.0, trade_date="2026-06-13")
+        with pytest.raises(ValueError, match="ISO"):
+            PnlEntry(engine="arbgrid", lane="x", tax_bucket="ordinary", amount_usd=1.0, trade_date=20260613)
+
     def test_accepts_each_valid_bucket(self):
         for bucket in ("ordinary", "possible_1256", "gambling"):
             assert _e("arbgrid", "x", bucket, 1.0).tax_bucket == bucket
 
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
     # Aggregation
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
 
     def test_rolls_up_by_engine_lane_and_bucket(self):
         entries = [
@@ -75,9 +82,9 @@ class TestPnlLedger:
         assert s.total_usd == 0.0
         assert s.by_engine == {}
 
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
     # Capital-policy hurdle (4.70% LOC floor)
-    # -----------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
 
     def test_hurdle_cleared_when_pnl_beats_loc_floor(self):
         # $10K deployed at the 4.70% LOC rate for a quarter → hurdle ≈ $117.

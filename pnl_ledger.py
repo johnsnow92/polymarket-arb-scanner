@@ -39,8 +39,11 @@ class PnlEntry:
     def __post_init__(self) -> None:
         if self.tax_bucket not in TAX_BUCKETS:
             raise ValueError(f"tax_bucket {self.tax_bucket!r} not in {sorted(TAX_BUCKETS)}")
-        if not self.engine.strip() or not self.lane.strip():
-            raise ValueError("engine and lane are required on every P&L entry")
+        if (not isinstance(self.engine, str) or not isinstance(self.lane, str)
+                or not self.engine.strip() or not self.lane.strip()):
+            raise ValueError("engine and lane must be non-empty strings on every P&L entry")
+        if not isinstance(self.trade_date, str):
+            raise ValueError("trade_date must be ISO format YYYY-MM-DD")
         try:
             date.fromisoformat(self.trade_date)
         except ValueError as exc:
