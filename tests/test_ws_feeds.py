@@ -21,7 +21,7 @@ mock_kalshi.KALSHI_BASE_URL = "https://api.elections.kalshi.com"
 mock_kalshi.KALSHI_API_PATH = "/trade-api/v2"
 sys.modules["kalshi_api"] = mock_kalshi
 
-from ws_feeds import FeedManager, BetfairFeed, RECONNECT_DELAY, RECONNECT_MAX_DELAY
+from ws_feeds import FeedManager, BetfairFeed, RECONNECT_DELAY, RECONNECT_MAX_DELAY, _STREAM_LIMIT
 
 # Restore the original kalshi_api module so other test files aren't polluted
 if _original_kalshi is not None:
@@ -62,6 +62,20 @@ class TestBetfairReadLine:
         feed._reader.readuntil = _boom
         with pytest.raises(ConnectionError, match="closed mid-message"):
             asyncio.run(feed._read_line())
+
+    def test_connect_uses_bounded_stream_limit(self, monkeypatch):
+        # Audit S13: the StreamReader must be created with the bounded limit.
+        feed = self._feed()
+        captured = {}
+
+        async def _open_connection(*_args, **kwargs):
+            captured["kwargs"] = kwargs
+            raise ConnectionError("stop after open")
+
+        monkeypatch.setattr("ws_feeds.asyncio.open_connection", _open_connection)
+        with pytest.raises(ConnectionError, match="stop after open"):
+            asyncio.run(feed.connect())
+        assert captured["kwargs"]["limit"] == _STREAM_LIMIT
 
 
 def _make_feed(mock_callback: MagicMock) -> FeedManager:

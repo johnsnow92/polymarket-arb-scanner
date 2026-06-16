@@ -7,6 +7,7 @@ import time
 
 import requests
 
+import config
 from config import MATCHBOOK_RATE_LIMIT
 from rate_limiter import PlatformCircuitBreaker
 
@@ -284,8 +285,7 @@ class MatchbookClient:
         # DRY_RUN guard (audit S12): honor the flag at the client boundary so a
         # direct place_order() call can never hit the live venue when DRY_RUN=true,
         # independent of the executor's own guard.
-        from config import DRY_RUN
-        if DRY_RUN:
+        if config.DRY_RUN:
             logger.info(
                 "Matchbook place_order DRY_RUN — not placed (%s runner=%s odds=%.3f stake=%.2f)",
                 side, runner_id, odds, stake,
@@ -371,8 +371,7 @@ class MatchbookClient:
         """
         if not self.authenticated:
             return False
-        from config import DRY_RUN
-        if DRY_RUN:
+        if config.DRY_RUN:
             logger.info("Matchbook cancel_order DRY_RUN — not cancelling offer %s", offer_id)
             return True
         if _circuit.is_open():

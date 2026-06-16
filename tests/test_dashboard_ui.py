@@ -45,8 +45,13 @@ class TestRenderSmoke:
         # Audit S07: the CDN script must be integrity-pinned so a CDN compromise
         # can't inject arbitrary JS into the trading dashboard.
         html = dashboard_ui.get_dashboard_html()
-        assert 'integrity="sha384-' in html
+        assert 'src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"' in html
+        assert (
+            'integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC"'
+            in html
+        )
         assert 'crossorigin="anonymous"' in html
+        assert 'referrerpolicy="no-referrer"' in html
 
 
 # ---------------------------------------------------------------------------
