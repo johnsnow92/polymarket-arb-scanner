@@ -543,8 +543,9 @@ class TradeDB:
         """Get realized P&L per strategy type by joining trades with opportunities.
 
         Uses the opportunities.net_profit column as a proxy for trade P&L since
-        the trades table does not have a dedicated pnl column. Each trade leg is
-        counted; win_count is based on the parent opportunity's net_profit > 0.
+        the trades table does not have a dedicated pnl column. net_profit and
+        win_count are aggregated once per opportunity (de-duplicated across its
+        trade legs); trade_count is the number of trade legs.
 
         Returns:
             List of dicts with keys: strategy, trade_count, win_count,
@@ -552,14 +553,27 @@ class TradeDB:
         """
         with self._lock:
             rows = self.conn.execute(
-                """SELECT o.type AS strategy,
-                          COUNT(t.id) AS trade_count,
-                          SUM(CASE WHEN o.net_profit > 0 THEN 1 ELSE 0 END) AS win_count,
-                          COALESCE(SUM(o.net_profit), 0) AS total_pnl,
-                          COALESCE(AVG(o.net_profit), 0) AS avg_profit
-                   FROM trades t
-                   JOIN opportunities o ON t.opportunity_id = o.id
-                   GROUP BY o.type
+                """WITH opp_pnl AS (
+                       SELECT DISTINCT o.id, o.type, o.net_profit
+                       FROM opportunities o
+                       WHERE EXISTS (
+                           SELECT 1 FROM trades t WHERE t.opportunity_id = o.id
+                       )
+                   ),
+                   leg_counts AS (
+                       SELECT o.type AS type, COUNT(t.id) AS trade_count
+                       FROM trades t
+                       JOIN opportunities o ON t.opportunity_id = o.id
+                       GROUP BY o.type
+                   )
+                   SELECT p.type AS strategy,
+                          lc.trade_count AS trade_count,
+                          SUM(CASE WHEN p.net_profit > 0 THEN 1 ELSE 0 END) AS win_count,
+                          COALESCE(SUM(p.net_profit), 0) AS total_pnl,
+                          COALESCE(AVG(p.net_profit), 0) AS avg_profit
+                   FROM opp_pnl p
+                   JOIN leg_counts lc ON lc.type = p.type
+                   GROUP BY p.type, lc.trade_count
                    ORDER BY total_pnl DESC"""
             ).fetchall()
             return [

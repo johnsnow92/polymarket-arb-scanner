@@ -323,3 +323,27 @@ class TestMatchbookRequest:
             status_code=404, text="Not Found"
         )
         assert client._request("GET", "/missing") is None
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker on order methods (audit C-3/B42)
+# ---------------------------------------------------------------------------
+
+class TestMatchbookCircuitBreaker:
+    def test_place_order_skips_when_circuit_open(self, client, monkeypatch):
+        monkeypatch.setattr(matchbook_api._circuit, "is_open", lambda: True)
+        assert client.place_order("mkt", "run", "back", 2.0, 5.0) is None
+        client.session.post.assert_not_called()
+
+    def test_cancel_order_skips_when_circuit_open(self, client, monkeypatch):
+        monkeypatch.setattr(matchbook_api._circuit, "is_open", lambda: True)
+        assert client.cancel_order("offer-1") is False
+        client.session.delete.assert_not_called()
+
+    def test_place_order_records_failure_on_non_2xx(self, client, monkeypatch):
+        monkeypatch.setattr(matchbook_api._circuit, "is_open", lambda: False)
+        recorded = []
+        monkeypatch.setattr(matchbook_api._circuit, "record_failure", lambda: recorded.append(1))
+        client.session.post.return_value = MagicMock(status_code=500, text="err")
+        client.place_order("mkt", "run", "back", 2.0, 5.0)
+        assert recorded  # non-2xx records a circuit failure
