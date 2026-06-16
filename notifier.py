@@ -11,6 +11,8 @@ from urllib.parse import quote as urlquote
 
 import requests
 
+from url_guard import assert_public_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,11 @@ class WebhookNotifier:
         self._is_callmebot = url.startswith("callmebot")
         if self._is_callmebot and (not self._callmebot_phone or not self._callmebot_apikey):
             logger.warning("WEBHOOK_URL set to callmebot but CALLMEBOT_PHONE / CALLMEBOT_APIKEY not set.")
+
+        # SSRF guard: a generic webhook URL (WEBHOOK_URL env) is POSTed the full
+        # opportunity payload — refuse hosts that resolve to internal addresses.
+        if self.url and self.url.startswith(("http://", "https://")):
+            assert_public_url(self.url, env_name="WEBHOOK_URL")
 
     # ---------------------------------------------------------------------------
     # Public API

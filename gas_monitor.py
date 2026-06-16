@@ -6,6 +6,8 @@ import time
 
 import requests
 
+from url_guard import assert_public_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +68,12 @@ class GasMonitor:
             self.polygon_rpc_url = os.getenv(
                 "POLYGON_RPC_URL", "https://polygon-rpc.com"
             )
+
+        # SSRF guard: the RPC endpoint is read from env and POSTed JSON-RPC; an
+        # injected internal URL would let gas calls reach the internal network.
+        self.polygon_rpc_url = assert_public_url(
+            self.polygon_rpc_url, env_name="POLYGON_RPC_URL"
+        )
 
         self.cache_ttl = cache_ttl
         self.safety_margin = safety_margin
