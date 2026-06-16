@@ -63,6 +63,16 @@ class TestUrlGuard:
         with pytest.raises(ValueError, match="non-public"):
             assert_public_url("http://2130706433", env_name="POLYGON_RPC_URL")
 
+    @pytest.mark.parametrize("url", [
+        "http://127.1",            # a.b shorthand → 127.0.0.1
+        "http://0x7f000001",       # hex → 127.0.0.1
+        "http://0177.0.0.1",       # octal → 127.0.0.1
+        "http://100.64.0.1",       # CGNAT 100.64.0.0/10 — non-global, not is_private
+    ])
+    def test_legacy_and_non_global_ip_forms_rejected(self, url):
+        with pytest.raises(ValueError, match="non-public"):
+            assert_public_url(url, env_name="POLYGON_RPC_URL")
+
     # -----------------------------------------------------------------------
     # Rejects internal hostnames
     # -----------------------------------------------------------------------

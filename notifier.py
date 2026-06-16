@@ -54,7 +54,7 @@ class WebhookNotifier:
         # padded value can't skip the check; assert_public_url enforces the
         # scheme and strips whitespace.
         if self.url and not self._is_telegram and not self._is_callmebot:
-            assert_public_url(self.url, env_name="WEBHOOK_URL")
+            self.url = assert_public_url(self.url, env_name="WEBHOOK_URL")
 
     # ---------------------------------------------------------------------------
     # Public API

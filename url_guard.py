@@ -31,6 +31,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import socket
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,12 @@ def _private_urls_allowed() -> bool:
 
 
 def _is_internal_ip(ip) -> bool:
+    # `not is_global` is the catch-all — it covers CGNAT (100.64.0.0/10) and
+    # other non-global ranges the specific flags miss; the explicit flags stay
+    # for clarity and belt-and-suspenders.
     return bool(
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_reserved
@@ -58,15 +63,23 @@ def _is_internal_ip(ip) -> bool:
 
 
 def _as_ip(host: str):
-    """Return the IP for an IP-literal host (dotted or decimal), else None."""
+    """Return the IP for an IP-literal host, else None.
+
+    Covers canonical dotted-quad, decimal/integer (2130706433 == 127.0.0.1), and
+    the resolver-accepted legacy IPv4 forms (127.1, 0x7f000001, 0177.0.0.1) that
+    ``ipaddress`` rejects but ``inet_aton`` and ``requests`` both accept.
+    """
     try:
         return ipaddress.ip_address(host)
     except ValueError:
         pass
-    # Decimal/integer-encoded IPs, e.g. http://2130706433 == 127.0.0.1.
     try:
         return ipaddress.ip_address(int(host))
     except (ValueError, OverflowError):
+        pass
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(host))
+    except OSError:
         return None
 
 
