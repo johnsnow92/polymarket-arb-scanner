@@ -290,7 +290,10 @@ class MatchbookClient:
                 "Matchbook place_order DRY_RUN — not placed (%s runner=%s odds=%.3f stake=%.2f)",
                 side, runner_id, odds, stake,
             )
-            return {"dry_run": True, "market-id": market_id, "runner-id": runner_id,
+            # Mirror the live success shape (id/status) so callers that read
+            # resp["id"] don't get an empty order id; "DRY_RUN" is unmistakable.
+            return {"id": "DRY_RUN", "status": "dry_run", "dry_run": True,
+                    "market-id": market_id, "runner-id": runner_id,
                     "side": side, "odds": odds, "stake": stake}
 
         if _circuit.is_open():

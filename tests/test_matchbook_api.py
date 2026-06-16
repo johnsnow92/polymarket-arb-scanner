@@ -55,6 +55,7 @@ class TestMatchbookDryRun:
         with patch("config.DRY_RUN", True):
             result = client.place_order("mkt1", "run1", "back", 2.0, 10.0)
         assert result is not None and result["dry_run"] is True
+        assert result["id"] == "DRY_RUN"          # caller reads resp["id"] for the order id
         client.session.post.assert_not_called()
 
     def test_cancel_order_dry_run_does_not_delete(self, client):
