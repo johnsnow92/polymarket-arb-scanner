@@ -50,7 +50,10 @@ class WebhookNotifier:
 
         # SSRF guard: a generic webhook URL (WEBHOOK_URL env) is POSTed the full
         # opportunity payload — refuse hosts that resolve to internal addresses.
-        if self.url and self.url.startswith(("http://", "https://")):
+        # Validate any non-sentinel URL so a mixed-case scheme (HTTP://…) or a
+        # padded value can't skip the check; assert_public_url enforces the
+        # scheme and strips whitespace.
+        if self.url and not self._is_telegram and not self._is_callmebot:
             assert_public_url(self.url, env_name="WEBHOOK_URL")
 
     # ---------------------------------------------------------------------------

@@ -384,18 +384,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?")[0]
 
-        # Read the full request body upfront to avoid connection resets
-        post_body = b""
-        try:
-            content_len = int(self.headers.get("Content-Length", 0))
-            if content_len > 0:
-                post_body = self.rfile.read(content_len)
-        except Exception as e:
-            logger.debug("Dashboard POST body read error: %s", e)
-
-        # Fail closed (audit S06): state-changing endpoints (kill-switch, resume,
-        # purge, fund-transfer) must never run without a configured password —
-        # even on loopback, where reads are otherwise allowed unauthenticated.
+        # Fail closed BEFORE reading the body (audit S06): state-changing
+        # endpoints (kill-switch, resume, purge, fund-transfer) require a
+        # configured password, and an unauthenticated client must not be able to
+        # make the server read an arbitrarily large POST body first.
         from config import DASHBOARD_PASS
         if not DASHBOARD_PASS:
             logger.error("Dashboard POST %s denied — DASHBOARD_PASS is not set", path)
@@ -403,6 +395,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if not _check_auth(self):
             return
+
+        # Read the full request body (after auth) to avoid connection resets.
+        post_body = b""
+        try:
+            content_len = int(self.headers.get("Content-Length", 0))
+            if content_len > 0:
+                post_body = self.rfile.read(content_len)
+        except Exception as e:
+            logger.debug("Dashboard POST body read error: %s", e)
 
         post_routes = {
             "/api/pause": self._handle_pause_post,

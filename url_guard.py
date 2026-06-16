@@ -88,6 +88,7 @@ def assert_public_url(url: str, *, env_name: str = "", allow_http: bool = True) 
     label = env_name or "url"
     if not isinstance(url, str) or not url.strip():
         raise ValueError(f"{label} is empty or not a string")
+    url = url.strip()  # tolerate copy/paste whitespace in env vars
 
     parsed = urlparse(url)
     allowed = _ALLOWED_SCHEMES if allow_http else frozenset({"https"})

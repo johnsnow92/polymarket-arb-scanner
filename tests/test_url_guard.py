@@ -28,6 +28,15 @@ class TestUrlGuard:
     def test_public_ip_literal_passes(self):
         assert assert_public_url("https://93.184.216.34", env_name="WEBHOOK_URL")
 
+    def test_leading_trailing_whitespace_stripped(self):
+        assert assert_public_url("  https://api.gemini.com\n", env_name="GEMINI_BASE_URL") == (
+            "https://api.gemini.com"
+        )
+
+    def test_uppercase_scheme_internal_rejected(self):
+        with pytest.raises(ValueError, match="non-public"):
+            assert_public_url("HTTP://127.0.0.1", env_name="WEBHOOK_URL")
+
     # -----------------------------------------------------------------------
     # Rejects the SSRF vectors (internal IP literals)
     # -----------------------------------------------------------------------
