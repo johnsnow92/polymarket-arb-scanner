@@ -358,6 +358,44 @@ class KalshiClient:
         logger.error("Kalshi place_order HTTP %s: %s (ticker=%s)", resp.status_code, resp.text[:300], ticker)
         return None
 
+    def get_fills(self, limit: int = 200, max_pages: int = 5,
+                  min_ts: int | None = None) -> list[dict]:
+        """Fetch this account's executed trade fills from /portfolio/fills.
+
+        Fills are the authoritative record of contracts traded (VIP volume),
+        distinct from settlements which only cover resolved positions. Each
+        fill includes ticker, side, action, count, yes_price/no_price (cents),
+        is_taker, and created_time.
+
+        Args:
+            limit: Page size per request.
+            max_pages: Maximum pages to walk (cursor pagination).
+            min_ts: Optional Unix seconds lower bound; passed as ``min_ts``.
+
+        Returns:
+            A list of fill records, newest first.
+        """
+        fills: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            params: dict = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            if min_ts is not None:
+                params["min_ts"] = min_ts
+            resp = self._request("GET", "/portfolio/fills", params=params)
+            if not resp or resp.status_code != 200:
+                logger.warning("Kalshi get_fills failed: %s",
+                               resp.status_code if resp is not None else "no response")
+                break
+            data = resp.json()
+            page = data.get("fills", [])
+            fills.extend(page)
+            cursor = data.get("cursor")
+            if not cursor or not page:
+                break
+        return fills
+
     def get_order_status(self, order_id: str) -> dict | None:
         """Get the status of a specific order.
 

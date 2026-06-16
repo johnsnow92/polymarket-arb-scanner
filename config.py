@@ -420,6 +420,13 @@ REWARDS_MAX_SPREAD = _env_float("REWARDS_MAX_SPREAD", "0.05")
 REWARDS_POLL_INTERVAL = _env_int("REWARDS_POLL_INTERVAL", "60")
 REWARDS_MIN_RESTING_TIME = _env_int("REWARDS_MIN_RESTING_TIME", "300")
 
+# Kalshi Liquidity Incentive Program (LIP) — snapshot scoring of resting orders.
+KALSHI_LIP_ENABLED = _env_bool("KALSHI_LIP_ENABLED", "false")
+# Kalshi Volume Incentive Program (VIP) — passive volume-rebate tracking.
+KALSHI_VIP_TRACK_ENABLED = _env_bool("KALSHI_VIP_TRACK_ENABLED", "false")
+# VIP fills polling interval (seconds); tracking-only, never an execution path.
+KALSHI_VIP_POLL_INTERVAL = _env_int("KALSHI_VIP_POLL_INTERVAL", "1800")
+
 # Kalshi multi-outcome execution gating (kill-switch + depth check)
 # Set to false to disable KalshiMulti scanning/execution entirely.
 KALSHI_MULTI_ENABLED = _env_bool("KALSHI_MULTI_ENABLED", "true")
@@ -1089,6 +1096,7 @@ def validate_config() -> list[str]:
         "ALERT_LOSS_STREAK_THRESHOLD": ALERT_LOSS_STREAK_THRESHOLD,
         "STALE_PRICE_THRESHOLD": STALE_PRICE_THRESHOLD,
         "BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS": BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS,
+        "KALSHI_VIP_POLL_INTERVAL": KALSHI_VIP_POLL_INTERVAL,
     }
     for name, val in _positive.items():
         if val <= 0:
