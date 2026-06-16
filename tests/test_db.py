@@ -245,3 +245,24 @@ class TestSlippage:
         db.conn.commit()
         avg = db.get_avg_slippage()
         assert avg == pytest.approx(0.02)  # Only counts the one with data
+
+
+# ---------------------------------------------------------------------------
+# Strategy P&L — no double-count across trade legs (audit M-1/B28)
+# ---------------------------------------------------------------------------
+
+class TestStrategyPnl:
+    def test_net_profit_counted_once_per_opportunity_not_per_leg(self, db):
+        # One opportunity, two trade legs (a cross-platform arb). total_pnl must
+        # equal the opportunity's net_profit ONCE, not doubled by the leg count.
+        opp_id = db.log_opportunity(
+            "CrossPlatform", "M", "", 0.95, 0.05, 0.0526, 100.0, "traded",
+        )
+        db.log_trade(opp_id, "polymarket", "BUY", 0.45, 5.0, "filled")
+        db.log_trade(opp_id, "kalshi", "BUY", 0.50, 5.0, "filled")
+
+        rows = db.get_strategy_pnl()
+        cross = next(r for r in rows if r["strategy"] == "CrossPlatform")
+        assert cross["total_pnl"] == pytest.approx(0.05)   # once, not 0.10
+        assert cross["win_count"] == 1                     # one opportunity, not two legs
+        assert cross["trade_count"] == 2                   # two legs counted
