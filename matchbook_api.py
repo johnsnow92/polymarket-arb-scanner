@@ -368,6 +368,8 @@ class MatchbookClient:
             if resp.status_code in (200, 204):
                 _circuit.record_success()
                 return True
+            logger.warning("Matchbook cancel_order: %s %s",
+                           resp.status_code, resp.text[:200])
             _circuit.record_failure()
             return False
         except requests.RequestException as exc:

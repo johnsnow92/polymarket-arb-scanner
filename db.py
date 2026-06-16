@@ -543,8 +543,9 @@ class TradeDB:
         """Get realized P&L per strategy type by joining trades with opportunities.
 
         Uses the opportunities.net_profit column as a proxy for trade P&L since
-        the trades table does not have a dedicated pnl column. Each trade leg is
-        counted; win_count is based on the parent opportunity's net_profit > 0.
+        the trades table does not have a dedicated pnl column. net_profit and
+        win_count are aggregated once per opportunity (de-duplicated across its
+        trade legs); trade_count is the number of trade legs.
 
         Returns:
             List of dicts with keys: strategy, trade_count, win_count,

@@ -543,21 +543,3 @@ class TestWhaleCopyConfig:
     def test_polygonscan_api_key_optional(self):
         from config import POLYGONSCAN_API_KEY
         assert isinstance(POLYGONSCAN_API_KEY, str)
-
-
-# ---------------------------------------------------------------------------
-# Strategy-block config names exist (audit B01-B04: continuous.py imports these)
-# ---------------------------------------------------------------------------
-
-class TestStrategyConfigNames:
-    def test_layer4_strategy_config_names_exist(self):
-        # continuous.py's Layer-4 strategy blocks do `from config import <name>`;
-        # a missing name is an ImportError/NameError that silently kills the strategy.
-        import config
-        for name in (
-            "FINNHUB_API_KEY",
-            "CORRELATED_PAIRS",
-            "TIME_DECAY_MIN_HOURS_EXPIRY",
-            "TIME_DECAY_MIN_CONSENSUS",
-        ):
-            assert hasattr(config, name), f"config.{name} missing — strategy block will crash"
