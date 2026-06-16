@@ -281,6 +281,21 @@ class MatchbookClient:
         if not self.authenticated:
             return None
 
+        # DRY_RUN guard (audit S12): honor the flag at the client boundary so a
+        # direct place_order() call can never hit the live venue when DRY_RUN=true,
+        # independent of the executor's own guard.
+        from config import DRY_RUN
+        if DRY_RUN:
+            logger.info(
+                "Matchbook place_order DRY_RUN — not placed (%s runner=%s odds=%.3f stake=%.2f)",
+                side, runner_id, odds, stake,
+            )
+            # Mirror the live success shape (id/status) so callers that read
+            # resp["id"] don't get an empty order id; "DRY_RUN" is unmistakable.
+            return {"id": "DRY_RUN", "status": "dry_run", "dry_run": True,
+                    "market-id": market_id, "runner-id": runner_id,
+                    "side": side, "odds": odds, "stake": stake}
+
         if _circuit.is_open():
             logger.warning("Matchbook place_order skipped: circuit open")
             return None
@@ -356,6 +371,10 @@ class MatchbookClient:
         """
         if not self.authenticated:
             return False
+        from config import DRY_RUN
+        if DRY_RUN:
+            logger.info("Matchbook cancel_order DRY_RUN — not cancelling offer %s", offer_id)
+            return True
         if _circuit.is_open():
             logger.warning("Matchbook cancel_order skipped: circuit open")
             return False
