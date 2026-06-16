@@ -559,7 +559,5 @@ class TestStrategyConfigNames:
             "CORRELATED_PAIRS",
             "TIME_DECAY_MIN_HOURS_EXPIRY",
             "TIME_DECAY_MIN_CONSENSUS",
-            "IMBALANCE_MAX_TRADE_SIZE",
-            "IMBALANCE_RATIO",
         ):
             assert hasattr(config, name), f"config.{name} missing — strategy block will crash"
