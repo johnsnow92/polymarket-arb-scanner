@@ -17,8 +17,8 @@ from fallen_angel import (  # noqa: E402
 )
 
 
-def _chg(from_r, to_r, issuer="Acme Corp"):
-    return RatingChange(issuer=issuer, from_rating=from_r, to_rating=to_r, agency="S&P")
+def _chg(from_r, to_r, issuer="Acme Corp", agency="S&P"):
+    return RatingChange(issuer=issuer, from_rating=from_r, to_rating=to_r, agency=agency)
 
 
 class TestFallenAngel:
@@ -47,7 +47,7 @@ class TestFallenAngel:
         assert is_fallen_angel(_chg("BBB-", "BB+")) is True
 
     def test_fallen_angel_moodys_crossover(self):
-        assert is_fallen_angel(_chg("Baa2", "Ba1")) is True
+        assert is_fallen_angel(_chg("Baa2", "Ba1", agency="Moody's")) is True
 
     def test_downgrade_within_ig_is_not_fallen_angel(self):
         assert is_fallen_angel(_chg("A", "BBB")) is False
@@ -79,7 +79,7 @@ class TestFallenAngel:
         changes = [
             _chg("BBB-", "BB+", issuer="A"),   # fallen angel
             _chg("A", "BBB", issuer="B"),       # within IG
-            _chg("Baa3", "Ba1", issuer="C"),    # fallen angel (Moody's)
+            _chg("Baa3", "Ba1", issuer="C", agency="Moody's"),  # fallen angel (Moody's)
             _chg("BB", "B", issuer="D"),        # within HY
         ]
         events = scan_rating_changes(changes)
