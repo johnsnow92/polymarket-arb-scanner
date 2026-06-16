@@ -15,6 +15,11 @@ class TestWebhookNotifier:
         n = WebhookNotifier("https://example.com/hook")
         assert n.min_profit == 0.01
 
+    def test_rejects_internal_url_even_with_uppercase_scheme(self):
+        # SSRF guard must not be bypassed by a mixed-case scheme (audit follow-up).
+        with pytest.raises(ValueError):
+            WebhookNotifier("HTTP://127.0.0.1/hook")
+
     def test_notify_skips_when_no_qualifying_opportunities(self):
         n = WebhookNotifier("https://example.com/hook", min_profit=1.0)
         with patch.object(n, "_send") as mock_send:

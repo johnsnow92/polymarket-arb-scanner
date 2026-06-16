@@ -14,6 +14,8 @@ import os
 import time
 from typing import Any
 
+from url_guard import assert_public_url
+
 logger = logging.getLogger(__name__)
 
 GJO_API_URL = os.getenv("GJO_API_URL", "https://www.gjopen.com/api/v1")
@@ -43,6 +45,10 @@ class SuperforecasterClient:
         self.gjo_api_key = gjo_api_key or GJO_API_KEY
         self.infer_api_key = infer_api_key or INFER_API_KEY
         self.cache_ttl = cache_ttl
+        # SSRF guard: GJO_API_URL / INFER_API_URL are env-configurable and receive
+        # Bearer-token requests — refuse endpoints that resolve to internal hosts.
+        assert_public_url(GJO_API_URL, env_name="GJO_API_URL", allow_http=False)
+        assert_public_url(INFER_API_URL, env_name="INFER_API_URL", allow_http=False)
         self._cache: dict[str, dict] = {}
         self._cache_timestamps: dict[str, float] = {}
 
