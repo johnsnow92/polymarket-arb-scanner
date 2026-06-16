@@ -52,18 +52,39 @@ class FallenAngelEvent:
 
 
 def rating_rank(rating: str) -> int | None:
-    """Ordinal rank for a rating notch (S&P/Fitch or Moody's), or None if unknown."""
+    """Ordinal rank for a rating notch (S&P/Fitch or Moody's).
+
+    Args:
+        rating: A rating notch such as "BBB-" or "Baa3" (case/space-insensitive).
+
+    Returns:
+        The ordinal rank (lower = better credit), or None if the notch is unknown.
+    """
     return _RANK.get((rating or "").strip().upper())
 
 
 def is_investment_grade(rating: str) -> bool:
-    """True iff the rating is BBB-/Baa3 or better (a known IG notch)."""
+    """Whether a rating notch is investment grade.
+
+    Args:
+        rating: A rating notch (S&P/Fitch or Moody's).
+
+    Returns:
+        True iff the rating is BBB-/Baa3 or better (a known IG notch).
+    """
     rank = rating_rank(rating)
     return rank is not None and rank <= _IG_FLOOR
 
 
 def is_fallen_angel(change: RatingChange) -> bool:
-    """True iff the change crosses IG → HY (the forced-selling trigger)."""
+    """Whether a rating change crosses investment grade into high yield.
+
+    Args:
+        change: The rating change to test.
+
+    Returns:
+        True iff the change crosses IG → HY (the forced-selling trigger).
+    """
     f = rating_rank(change.from_rating)
     t = rating_rank(change.to_rating)
     if f is None or t is None:
@@ -72,7 +93,14 @@ def is_fallen_angel(change: RatingChange) -> bool:
 
 
 def is_rising_star(change: RatingChange) -> bool:
-    """The opposite crossover: HY → IG (informational; not the sleeve trigger)."""
+    """Whether a rating change crosses high yield into investment grade.
+
+    Args:
+        change: The rating change to test.
+
+    Returns:
+        True iff the change crosses HY → IG (informational; not the sleeve trigger).
+    """
     f = rating_rank(change.from_rating)
     t = rating_rank(change.to_rating)
     if f is None or t is None:
@@ -81,7 +109,14 @@ def is_rising_star(change: RatingChange) -> bool:
 
 
 def classify_fallen_angel(change: RatingChange) -> FallenAngelEvent | None:
-    """A FallenAngelEvent for an IG→HY crossover, else None."""
+    """Classify a rating change as a fallen-angel event.
+
+    Args:
+        change: The rating change to classify.
+
+    Returns:
+        A FallenAngelEvent for an IG→HY crossover, else None.
+    """
     if not is_fallen_angel(change):
         return None
     f = rating_rank(change.from_rating)
@@ -95,8 +130,15 @@ def classify_fallen_angel(change: RatingChange) -> FallenAngelEvent | None:
     )
 
 
-def scan_rating_changes(changes) -> list[FallenAngelEvent]:
-    """Classify a batch of rating changes, keeping only fallen angels."""
+def scan_rating_changes(changes: list[RatingChange]) -> list[FallenAngelEvent]:
+    """Classify a batch of rating changes, keeping only fallen angels.
+
+    Args:
+        changes: Rating changes to classify.
+
+    Returns:
+        The FallenAngelEvent for each IG→HY crossover, in input order.
+    """
     out: list[FallenAngelEvent] = []
     for c in changes:
         event = classify_fallen_angel(c)
