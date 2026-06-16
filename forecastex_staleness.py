@@ -48,7 +48,7 @@ class StalenessAlert:
 
 
 def detect_staleness(
-    pairs,
+    pairs: list[MatchedPair],
     now: float,
     max_age_s: float = 900.0,
     min_divergence: float = 0.05,
