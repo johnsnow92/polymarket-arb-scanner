@@ -1517,7 +1517,6 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if args.mode in ("all", "imbalance") and CONFIG_IMBALANCE_ENABLED:
                     try:
                         from scans.imbalance import scan_imbalance
-                        from config import IMBALANCE_RATIO, IMBALANCE_MAX_TRADE
                         # Build markets_by_key dict for CLOB refinement
                         _markets_by_key_imbalance: dict[str, dict] = {}
                         if poly_markets:
@@ -1539,7 +1538,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if args.mode in ("all", "news-snipe") and CONFIG_NEWS_SNIPE_ENABLED:
                     try:
                         from scans.news_snipe import scan_news_snipe
-                        from config import NEWS_SNIPE_CONFIDENCE_THRESHOLD, NEWS_SNIPE_MAX_TRADE
+                        from config import (
+                            NEWS_SNIPE_CONFIDENCE_THRESHOLD, NEWS_SNIPE_MAX_TRADE, FINNHUB_API_KEY,
+                        )
                         if not FINNHUB_API_KEY:
                             logger.debug("NEWS_SNIPE_ENABLED but FINNHUB_API_KEY not set")
                         else:
@@ -1563,11 +1564,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if args.mode in ("all", "correlated") and CONFIG_CORRELATED_ENABLED:
                     try:
                         from scans.correlated import scan_correlated
-                        from config import CORRELATION_DIVERGENCE_THRESHOLD, CORRELATED_PAIRS_CONFIG
+                        from config import CORRELATION_DIVERGENCE_THRESHOLD, CORRELATED_PAIRS
                         correlated_opps = scan_correlated(
                             poly_markets=poly_markets if poly_markets else [],
                             kalshi_data=kalshi_data,
-                            correlated_pairs=CORRELATED_PAIRS_CONFIG,
+                            correlated_pairs=CORRELATED_PAIRS,
                             divergence_threshold=CORRELATION_DIVERGENCE_THRESHOLD,
                             min_profit=min_profit,
                         )
@@ -1580,8 +1581,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     try:
                         from scans.time_decay import scan_time_decay
                         from config import (
-                            TIME_DECAY_HOURS_THRESHOLD, TIME_DECAY_MIN_CONSENSUS,
-                            TIME_DECAY_MAX_TRADE
+                            TIME_DECAY_MIN_HOURS_EXPIRY, TIME_DECAY_MIN_CONSENSUS,
                         )
                         from signal_aggregator import SignalAggregator
                         _time_decay_aggregator = SignalAggregator()
@@ -1589,7 +1589,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                             poly_markets=poly_markets if poly_markets else [],
                             kalshi_data=kalshi_data,
                             signal_aggregator=_time_decay_aggregator,
-                            hours_threshold=TIME_DECAY_HOURS_THRESHOLD,
+                            hours_threshold=TIME_DECAY_MIN_HOURS_EXPIRY,
                             min_consensus=TIME_DECAY_MIN_CONSENSUS,
                             min_profit=min_profit,
                         )

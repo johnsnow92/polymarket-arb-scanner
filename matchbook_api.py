@@ -281,6 +281,9 @@ class MatchbookClient:
         if not self.authenticated:
             return None
 
+        if _circuit.is_open():
+            logger.warning("Matchbook place_order skipped: circuit open")
+            return None
         _rate_limit()
         try:
             resp = self.session.post(
@@ -294,12 +297,15 @@ class MatchbookClient:
                 timeout=30,
             )
             if resp.status_code in (200, 201):
+                _circuit.record_success()
                 return resp.json()
             logger.error("Matchbook place_order: %s %s",
                          resp.status_code, resp.text[:200])
+            _circuit.record_failure()
             return None
         except requests.RequestException as exc:
             logger.error("Matchbook place_order failed: %s", exc)
+            _circuit.record_failure()
             return None
 
     def get_balance(self) -> float | None:
@@ -350,15 +356,23 @@ class MatchbookClient:
         """
         if not self.authenticated:
             return False
+        if _circuit.is_open():
+            logger.warning("Matchbook cancel_order skipped: circuit open")
+            return False
         _rate_limit()
         try:
             resp = self.session.delete(
                 f"{MATCHBOOK_API_URL}/offers/{offer_id}",
                 timeout=30,
             )
-            return resp.status_code in (200, 204)
+            if resp.status_code in (200, 204):
+                _circuit.record_success()
+                return True
+            _circuit.record_failure()
+            return False
         except requests.RequestException as exc:
             logger.warning("Matchbook cancel_order failed: %s", exc)
+            _circuit.record_failure()
             return False
 
     def fetch_all_markets(self) -> list[dict]:
