@@ -41,6 +41,9 @@ POLYMARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
 RECONNECT_DELAY = 5  # initial seconds before reconnect attempt
 RECONNECT_MAX_DELAY = 60  # maximum backoff delay
+# Bound a single Betfair stream message (audit S13): cap the StreamReader buffer
+# so a server that never sends CRLF can't grow it unboundedly toward OOM.
+_STREAM_LIMIT = 4 * 1024 * 1024  # 4 MiB
 KEEPALIVE_INTERVAL = 10  # seconds between pings
 
 
@@ -861,7 +864,7 @@ class BetfairFeed:
         ssl_ctx = ssl.create_default_context()
 
         self._reader, self._writer = await asyncio.open_connection(
-            self._host, self._port, ssl=ssl_ctx,
+            self._host, self._port, ssl=ssl_ctx, limit=_STREAM_LIMIT,
         )
         logger.info("Betfair stream: TCP connected to %s:%d", self._host, self._port)
 
@@ -928,7 +931,16 @@ class BetfairFeed:
         """Read one CRLF-delimited JSON message from the stream."""
         if self._reader is None:
             raise ConnectionError("Betfair stream: not connected")
-        raw = await self._reader.readuntil(b"\r\n")
+        try:
+            raw = await self._reader.readuntil(b"\r\n")
+        except asyncio.LimitOverrunError as exc:
+            # Audit S13: a line larger than the buffer limit (e.g. a server that
+            # never sends CRLF) must not grow unbounded — force a reconnect.
+            raise ConnectionError(
+                f"Betfair stream: message exceeded {_STREAM_LIMIT} bytes — reconnecting"
+            ) from exc
+        except asyncio.IncompleteReadError as exc:
+            raise ConnectionError("Betfair stream: connection closed mid-message") from exc
         return json.loads(raw.strip())
 
     async def _subscribe(self, market_ids: list[str]):
