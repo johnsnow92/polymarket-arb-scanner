@@ -117,3 +117,39 @@ class TestSend:
         n._session.post.side_effect = requests.RequestException("timeout")
         # Should not raise
         n._send([{"type": "Binary", "market": "T", "net_profit": 0.05, "net_roi": "5%", "prices": "Y=0.45"}])
+
+
+class TestNotifyText:
+    """notify_text() is the synchronous alert channel the EDGAR cron uses."""
+
+    def test_telegram_routes_synchronously(self):
+        n = WebhookNotifier("telegram")
+        with patch.object(n, "_send_telegram") as send, \
+                patch("notifier.threading.Thread") as thread:
+            n.notify_text("hello world")
+        send.assert_called_once_with("hello world")
+        thread.assert_not_called()  # synchronous — must flush before a cron exits
+
+    def test_empty_message_is_noop(self):
+        n = WebhookNotifier("telegram")
+        with patch.object(n, "_send_telegram") as send:
+            n.notify_text("")
+        send.assert_not_called()
+
+    def test_generic_webhook_wraps_message(self):
+        n = WebhookNotifier("https://example.com/hook")
+        with patch.object(n, "_send_raw") as raw:
+            n.notify_text("alert text")
+        raw.assert_called_once_with({"message": "alert text"})
+
+    def test_slack_payload(self):
+        n = WebhookNotifier("https://hooks.slack.com/services/T/B/X")
+        with patch.object(n, "_send_raw") as raw:
+            n.notify_text("alert text")
+        raw.assert_called_once_with({"text": "alert text"})
+
+    def test_discord_payload(self):
+        n = WebhookNotifier("https://discord.com/api/webhooks/1/abc")
+        with patch.object(n, "_send_raw") as raw:
+            n.notify_text("alert text")
+        raw.assert_called_once_with({"content": "alert text"})

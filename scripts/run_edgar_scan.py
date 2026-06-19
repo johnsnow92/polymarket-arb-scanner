@@ -30,10 +30,11 @@ import os
 import re
 import sys
 import time
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import defusedxml.ElementTree as ET
 import requests
+from defusedxml.common import DefusedXmlException
 
 # Allow `from edgar_events import ...` / `from notifier import ...` when run as
 # a script from the repo root (scripts/ would otherwise be sys.path[0]).
@@ -43,7 +44,7 @@ from edgar_events import Filing, format_edgar_alert, scan_filings  # noqa: E402
 from notifier import WebhookNotifier  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # The form types worth a ticket (see edgar_events module docstring).
 WATCHED_FORMS = ["SC TO-I", "SC 13E3", "S-4", "SC 13D"]
@@ -109,12 +110,14 @@ def parse_atom(xml_text: str) -> list[dict]:
     """Parse a getcurrent Atom feed into a list of raw entry dicts.
 
     Namespace-agnostic so it survives the default Atom namespace. Each dict has
-    ``form_type``, ``company``, ``accession``, ``filed_at`` and ``url``.
+    ``form_type``, ``company``, ``accession``, ``filed_at`` and ``url``. Parses
+    with defusedxml: the feed is network-sourced, so malformed XML or a hostile
+    entity-expansion / XXE payload degrades to an empty feed rather than raising.
     """
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
-        log.warning("EDGAR feed parse failed: %s", exc)
+    except (ET.ParseError, DefusedXmlException) as exc:
+        logger.warning("EDGAR feed parse failed: %s", exc)
         return []
 
     entries: list[dict] = []
@@ -182,7 +185,7 @@ def load_seen(path: Path | None) -> set[str]:
     try:
         return set(json.loads(path.read_text()).get("seen", []))
     except (ValueError, OSError) as exc:
-        log.warning("EDGAR state read failed (%s) — treating as empty", exc)
+        logger.warning("EDGAR state read failed (%s) — treating as empty", exc)
         return set()
 
 
@@ -194,7 +197,7 @@ def save_seen(path: Path | None, seen: set[str]) -> None:
     try:
         path.write_text(json.dumps({"seen": trimmed}))
     except OSError as exc:
-        log.warning("EDGAR state write failed: %s", exc)
+        logger.warning("EDGAR state write failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +211,7 @@ def _get(session: requests.Session, url: str, ua: str, timeout: int = 20) -> str
         resp.raise_for_status()
         return resp.text
     except requests.RequestException as exc:
-        log.warning("EDGAR fetch failed for %s: %s", url, exc)
+        logger.warning("EDGAR fetch failed for %s: %s", url, exc)
         return None
 
 
@@ -271,6 +274,25 @@ def collect_events(session: requests.Session, ua: str, count: int):
     return events, scanned
 
 
+def select_new_events(events, seen: set[str]):
+    """Filter matched events down to genuinely new, dedupable ones.
+
+    An event is new when it has a non-empty accession that is neither already in
+    ``seen`` (prior runs) nor repeated earlier in this same batch (feeds can
+    echo an entry). Events with no accession are dropped — they can't be deduped,
+    so alerting them would re-fire on every run.
+    """
+    new_events = []
+    batch: set[str] = set()
+    for event in events:
+        acc = event.filing.accession
+        if not acc or acc in seen or acc in batch:
+            continue
+        batch.add(acc)
+        new_events.append(event)
+    return new_events
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -287,7 +309,7 @@ def main() -> None:
 
     ua = (os.getenv("SEC_USER_AGENT") or "").strip()
     if not ua:
-        log.warning(
+        logger.warning(
             "SEC_USER_AGENT not set — SEC's fair-access policy 403s requests "
             "without a declaring contact UA (e.g. 'arbgrid you@example.com'). "
             "Skipping scan. Cron-safe exit."
@@ -297,31 +319,38 @@ def main() -> None:
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
     session = requests.Session()
-    log.info("Scanning EDGAR getcurrent for: %s", ", ".join(WATCHED_FORMS))
+    logger.info("Scanning EDGAR getcurrent for: %s", ", ".join(WATCHED_FORMS))
     events, scanned = collect_events(session, ua, args.count)
 
     seen = load_seen(args.state_file)
-    new_events = [e for e in events if e.filing.accession not in seen]
-    log.info("Scanned %d filings; %d matched, %d new", scanned, len(events), len(new_events))
+    new_events = select_new_events(events, seen)
+    logger.info("Scanned %d filings; %d matched, %d new", scanned, len(events), len(new_events))
 
+    alerted: set[str] = set()
     if not token or not chat_id:
-        log.warning(
+        would_fire = ", ".join(
+            f"{e.type.value}:{e.filing.accession}" for e in new_events
+        ) or "none"
+        logger.warning(
             "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — not alerting "
-            "(%d new events would have fired). Cron-safe exit.", len(new_events)
+            "(%d new events would have fired: %s). Cron-safe exit.",
+            len(new_events), would_fire,
         )
     else:
         notifier = WebhookNotifier("telegram")
         for event in new_events:
             notifier.notify_text(format_edgar_alert(event))
-            log.info("Alerted: %s %s", event.type.value, event.filing.accession)
+            alerted.add(event.filing.accession)
+            logger.info("Alerted: %s %s", event.type.value, event.filing.accession)
         if args.always_alert:
             notifier.notify_text(
                 f"🛰️ EDGAR watcher alive — scanned {scanned} filings across "
                 f"{len(WATCHED_FORMS)} forms, {len(new_events)} new event(s)."
             )
 
-    # Record everything matched this run so we never re-alert it.
-    seen.update(e.filing.accession for e in events if e.filing.accession)
+    # Record only what we actually alerted, so a credentials outage doesn't
+    # permanently suppress events once creds are restored.
+    seen.update(alerted)
     save_seen(args.state_file, seen)
 
 
