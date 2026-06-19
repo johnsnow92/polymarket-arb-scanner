@@ -9,9 +9,12 @@ remaining digest sections are named honestly as not-yet-wired rather than faked.
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 
 from pnl_ledger import PnlSummary, aggregate_pnl, clears_hurdle
+
+logger = logging.getLogger(__name__)
 
 # Capital-policy floors (command-center capital policy, set 2026-06-12).
 LOC_FLOOR_ANNUAL = 0.047
@@ -31,6 +34,7 @@ def _week_start(d: date) -> date:
 
 
 def _month_start(d: date) -> date:
+    """First day of ``d``'s month."""
     return d.replace(day=1)
 
 
@@ -61,14 +65,30 @@ def entries_in_window(entries, asof: date, window: str) -> list:
 
 
 def _fmt_usd(amount: float) -> str:
+    """Format a signed USD amount, sign before the dollar (e.g. -$3.00)."""
     sign = "-" if amount < 0 else ""
     return f"{sign}${abs(amount):,.2f}"
 
 
 def _kv_lines(mapping: dict[str, float]) -> list[str]:
+    """Render a {key: amount} map as indented digest lines."""
     if not mapping:
         return ["  (none)"]
     return [f"  {k}: {_fmt_usd(v)}" for k, v in sorted(mapping.items())]
+
+
+def _hurdle_line(mtd: PnlSummary, asof: date, deployed_capital_usd: float | None) -> str:
+    """One-line LOC-floor verdict (if capital given) or the floor/pace reference."""
+    if deployed_capital_usd and deployed_capital_usd > 0:
+        days_held = (asof - _month_start(asof)).days + 1
+        cleared, hurdle_usd = clears_hurdle(
+            mtd.total_usd, LOC_FLOOR_ANNUAL, deployed_capital_usd, days_held
+        )
+        verdict = "beats" if cleared else "below"
+        return (f"Hurdle: MTD {verdict} the {LOC_FLOOR_ANNUAL:.2%} LOC floor "
+                f"({_fmt_usd(hurdle_usd)} over {days_held}d on "
+                f"{_fmt_usd(deployed_capital_usd)} deployed).")
+    return f"Hurdle floor {LOC_FLOOR_ANNUAL:.2%} (LOC) · pace ~{VOO_PACE_ANNUAL:.0%} (VOO)."
 
 
 def format_pnl_digest(entries, *, asof: date, deployed_capital_usd: float | None = None) -> str:
@@ -84,36 +104,28 @@ def format_pnl_digest(entries, *, asof: date, deployed_capital_usd: float | None
     wtd = aggregate_pnl(entries_in_window(entries, asof, "wtd"))
     mtd: PnlSummary = aggregate_pnl(entries_in_window(entries, asof, "mtd"))
 
-    lines = [
-        f"📊 *Portfolio P&L digest* — {asof.isoformat()}",
-        "",
-        (f"*Net P&L*  day {_fmt_usd(day.total_usd)} · "
+    # The data block is wrapped in a ``` code fence: lane / tax-bucket keys like
+    # "perp_carry" / "possible_1256" carry underscores, which Telegram Markdown
+    # would read as italics delimiters and reject the whole send ("can't parse
+    # entities"). Inside a fence the text is literal, so no fragile per-key
+    # escaping — only the static header/footer use Markdown.
+    body = [
+        (f"Net P&L   day {_fmt_usd(day.total_usd)} · "
          f"WTD {_fmt_usd(wtd.total_usd)} · MTD {_fmt_usd(mtd.total_usd)}"),
         "",
-        "*MTD by lane:*",
+        "By lane (MTD):",
         *_kv_lines(mtd.by_lane),
         "",
-        "*MTD by tax bucket:*",
+        "By tax bucket (MTD):",
         *_kv_lines(mtd.by_tax_bucket),
+        "",
+        _hurdle_line(mtd, asof, deployed_capital_usd),
     ]
 
-    if deployed_capital_usd and deployed_capital_usd > 0:
-        days_held = (asof - _month_start(asof)).days + 1
-        cleared, hurdle_usd = clears_hurdle(
-            mtd.total_usd, LOC_FLOOR_ANNUAL, deployed_capital_usd, days_held
-        )
-        verdict = "✅ beats" if cleared else "🔴 below"
-        lines += [
-            "",
-            (f"Hurdle: MTD {verdict} the {LOC_FLOOR_ANNUAL:.2%} LOC floor "
-             f"({_fmt_usd(hurdle_usd)} over {days_held}d on "
-             f"{_fmt_usd(deployed_capital_usd)} deployed)."),
-        ]
-    else:
-        lines += [
-            "",
-            f"Hurdle floor {LOC_FLOOR_ANNUAL:.2%} (LOC) · pace ~{VOO_PACE_ANNUAL:.0%} (VOO).",
-        ]
-
-    lines += ["", "_Not yet wired (add as lanes go live): " + ", ".join(_NOT_WIRED) + "._"]
-    return "\n".join(lines)
+    return "\n".join([
+        f"📊 *Portfolio P&L digest* — {asof.isoformat()}",
+        "```",
+        *body,
+        "```",
+        "_Not yet wired (add as lanes go live): " + ", ".join(_NOT_WIRED) + "._",
+    ])

@@ -31,7 +31,7 @@ from digest import _month_start, format_pnl_digest  # noqa: E402
 from pnl_ledger import PnlEntry  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 _PNL_SELECT = "engine,lane,tax_bucket,amount_usd,trade_date"
 
@@ -57,10 +57,10 @@ def send_telegram(token: str, chat_id: str, text: str) -> bool:
             except ValueError:
                 detail = resp.text[:200]
         status = getattr(resp, "status_code", "?")
-        log.warning("Telegram send failed: HTTP %s — %s", status, detail)
+        logger.warning("Telegram send failed: HTTP %s — %s", status, detail)
         return False
     except requests.RequestException as exc:
-        log.warning("Telegram send failed: %s", type(exc).__name__)
+        logger.warning("Telegram send failed: %s", type(exc).__name__)
         return False
 
 
@@ -76,24 +76,30 @@ def fetch_pnl_rows(session, base_url: str, service_key: str, since_iso: str):
         resp.raise_for_status()
         return resp.json()
     except (requests.RequestException, ValueError) as exc:
-        log.warning("Supabase pnl query failed: %s", type(exc).__name__)
+        logger.warning("Supabase pnl query failed: %s", type(exc).__name__)
         return None
 
 
 def rows_to_entries(rows) -> list[PnlEntry]:
-    """Build PnlEntry rows, skipping any that fail validation (bad bucket/date)."""
+    """Build PnlEntry rows, skipping any that fail validation (bad bucket/date).
+
+    Row fields are passed to PnlEntry as-is (only amount_usd is coerced to float)
+    so PnlEntry's own validation rejects None / non-string values — coercing them
+    to ``str()`` first would turn ``None`` into the literal ``"None"`` and let a
+    corrupt row through into the rollups.
+    """
     entries: list[PnlEntry] = []
     for row in rows or []:
         try:
             entries.append(PnlEntry(
-                engine=str(row["engine"]),
-                lane=str(row["lane"]),
-                tax_bucket=str(row["tax_bucket"]),
+                engine=row["engine"],
+                lane=row["lane"],
+                tax_bucket=row["tax_bucket"],
                 amount_usd=float(row["amount_usd"]),
-                trade_date=str(row["trade_date"]),
+                trade_date=row["trade_date"],
             ))
         except (KeyError, ValueError, TypeError) as exc:
-            log.warning("Skipping malformed pnl row: %s", exc)
+            logger.warning("Skipping malformed pnl row: %s", exc)
     return entries
 
 
@@ -108,7 +114,7 @@ def main() -> None:
     base_url = os.getenv("SUPABASE_URL")
     service_key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
     if not base_url or not service_key:
-        log.warning(
+        logger.warning(
             "SUPABASE_URL / SUPABASE_SERVICE_KEY not set — cannot read the pnl "
             "table (RLS needs the service key). Cron-safe exit."
         )
@@ -119,28 +125,33 @@ def main() -> None:
 
     rows = fetch_pnl_rows(requests.Session(), base_url, service_key, since_iso)
     if rows is None:
-        log.warning("No pnl data returned (query failed). Cron-safe exit.")
+        logger.warning("No pnl data returned (query failed). Cron-safe exit.")
         return
 
     entries = rows_to_entries(rows)
     capital = args.capital
-    if capital is None and os.getenv("DEPLOYED_CAPITAL_USD"):
+    raw_capital = os.getenv("DEPLOYED_CAPITAL_USD")
+    if capital is None and raw_capital:
         try:
-            capital = float(os.environ["DEPLOYED_CAPITAL_USD"])
+            capital = float(raw_capital)
         except ValueError:
+            logger.warning(
+                "DEPLOYED_CAPITAL_USD=%r is not a valid float; skipping the hurdle verdict.",
+                raw_capital,
+            )
             capital = None
     text = format_pnl_digest(entries, asof=asof, deployed_capital_usd=capital)
-    log.info("Built digest from %d pnl rows (MTD since %s)", len(entries), since_iso)
+    logger.info("Built digest from %d pnl rows (MTD since %s)", len(entries), since_iso)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if args.dry_run or not token or not chat_id:
         if not token or not chat_id:
-            log.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — printing only.")
+            logger.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — printing only.")
         print(text)
         return
 
-    log.info("Telegram digest %s", "sent" if send_telegram(token, chat_id, text) else "FAILED")
+    logger.info("Telegram digest %s", "sent" if send_telegram(token, chat_id, text) else "FAILED")
 
 
 if __name__ == "__main__":
