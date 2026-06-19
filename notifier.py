@@ -131,6 +131,28 @@ class WebhookNotifier:
             thread = threading.Thread(target=self._send_raw, args=(payload,), daemon=True)
             thread.start()
 
+    def notify_text(self, message: str):
+        """Send a pre-formatted alert string, synchronously.
+
+        Unlike notify()/notify_promo_warning()/notify_partial_fill(), this blocks
+        until the send completes. Detection-core watchers (EDGAR, etc.) render
+        their own ticket text via the core's formatter and run as short-lived
+        crons — a daemon thread might not flush before the process exits.
+        """
+        if not message:
+            return
+        if self._is_telegram:
+            self._send_telegram(message)
+        elif self._is_callmebot:
+            self._send_callmebot(message)
+        elif self.url:
+            if "hooks.slack.com" in self.url:
+                self._send_raw({"text": message})
+            elif "discord.com/api/webhooks" in self.url:
+                self._send_raw({"content": message})
+            else:
+                self._send_raw({"message": message})
+
     # ---------------------------------------------------------------------------
     # Internal dispatch
     # ---------------------------------------------------------------------------
