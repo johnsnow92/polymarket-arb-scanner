@@ -123,7 +123,7 @@ class TestLoadPolicyFailClosed:
     def test_string_kill_state_rejected(self, tmp_path):
         # bool("false") is True — coercion would silently un-kill a lane.
         data = policy_data(kill_state={"global": "false", "lanes": {}})
-        with pytest.raises(PolicyError, match="kill_state.global"):
+        with pytest.raises(PolicyError, match=r"kill_state\.global"):
             load_policy(write_policy(tmp_path, data))
 
     def test_string_lane_kill_rejected(self, tmp_path):
