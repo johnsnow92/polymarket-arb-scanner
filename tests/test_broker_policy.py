@@ -96,6 +96,42 @@ class TestLoadPolicyFailClosed:
         with pytest.raises(PolicyError, match="micro_entry"):
             load_policy(write_policy(tmp_path, data))
 
+    def test_nan_principal_cap_rejected(self, tmp_path):
+        # json.loads accepts NaN — a NaN cap would fail-open every comparison.
+        with pytest.raises(PolicyError, match="principal_cap_usd"):
+            load_policy(write_policy(tmp_path, policy_data(
+                principal_cap_usd=float("nan"))))
+
+    def test_infinite_per_market_cap_rejected(self, tmp_path):
+        with pytest.raises(PolicyError, match="per_market_cap_usd"):
+            load_policy(write_policy(tmp_path, policy_data(
+                per_market_cap_usd=float("inf"))))
+
+    def test_nan_micro_entry_rejected(self, tmp_path):
+        data = policy_data(micro_entry={
+            "max_first_order_usd": float("nan"), "first_n_fills": 5,
+            "max_fill_deviation_pct": 0.05,
+        })
+        with pytest.raises(PolicyError, match="max_first_order_usd"):
+            load_policy(write_policy(tmp_path, data))
+
+    def test_non_numeric_cap_rejected(self, tmp_path):
+        with pytest.raises(PolicyError, match="cooldown_seconds"):
+            load_policy(write_policy(tmp_path, policy_data(
+                cooldown_seconds="soon")))
+
+    def test_string_kill_state_rejected(self, tmp_path):
+        # bool("false") is True — coercion would silently un-kill a lane.
+        data = policy_data(kill_state={"global": "false", "lanes": {}})
+        with pytest.raises(PolicyError, match="kill_state.global"):
+            load_policy(write_policy(tmp_path, data))
+
+    def test_string_lane_kill_rejected(self, tmp_path):
+        data = policy_data(kill_state={"global": False,
+                                       "lanes": {"perp-carry": "halted"}})
+        with pytest.raises(PolicyError, match="perp-carry"):
+            load_policy(write_policy(tmp_path, data))
+
     def test_micro_entry_zero_fills(self, tmp_path):
         data = policy_data(micro_entry={
             "max_first_order_usd": 10.0, "first_n_fills": 0,

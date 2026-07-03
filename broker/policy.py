@@ -9,6 +9,7 @@ malformed, or in-repo config.
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 
@@ -99,6 +100,18 @@ class PolicyConfig:
         return any(self.kill_lanes.values())
 
 
+def _require_finite(value, key: str) -> float:
+    """JSON accepts NaN/Infinity; a NaN cap would make every comparison
+    fail-open (NaN > ceiling is always False). Reject non-finite numbers."""
+    try:
+        num = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PolicyError(f"{key} must be a number, got {value!r}") from exc
+    if not math.isfinite(num):
+        raise PolicyError(f"{key} must be finite, got {value!r}")
+    return num
+
+
 def _validate(data: dict, path: Path) -> None:
     missing = REQUIRED_KEYS - data.keys()
     if missing:
@@ -111,8 +124,18 @@ def _validate(data: dict, path: Path) -> None:
         raise PolicyError("sportsbook_venues must be a list")
     if not isinstance(data["gate_hashes"], dict) or not data["gate_hashes"]:
         raise PolicyError("gate_hashes must be a non-empty dict (pre-registered)")
-    if not isinstance(data["kill_state"], dict):
+    kill_state = data["kill_state"]
+    if not isinstance(kill_state, dict):
         raise PolicyError("kill_state must be a dict")
+    # Strict bools only: bool("false") is True — coercion would un-kill a lane.
+    if not isinstance(kill_state.get("global", False), bool):
+        raise PolicyError("kill_state.global must be a boolean")
+    lanes = kill_state.get("lanes", {})
+    if not isinstance(lanes, dict):
+        raise PolicyError("kill_state.lanes must be a dict")
+    for lane, halted in lanes.items():
+        if not isinstance(halted, bool):
+            raise PolicyError(f"kill_state.lanes[{lane!r}] must be a boolean")
     micro = data["micro_entry"]
     if not isinstance(micro, dict):
         raise PolicyError("micro_entry must be a dict")
@@ -120,16 +143,18 @@ def _validate(data: dict, path: Path) -> None:
     if micro_missing:
         raise PolicyError(f"micro_entry missing keys: {sorted(micro_missing)}")
     for key in ("principal_cap_usd", "per_market_cap_usd"):
-        if float(data[key]) <= 0:
+        if _require_finite(data[key], key) <= 0:
             raise PolicyError(f"{key} must be > 0")
     for key in ("cooldown_seconds", "freshness_ttl_seconds", "recon_tolerance_usd"):
-        if float(data[key]) < 0:
+        if _require_finite(data[key], key) < 0:
             raise PolicyError(f"{key} must be >= 0")
-    if float(micro["max_first_order_usd"]) <= 0:
+    if _require_finite(micro["max_first_order_usd"],
+                       "micro_entry.max_first_order_usd") <= 0:
         raise PolicyError("micro_entry.max_first_order_usd must be > 0")
-    if int(micro["first_n_fills"]) < 1:
+    if int(_require_finite(micro["first_n_fills"], "micro_entry.first_n_fills")) < 1:
         raise PolicyError("micro_entry.first_n_fills must be >= 1")
-    if float(micro["max_fill_deviation_pct"]) <= 0:
+    if _require_finite(micro["max_fill_deviation_pct"],
+                       "micro_entry.max_fill_deviation_pct") <= 0:
         raise PolicyError("micro_entry.max_fill_deviation_pct must be > 0")
 
 

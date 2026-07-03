@@ -77,6 +77,26 @@ class TestSubmit:
         id2, _ = queue.submit(flip("b"))
         assert id1 != id2
 
+    def test_key_reuse_with_different_intent_rejected(self, queue):
+        queue.submit(flip("same-key"))
+        smuggled = Intent("move_capital",
+                          {"amount_usd": 500.0, "from_venue": "kalshi",
+                           "to_venue": "polymarket"}, "same-key")
+        with pytest.raises(IntentError, match="reused"):
+            queue.submit(smuggled)
+
+    def test_key_reuse_with_different_payload_rejected(self, queue):
+        queue.submit(flip("same-key"))
+        altered = Intent("flip_lane", {"lane": "OTHER", "venue": "kalshi",
+                                       "action": "enable"}, "same-key")
+        with pytest.raises(IntentError, match="reused"):
+            queue.submit(altered)
+
+    def test_event_for_unknown_intent_rejected(self, queue):
+        # PRAGMA foreign_keys=ON — events must reference a real intent.
+        with pytest.raises(sqlite3.IntegrityError):
+            queue.append_event(9999, STATUS_REJECTED, "orphan")
+
 
 # ---------------------------------------------------------------------------
 # Event-sourced status

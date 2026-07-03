@@ -126,7 +126,9 @@ class BrokerValidator:
         if self.policy.kill_global:
             return CheckResult("kill_state", False, "global kill switch is set")
         if self.policy.any_lane_halted():
-            halted = sorted(l for l, v in self.policy.kill_lanes.items() if v)
+            halted = sorted(
+                lane for lane, is_halted in self.policy.kill_lanes.items() if is_halted
+            )
             return CheckResult("kill_state", False, f"lanes in kill halt: {halted}")
         return CheckResult("kill_state", True)
 

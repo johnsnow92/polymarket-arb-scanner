@@ -72,6 +72,7 @@ class IntentQueue:
         self._lock = threading.Lock()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
 
@@ -124,12 +125,21 @@ class IntentQueue:
         A repeated idempotency key is a no-op: the existing row id is returned
         with created=False and nothing is written.
         """
+        payload_json = json.dumps(intent.payload, sort_keys=True)
         with self._lock:
             row = self.conn.execute(
-                "SELECT id FROM intents WHERE idempotency_key = ?",
+                "SELECT id, intent_type, payload FROM intents WHERE idempotency_key = ?",
                 (intent.idempotency_key,),
             ).fetchone()
             if row is not None:
+                # A key reused for DIFFERENT content is not a retry — it is a
+                # bug or an attempt to smuggle a new action under an old key.
+                if (row["intent_type"] != intent.intent_type
+                        or row["payload"] != payload_json):
+                    raise IntentError(
+                        f"idempotency_key {intent.idempotency_key!r} reused "
+                        "for a different intent — rejected"
+                    )
                 logger.info(
                     "Duplicate intent %s (id=%d) — no-op",
                     intent.idempotency_key, row["id"],
@@ -141,7 +151,7 @@ class IntentQueue:
                 (
                     intent.idempotency_key,
                     intent.intent_type,
-                    json.dumps(intent.payload, sort_keys=True),
+                    payload_json,
                     self._now(),
                 ),
             )

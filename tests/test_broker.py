@@ -120,7 +120,7 @@ class TestIdempotency:
 class TestRejection:
     def test_disallowed_venue_rejected_without_execution(self):
         escalations = []
-        broker, queue, executors = make_broker(escalations=escalations)
+        broker, _, executors = make_broker(escalations=escalations)
         decision = broker.process(flip_enable(venue="hyperliquid"))
         assert decision.status == STATUS_REJECTED
         assert "allowlist" in decision.reason
