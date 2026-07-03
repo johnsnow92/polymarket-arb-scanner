@@ -467,6 +467,16 @@ NEWS_SNIPE_CONFIDENCE_THRESHOLD = _env_float("NEWS_SNIPE_CONFIDENCE_THRESHOLD", 
 # Stage 2 refiner: drop signals where the headline is older than this window.
 NEWS_SNIPE_MAX_AGE_MINUTES = _env_int("NEWS_SNIPE_MAX_AGE_MINUTES", "60")
 
+# Firecrawl web-search news source — alternative/supplemental to Finnhub for
+# STRAT-02. Fills the specced-but-unbuilt news_monitor.py slot
+# (.planning/research/ARCHITECTURE.md Pattern 6). Disabled by default; when
+# enabled it is passed into scan_news_snipe() as an alternate client, NOT
+# auto-wired into signal_aggregator.py's live source weights — that wiring
+# is a separate, explicit decision (see DEFAULT_SOURCE_WEIGHTS).
+FIRECRAWL_NEWS_ENABLED = _env_bool("FIRECRAWL_NEWS_ENABLED", "false")
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
+FIRECRAWL_NEWS_REQUEST_TIMEOUT = _env_float("FIRECRAWL_NEWS_REQUEST_TIMEOUT", "15.0")
+
 # STRAT-06: Correlated Market Pairs
 CORRELATED_ENABLED = _env_bool("CORRELATED_ENABLED", "false")
 CORRELATED_PAIRS = os.getenv("CORRELATED_PAIRS", "[]")  # JSON list of [market_a, market_b] pairs
@@ -1250,6 +1260,13 @@ def validate_config() -> list[str]:
         raise ConfigError(
             f"NEWS_SNIPE_CONFIDENCE_THRESHOLD={NEWS_SNIPE_CONFIDENCE_THRESHOLD} "
             f"must be in (0, 1]"
+        )
+
+    # Firecrawl news source (alternative/supplemental to Finnhub for STRAT-02)
+    if FIRECRAWL_NEWS_ENABLED and not FIRECRAWL_API_KEY:
+        warnings.append(
+            "Firecrawl news enabled (FIRECRAWL_NEWS_ENABLED=true) but "
+            "FIRECRAWL_API_KEY not set; disabling Firecrawl news"
         )
 
     # STRAT-06: Correlated Market Pairs

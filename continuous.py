@@ -757,28 +757,61 @@ def _scan_imbalance_layer4(poly_markets, price_cache, mode) -> list[dict]:
 
 
 def _scan_news_snipe_layer4(poly_markets, mode, cooldown_cache=None) -> list[dict]:
-    """STRAT-02 news-driven resolution sniping. Requires a Finnhub API key;
-    returns ``[]`` when the gate is off or the key/SDK is unavailable."""
-    if mode not in ("all", "news-snipe") or not config.NEWS_SNIPE_ENABLED:
+    """STRAT-02 news-driven resolution sniping.
+
+    Runs the scan once per enabled news source and merges the results. Two
+    independent gates:
+      * NEWS_SNIPE_ENABLED + FINNHUB_API_KEY       -> Finnhub headlines
+      * FIRECRAWL_NEWS_ENABLED + FIRECRAWL_API_KEY  -> Firecrawl web search
+    Either, both, or neither may be active. Returns ``[]`` when no source is
+    enabled/configured or there are no markets. A failure building or running
+    one client does not disable the other."""
+    if mode not in ("all", "news-snipe"):
         return []
-    if not config.FINNHUB_API_KEY:
-        logger.debug("NEWS_SNIPE_ENABLED but FINNHUB_API_KEY not set")
+
+    finnhub_on = config.NEWS_SNIPE_ENABLED and bool(config.FINNHUB_API_KEY)
+    firecrawl_on = config.FIRECRAWL_NEWS_ENABLED and bool(config.FIRECRAWL_API_KEY)
+    if not (finnhub_on or firecrawl_on):
         return []
+
     markets_by_key = _build_poly_markets_by_key(poly_markets)
     if not markets_by_key:
         return []
-    try:
-        from finnhub_api import FinnhubNewsClient
-    except ImportError:
-        logger.debug("finnhub_api module not available")
-        return []
-    finnhub_client = FinnhubNewsClient(api_key=config.FINNHUB_API_KEY)
-    return scan_news_snipe(
-        markets_by_key,
-        finnhub_client,
-        cooldown_cache=cooldown_cache,
-        fuzzy_threshold=config.FUZZY_MATCH_THRESHOLD,
-    )
+
+    clients: list[object] = []
+    if finnhub_on:
+        try:
+            from finnhub_api import FinnhubNewsClient
+            clients.append(FinnhubNewsClient(api_key=config.FINNHUB_API_KEY))
+        except ImportError:
+            logger.debug("finnhub_api module not available")
+        except Exception as exc:  # noqa: BLE001 - one client failing must not kill the other
+            logger.warning("Finnhub news client init failed: %s", exc)
+    if firecrawl_on:
+        try:
+            from firecrawl_news_client import FirecrawlNewsClient
+            clients.append(FirecrawlNewsClient(api_key=config.FIRECRAWL_API_KEY))
+        except ImportError:
+            logger.debug("firecrawl_news_client module not available")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Firecrawl news client init failed: %s", exc)
+
+    opportunities: list[dict] = []
+    for client in clients:
+        try:
+            opportunities.extend(
+                scan_news_snipe(
+                    markets_by_key,
+                    client,
+                    cooldown_cache=cooldown_cache,
+                    fuzzy_threshold=config.FUZZY_MATCH_THRESHOLD,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "News-snipe scan failed for %s: %s", type(client).__name__, exc
+            )
+    return opportunities
 
 
 def _scan_correlated_layer4(poly_markets, price_cache, mode) -> list[dict]:

@@ -164,10 +164,64 @@ class TestNewsSnipeWiring:
 
     def test_skipped_when_flag_off(self, monkeypatch):
         monkeypatch.setattr(config_mod, "NEWS_SNIPE_ENABLED", False)
+        monkeypatch.setattr(config_mod, "FIRECRAWL_NEWS_ENABLED", False)
         with patch.object(continuous, "scan_news_snipe", autospec=True) as m:
             out = continuous._scan_news_snipe_layer4([_POLY_MARKET], "all")
         m.assert_not_called()
         assert out == []
+
+    def test_firecrawl_source_invoked_when_flag_on(self, monkeypatch):
+        # Finnhub off, Firecrawl on -> scan runs once with the Firecrawl client.
+        monkeypatch.setattr(config_mod, "NEWS_SNIPE_ENABLED", False)
+        monkeypatch.setattr(config_mod, "FINNHUB_API_KEY", "")
+        monkeypatch.setattr(config_mod, "FIRECRAWL_NEWS_ENABLED", True)
+        monkeypatch.setattr(config_mod, "FIRECRAWL_API_KEY", "fc-test-key")
+        monkeypatch.setattr(config_mod, "FUZZY_MATCH_THRESHOLD", 72)
+        fake_fc = MagicMock()
+        monkeypatch.setitem(sys.modules, "firecrawl_news_client", fake_fc)
+        with patch.object(continuous, "scan_news_snipe", autospec=True) as m:
+            m.return_value = [{"type": "NewsSnipe", "src": "firecrawl"}]
+            out = continuous._scan_news_snipe_layer4([_POLY_MARKET], "all")
+        m.assert_called_once()
+        assert out == [{"type": "NewsSnipe", "src": "firecrawl"}]
+        fake_fc.FirecrawlNewsClient.assert_called_once_with(api_key="fc-test-key")
+
+    def test_both_sources_merge(self, monkeypatch):
+        # Both gates on -> scan runs once per client and results merge.
+        monkeypatch.setattr(config_mod, "NEWS_SNIPE_ENABLED", True)
+        monkeypatch.setattr(config_mod, "FINNHUB_API_KEY", "finnhub-key")
+        monkeypatch.setattr(config_mod, "FIRECRAWL_NEWS_ENABLED", True)
+        monkeypatch.setattr(config_mod, "FIRECRAWL_API_KEY", "fc-key")
+        monkeypatch.setattr(config_mod, "FUZZY_MATCH_THRESHOLD", 72)
+        monkeypatch.setitem(sys.modules, "finnhub_api", MagicMock())
+        monkeypatch.setitem(sys.modules, "firecrawl_news_client", MagicMock())
+        with patch.object(continuous, "scan_news_snipe", autospec=True) as m:
+            m.side_effect = [
+                [{"type": "NewsSnipe", "src": "finnhub"}],
+                [{"type": "NewsSnipe", "src": "firecrawl"}],
+            ]
+            out = continuous._scan_news_snipe_layer4([_POLY_MARKET], "all")
+        assert m.call_count == 2
+        srcs = sorted(o["src"] for o in out)
+        assert srcs == ["finnhub", "firecrawl"]
+
+    def test_one_client_failure_does_not_kill_other(self, monkeypatch):
+        # Finnhub client raises during scan; Firecrawl still returns its opps.
+        monkeypatch.setattr(config_mod, "NEWS_SNIPE_ENABLED", True)
+        monkeypatch.setattr(config_mod, "FINNHUB_API_KEY", "finnhub-key")
+        monkeypatch.setattr(config_mod, "FIRECRAWL_NEWS_ENABLED", True)
+        monkeypatch.setattr(config_mod, "FIRECRAWL_API_KEY", "fc-key")
+        monkeypatch.setattr(config_mod, "FUZZY_MATCH_THRESHOLD", 72)
+        monkeypatch.setitem(sys.modules, "finnhub_api", MagicMock())
+        monkeypatch.setitem(sys.modules, "firecrawl_news_client", MagicMock())
+        with patch.object(continuous, "scan_news_snipe", autospec=True) as m:
+            m.side_effect = [
+                RuntimeError("finnhub boom"),
+                [{"type": "NewsSnipe", "src": "firecrawl"}],
+            ]
+            out = continuous._scan_news_snipe_layer4([_POLY_MARKET], "all")
+        assert m.call_count == 2
+        assert out == [{"type": "NewsSnipe", "src": "firecrawl"}]
 
 
 class TestCorrelatedWiring:

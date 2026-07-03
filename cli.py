@@ -665,22 +665,45 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             except Exception as e:
                 logger.error("Imbalance scan failed: %s", e)
 
-    # STRAT-02: News-Driven Resolution Sniping
+    # STRAT-02: News-Driven Resolution Sniping (Finnhub and/or Firecrawl sources)
     if args.mode in ("all", "news-snipe"):
-        from config import NEWS_SNIPE_ENABLED, FINNHUB_API_KEY
-        if NEWS_SNIPE_ENABLED and FINNHUB_API_KEY:
+        from config import (
+            NEWS_SNIPE_ENABLED,
+            FINNHUB_API_KEY,
+            FIRECRAWL_NEWS_ENABLED,
+            FIRECRAWL_API_KEY,
+        )
+        finnhub_on = NEWS_SNIPE_ENABLED and FINNHUB_API_KEY
+        firecrawl_on = FIRECRAWL_NEWS_ENABLED and FIRECRAWL_API_KEY
+        if finnhub_on or firecrawl_on:
             logger.info("--- News-Driven Sniping Scan ---")
             try:
                 from scans.news_snipe import scan_news_snipe
-                from finnhub_api import FinnhubNewsClient
-                finnhub = FinnhubNewsClient(FINNHUB_API_KEY)
                 markets_by_key = {}
                 if poly_markets:
                     for mkt in poly_markets:
                         cid = mkt.get("condition_id", "")
                         if cid:
                             markets_by_key[cid] = mkt
-                news_opps = scan_news_snipe(markets_by_key, finnhub, cooldown_cache={})
+                news_clients = []
+                if finnhub_on:
+                    from finnhub_api import FinnhubNewsClient
+                    news_clients.append(FinnhubNewsClient(FINNHUB_API_KEY))
+                if firecrawl_on:
+                    from firecrawl_news_client import FirecrawlNewsClient
+                    news_clients.append(FirecrawlNewsClient(FIRECRAWL_API_KEY))
+                news_opps = []
+                for client in news_clients:
+                    try:
+                        news_opps.extend(
+                            scan_news_snipe(markets_by_key, client, cooldown_cache={})
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "News snipe scan failed for %s: %s",
+                            type(client).__name__,
+                            e,
+                        )
                 all_opportunities.extend(news_opps)
                 logger.info("Found %d news snipe opportunities.", len(news_opps))
             except Exception as e:
