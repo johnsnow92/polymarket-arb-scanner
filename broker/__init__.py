@@ -7,7 +7,8 @@ rulebook check passes. No LLM anywhere in this package.
 """
 
 from .policy import PolicyConfig, PolicyError, compute_gate_hash, load_policy
-from .queue import Intent, IntentError, IntentQueue
+from .queue import DEFAULT_LEASE_NAME, Intent, IntentError, IntentQueue
+from .supabase_queue import SupabaseConfigError, SupabaseIntentQueue
 from .validator import BrokerValidator, CheckResult, LiveSources
 from .secrets import SecretRotationError, rotate_secret_via_stdin
 from .broker import (
@@ -19,6 +20,7 @@ from .broker import (
 )
 
 __all__ = [
+    "DEFAULT_LEASE_NAME",
     "BrokerDecision",
     "BrokerValidator",
     "CheckResult",
@@ -32,6 +34,8 @@ __all__ = [
     "PolicyConfig",
     "PolicyError",
     "SecretRotationError",
+    "SupabaseConfigError",
+    "SupabaseIntentQueue",
     "TwoFactorWallError",
     "compute_gate_hash",
     "load_policy",

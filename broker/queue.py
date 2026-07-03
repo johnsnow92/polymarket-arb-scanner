@@ -62,14 +62,17 @@ class Intent:
 HALT_SCOPE_CAPITAL = "capital_moves"
 HALT_SCOPE_ALL = "all"
 
+DEFAULT_LEASE_NAME = "policy_broker_loop"
+
 _APPEND_ONLY_TABLES = ("intents", "intent_events", "halts")
 
 
 class IntentQueue:
     """Thread-safe append-only intent queue + halt ledger."""
 
-    def __init__(self, db_path: str = ":memory:"):
+    def __init__(self, db_path: str = ":memory:", lease_name: str = DEFAULT_LEASE_NAME):
         self._lock = threading.Lock()
+        self._lease_name = lease_name
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
@@ -101,6 +104,13 @@ class IntentQueue:
                 reason TEXT,
                 operator TEXT,
                 created_at TEXT NOT NULL
+            );
+
+            -- Lease is deliberately MUTABLE (heartbeat renewal) — not append-only.
+            CREATE TABLE IF NOT EXISTS leases (
+                name TEXT PRIMARY KEY,
+                holder TEXT NOT NULL,
+                expires_at REAL NOT NULL
             );
         """)
         # Append-only enforcement lives in the DB, not in Python discipline.
@@ -225,3 +235,56 @@ class IntentQueue:
                 if row is not None and row["action"] == "halt":
                     return True
         return False
+
+    # -- single-writer lease -------------------------------------------------
+    # Mirrors the Supabase lease RPCs. SQLite computes the reference "now" so a
+    # caller can't drift the clock; the lease table is mutable by design.
+
+    def _sql_now(self) -> float:
+        return self.conn.execute("SELECT strftime('%s', 'now') + 0.0").fetchone()[0]
+
+    def acquire_lease(self, holder: str, ttl_seconds: float) -> bool:
+        """Acquire (or idempotently renew) the loop lease. False if held."""
+        with self._lock:
+            now = self._sql_now()
+            row = self.conn.execute(
+                "SELECT holder, expires_at FROM leases WHERE name = ?",
+                (self._lease_name,),
+            ).fetchone()
+            if row is not None and row["holder"] != holder and row["expires_at"] >= now:
+                return False
+            self.conn.execute(
+                "INSERT INTO leases (name, holder, expires_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET holder = excluded.holder, "
+                "expires_at = excluded.expires_at",
+                (self._lease_name, holder, now + ttl_seconds),
+            )
+            self.conn.commit()
+            return True
+
+    def renew_lease(self, holder: str, ttl_seconds: float) -> bool:
+        with self._lock:
+            now = self._sql_now()
+            cur = self.conn.execute(
+                "UPDATE leases SET expires_at = ? "
+                "WHERE name = ? AND holder = ? AND expires_at >= ?",
+                (now + ttl_seconds, self._lease_name, holder, now),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def release_lease(self, holder: str) -> bool:
+        with self._lock:
+            cur = self.conn.execute(
+                "DELETE FROM leases WHERE name = ? AND holder = ?",
+                (self._lease_name, holder),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def lease_holder(self) -> str | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT holder FROM leases WHERE name = ?", (self._lease_name,),
+            ).fetchone()
+        return row["holder"] if row else None

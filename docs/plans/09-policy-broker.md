@@ -46,18 +46,36 @@ loop (proposer) ──writes Intent(idempotency_key)──▶ IntentQueue (appen
 | File | Contents |
 |---|---|
 | `broker/policy.py` | `PolicyConfig` loader (fail-closed; **refuses any config path inside this repo**), `compute_gate_hash()` (canonical-JSON SHA-256) |
-| `broker/queue.py` | `Intent` dataclass, `IntentQueue` — append-only SQLite (WAL + thread lock, per `db.py` pattern); idempotency-key dedupe (repeat = no-op); event-sourced status; halt ledger (`halt`/`clear` events, clear requires an operator name) |
+| `broker/queue.py` | `Intent` dataclass, `IntentQueue` — append-only SQLite (WAL + thread lock, per `db.py` pattern); idempotency-key dedupe (repeat = no-op); event-sourced status; halt ledger (`halt`/`clear` events, clear requires an operator name); single-writer lease (mutable `leases` table) |
+| `broker/supabase_queue.py` | `SupabaseIntentQueue` — same interface over Supabase/PostgREST; append-only + dedupe + lease enforced in Postgres (see Backends below). Reads `SUPABASE_URL` + service-role key from env; never logs the key |
 | `broker/validator.py` | `LiveSources` (injected callables — the broker never trusts stale state), `BrokerValidator` — the deterministic rulebook; every live-source exception ⇒ fail-closed |
 | `broker/secrets.py` | `rotate_secret_via_stdin()` — secret piped get-cmd → set-cmd stdin; value never decoded, logged, or returned (never enters LLM context) |
 | `broker/broker.py` | `PolicyBroker.process(intent)` orchestrator: dedupe → hard-stop screen → validate → execute → verify; statuses `EXECUTED` / `REJECTED` / `IN_DOUBT` / `HARD_STOP`; escalation callable |
 
-### Storage note (deliberate deviation, flagged)
+### Backends (both implement the same interface)
 
-Spec 22 names Supabase as the intent-queue/ledger host. This build implements the queue on **SQLite with
-identical append-only semantics** (insert-only, enforced by `RAISE(ABORT)` triggers) behind the
-`IntentQueue` interface, so CI needs no network and the DoD behaviors are testable deterministically.
-Swapping the backing store to Supabase (plus the single-lease heartbeat, which is loop-side) is a follow-up
-before live authority activates — the interface is the contract. Migrations are additive-only.
+The broker/validator depend only on the queue interface, never on the backing store. Two implementations:
+
+- **`IntentQueue` (SQLite)** — append-only enforced by `RAISE(ABORT)` triggers on UPDATE/DELETE; used for
+  tests and single-host/offline runs. CI needs no network.
+- **`SupabaseIntentQueue` (Postgres/PostgREST)** — spec 22's named host, for live authority: shared source
+  of truth across Railway + local sessions, plus the single-writer lease. Append-only is enforced in
+  Postgres (`BEFORE UPDATE/DELETE` **and** `BEFORE TRUNCATE` triggers — blocks PATCH/DELETE via PostgREST
+  too); idempotency dedupe + content-mismatch rejection and the lease are `SECURITY DEFINER` functions
+  (`broker_submit_intent`, `broker_acquire_lease`/`renew`/`release`) so concurrency-safety lives in the DB;
+  RLS is deny-by-default so only the service role can touch the tables.
+
+Project: `financial-markets-rewards` (`rtvusfddepldnpknqpjt`, Lane A). Migrations (additive-only):
+`policy_broker_intent_queue`, `policy_broker_truncate_guard`. Tables: `public.broker_intents`,
+`broker_intent_events`, `broker_halts`, `broker_leases`.
+
+**Env (server-side only, never logged):** `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_KEY`).
+
+**Tests.** `tests/test_broker_queue_contract.py` is one backend-parametrized contract suite: it runs against
+SQLite always, and against **live Supabase** when the env vars are set (else that leg skips — CI stays
+green). `tests/test_broker_supabase.py` proves the REST/RPC wiring with a mocked session (no network). The
+DB guarantees themselves were verified directly on Postgres via the migration + an assertion block.
+Run the live leg: `SUPABASE_URL=… SUPABASE_SERVICE_ROLE_KEY=… pytest tests/test_broker_queue_contract.py -q`.
 
 ## 2. Policy config — OUTSIDE the repo (non-negotiable)
 
