@@ -155,7 +155,7 @@ class TestInDoubt:
         escalations = []
         executors = ok_executors()
         executors.flip_lane = MagicMock(side_effect=RuntimeError("timeout mid-flip"))
-        broker, queue, _ = make_broker(executors=executors, escalations=escalations)
+        broker, _, _ = make_broker(executors=executors, escalations=escalations)
         decision = broker.process(flip_enable())
         assert decision.status == STATUS_IN_DOUBT
         assert "never retry" in decision.reason
@@ -273,6 +273,12 @@ class TestSecretRotation:
             with pytest.raises(SecretRotationError) as excinfo:
                 rotate_secret_via_stdin(["get"], ["set"])
             assert "EXTREMELY-SECRET" not in str(excinfo.value)
+
+    def test_getter_not_found_raises_secret_error(self):
+        with patch("broker.secrets.subprocess.run") as run:
+            run.side_effect = FileNotFoundError("no such command: infisical")
+            with pytest.raises(SecretRotationError, match="could not run"):
+                rotate_secret_via_stdin(["infisical"], ["gh"])
 
     def test_value_never_logged(self, caplog):
         with caplog.at_level("DEBUG"):

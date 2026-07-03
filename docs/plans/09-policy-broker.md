@@ -21,7 +21,7 @@ pre-merge; the operator approves hard-stops; the broker is the sole deterministi
 
 ## 1. Architecture (as built)
 
-```
+```text
 loop (proposer) ──writes Intent(idempotency_key)──▶ IntentQueue (append-only SQLite,
                                                      UPDATE/DELETE blocked by triggers)
                                                           │
