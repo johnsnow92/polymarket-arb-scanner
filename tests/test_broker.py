@@ -266,6 +266,14 @@ class TestSecretRotation:
             run.side_effect = [self._proc(0, self.SECRET), self._proc(1)]
             assert rotate_secret_via_stdin(["get"], ["set"]) is False
 
+    def test_getter_timeout_raises_without_value(self):
+        with patch("broker.secrets.subprocess.run") as run:
+            run.side_effect = __import__("subprocess").TimeoutExpired(
+                cmd="get", timeout=1, output=self.SECRET)
+            with pytest.raises(SecretRotationError) as excinfo:
+                rotate_secret_via_stdin(["get"], ["set"])
+            assert "EXTREMELY-SECRET" not in str(excinfo.value)
+
     def test_value_never_logged(self, caplog):
         with caplog.at_level("DEBUG"):
             with patch("broker.secrets.subprocess.run") as run:

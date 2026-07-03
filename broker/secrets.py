@@ -30,7 +30,11 @@ def rotate_secret_via_stdin(
     if not get_cmd or not set_cmd:
         raise SecretRotationError("get_cmd and set_cmd are both required")
 
-    get_proc = subprocess.run(get_cmd, capture_output=True, timeout=timeout)
+    try:
+        get_proc = subprocess.run(get_cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # exc.stdout may hold partial secret bytes — never surface it.
+        raise SecretRotationError(f"secret getter {get_cmd[0]!r} timed out") from None
     if get_proc.returncode != 0:
         raise SecretRotationError(
             f"secret getter {get_cmd[0]!r} exited {get_proc.returncode}"
@@ -39,7 +43,10 @@ def rotate_secret_via_stdin(
     if not value.strip():
         raise SecretRotationError(f"secret getter {get_cmd[0]!r} returned empty output")
 
-    set_proc = subprocess.run(set_cmd, input=value, capture_output=True, timeout=timeout)
+    try:
+        set_proc = subprocess.run(set_cmd, input=value, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SecretRotationError(f"secret setter {set_cmd[0]!r} timed out") from None
     if set_proc.returncode != 0:
         logger.error("Secret setter %r exited %d", set_cmd[0], set_proc.returncode)
         return False
