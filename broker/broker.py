@@ -19,6 +19,7 @@ from .queue import (
     STATUS_PENDING,
     STATUS_REJECTED,
     Intent,
+    IntentError,
     IntentQueue,
 )
 from .validator import BrokerValidator, LiveSources
@@ -81,7 +82,14 @@ class PolicyBroker:
     # ------------------------------------------------------------------
 
     def process(self, intent: Intent) -> BrokerDecision:
-        intent_id, created = self.queue.submit(intent)
+        try:
+            intent_id, created = self.queue.submit(intent)
+        except IntentError as exc:
+            # e.g. an idempotency key reused with different content — a bug or a
+            # tamper attempt. Return a decision (never throw at the caller) and
+            # escalate. There is no intent_id to attach an event to.
+            self.escalate(f"[broker] intent ({intent.intent_type}) REJECTED: {exc}")
+            return BrokerDecision(-1, STATUS_REJECTED, str(exc))
         if not created:
             # Repeat of a consequential action = no-op. Never re-execute,
             # never retry an IN_DOUBT or REJECTED outcome.

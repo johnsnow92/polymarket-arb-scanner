@@ -101,6 +101,19 @@ class TestIdempotency:
         assert second.status == STATUS_EXECUTED
         executors.flip_lane.assert_called_once()
 
+    def test_key_reuse_different_content_returns_decision_not_raise(self):
+        escalations = []
+        broker, queue, executors = make_broker(escalations=escalations)
+        queue.submit(flip_enable("shared-key"))
+        smuggled = Intent("move_capital",
+                          {"amount_usd": 999, "from_venue": "kalshi",
+                           "to_venue": "polymarket"}, "shared-key")
+        decision = broker.process(smuggled)
+        assert decision.status == STATUS_REJECTED
+        assert "reused" in decision.reason
+        assert len(escalations) == 1
+        executors.move_capital.assert_not_called()
+
     def test_in_doubt_intent_is_never_retried(self):
         executors = ok_executors()
         executors.move_capital = MagicMock(side_effect=RuntimeError("socket dropped"))
