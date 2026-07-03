@@ -83,6 +83,15 @@ class TestCaps:
         v = make_validator()
         assert not v._check_caps(move(200.0, market="BTC-DEC", book_depth_usd=150.0)).ok
 
+    def test_fail_closed_on_nan_portfolio(self):
+        # NaN > ceiling is always False — must not pass the cap check.
+        v = make_validator(sources=healthy_sources(
+            portfolio_value_usd=lambda: float("nan")))
+        results = v.validate(move())
+        caps = next(r for r in results if r.name == "caps")
+        assert not caps.ok
+        assert "non-finite" in caps.reason
+
     def test_fail_closed_when_portfolio_source_raises(self):
         def boom():
             raise ConnectionError("venue API down")
@@ -192,6 +201,18 @@ class TestReconciliation:
         assert not result.ok
         assert "reconciliation break" in result.reason
         assert queue.halt_active(HALT_SCOPE_CAPITAL) is True
+
+    def test_fail_closed_on_nan_balance_without_halt(self):
+        # A NaN balance is unverifiable → fail closed; only a CONFIRMED break
+        # records the capital-moves halt.
+        queue = IntentQueue(":memory:")
+        v = make_validator(queue=queue, sources=healthy_sources(
+            venue_balances=lambda: {"kalshi": float("nan"), "polymarket": 2000.0}))
+        results = v.validate(move())
+        recon = next(r for r in results if r.name == "reconciliation")
+        assert not recon.ok
+        assert "non-finite" in recon.reason
+        assert queue.halt_active(HALT_SCOPE_CAPITAL) is False
 
     def test_fail_closed_when_venue_balances_unreadable(self):
         def boom():

@@ -93,6 +93,15 @@ class BrokerValidator:
 
     # -- individual rules ---------------------------------------------------------
 
+    @staticmethod
+    def _finite(value, what: str) -> float:
+        """Live numbers must be finite — NaN makes every threshold comparison
+        False (fail-open). Raising here lands in the _run fail-closed path."""
+        num = float(value)
+        if not math.isfinite(num):
+            raise ValueError(f"{what} is non-finite ({value!r})")
+        return num
+
     def _intent_venues(self, intent: Intent) -> list[str]:
         p = intent.payload
         keys = ("venue", "from_venue", "to_venue")
@@ -158,14 +167,16 @@ class BrokerValidator:
 
     def _check_caps(self, intent: Intent) -> CheckResult:
         p = intent.payload
-        amount = float(p.get("amount_usd", 0))
+        amount = self._finite(p.get("amount_usd", 0), "amount_usd")
         if amount <= 0:
             return CheckResult("caps", False, "amount_usd must be > 0")
         if p.get("source") == "principal":
             return CheckResult("caps", False,
                                "new principal is operator-gated — broker only moves earned gains")
-        ceiling = self.policy.principal_cap_usd + self.sources.realized_pnl_usd()
-        portfolio = self.sources.portfolio_value_usd()
+        ceiling = self.policy.principal_cap_usd + self._finite(
+            self.sources.realized_pnl_usd(), "realized_pnl_usd")
+        portfolio = self._finite(
+            self.sources.portfolio_value_usd(), "portfolio_value_usd")
         if portfolio > ceiling:
             return CheckResult(
                 "caps", False,
@@ -188,7 +199,7 @@ class BrokerValidator:
                 return CheckResult("caps", False,
                                    f"market-scoped move for '{market}' has no book_depth_usd — "
                                    "cannot verify size ≤ depth")
-            if amount > float(depth):
+            if amount > self._finite(depth, "book_depth_usd"):
                 return CheckResult("caps", False,
                                    f"amount ${amount:,.2f} exceeds book depth ${float(depth):,.2f}")
         return CheckResult("caps", True)
@@ -198,7 +209,9 @@ class BrokerValidator:
         live = self.sources.venue_balances()
         tolerance = self.policy.recon_tolerance_usd
         for venue in sorted(set(ledger) | set(live)):
-            diff = abs(ledger.get(venue, 0.0) - live.get(venue, 0.0))
+            ledger_bal = self._finite(ledger.get(venue, 0.0), f"ledger balance '{venue}'")
+            live_bal = self._finite(live.get(venue, 0.0), f"live balance '{venue}'")
+            diff = abs(ledger_bal - live_bal)
             if diff > tolerance:
                 reason = (
                     f"reconciliation break on '{venue}': ledger "
