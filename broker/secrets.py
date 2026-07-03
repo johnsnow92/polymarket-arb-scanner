@@ -43,7 +43,9 @@ def rotate_secret_via_stdin(
         raise SecretRotationError(
             f"secret getter {get_cmd[0]!r} exited {get_proc.returncode}"
         )
-    value = get_proc.stdout
+    # CLI getters terminate output with a newline that is not part of the
+    # secret; storing it would corrupt the rotated credential.
+    value = get_proc.stdout.rstrip(b"\r\n")
     if not value.strip():
         raise SecretRotationError(f"secret getter {get_cmd[0]!r} returned empty output")
 

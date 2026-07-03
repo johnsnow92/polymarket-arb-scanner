@@ -259,7 +259,8 @@ class TestSecretRotation:
             run.side_effect = [self._proc(0, self.SECRET), self._proc(0)]
             assert rotate_secret_via_stdin(["get"], ["set"]) is True
             set_call = run.call_args_list[1]
-            assert set_call.kwargs["input"] == self.SECRET
+            # getter's terminating newline is stripped — it isn't part of the secret
+            assert set_call.kwargs["input"] == self.SECRET.rstrip(b"\r\n")
 
     def test_getter_failure_raises_without_value(self):
         with patch("broker.secrets.subprocess.run") as run:
