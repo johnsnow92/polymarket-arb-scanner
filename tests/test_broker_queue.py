@@ -54,6 +54,14 @@ class TestIntent:
         with pytest.raises(IntentError, match="payload"):
             Intent("flip_lane", "not-a-dict", "k")
 
+    def test_nan_in_payload_rejected(self):
+        with pytest.raises(IntentError, match="finite"):
+            Intent("move_capital", {"amount_usd": float("nan")}, "k")
+
+    def test_unserializable_payload_rejected(self):
+        with pytest.raises(IntentError, match="JSON-serializable"):
+            Intent("flip_lane", {"lanes": {"a", "b"}}, "k")
+
 
 # ---------------------------------------------------------------------------
 # Submit + idempotency dedupe

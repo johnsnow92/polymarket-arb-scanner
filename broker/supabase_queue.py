@@ -14,6 +14,7 @@ by default so only the service role can touch them.
 
 import contextlib
 import logging
+import math
 import os
 
 import requests
@@ -201,19 +202,30 @@ class SupabaseIntentQueue:
 
     # -- single-writer lease -------------------------------------------------
 
+    @staticmethod
+    def _require_finite_ttl(ttl_seconds: float) -> float:
+        # A NaN TTL would make every expiry comparison False (fail-open).
+        try:
+            ttl = float(ttl_seconds)
+        except (TypeError, ValueError) as exc:
+            raise IntentError(f"lease ttl_seconds must be a number: {ttl_seconds!r}") from exc
+        if not math.isfinite(ttl):
+            raise IntentError(f"lease ttl_seconds must be finite: {ttl_seconds!r}")
+        return ttl
+
     def acquire_lease(self, holder: str, ttl_seconds: float) -> bool:
         """Acquire (or idempotently renew) the loop lease. False if held."""
         return bool(self._post_rpc("broker_acquire_lease", {
             "p_name": self._lease_name,
             "p_holder": holder,
-            "p_ttl_seconds": float(ttl_seconds),
+            "p_ttl_seconds": self._require_finite_ttl(ttl_seconds),
         }))
 
     def renew_lease(self, holder: str, ttl_seconds: float) -> bool:
         return bool(self._post_rpc("broker_renew_lease", {
             "p_name": self._lease_name,
             "p_holder": holder,
-            "p_ttl_seconds": float(ttl_seconds),
+            "p_ttl_seconds": self._require_finite_ttl(ttl_seconds),
         }))
 
     def release_lease(self, holder: str) -> bool:

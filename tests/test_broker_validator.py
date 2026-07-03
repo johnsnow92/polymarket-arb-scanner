@@ -248,6 +248,14 @@ class TestFreshness:
         assert not result.ok
         assert "cannot verify" in result.reason
 
+    def test_fail_closed_on_nan_age(self):
+        # NaN > ttl is always False — must not pass as "fresh".
+        v = make_validator(sources=healthy_sources(
+            input_ages_seconds=lambda: {"prices": float("nan")}))
+        result = v._check_freshness(flip_enable())
+        assert not result.ok
+        assert "non-finite" in result.reason
+
 
 # ---------------------------------------------------------------------------
 # Cooldown

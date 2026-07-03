@@ -102,7 +102,10 @@ class PolicyConfig:
 
 def _require_finite(value, key: str) -> float:
     """JSON accepts NaN/Infinity; a NaN cap would make every comparison
-    fail-open (NaN > ceiling is always False). Reject non-finite numbers."""
+    fail-open (NaN > ceiling is always False). Reject non-finite numbers,
+    and booleans (bool is an int subclass — float(True) == 1.0)."""
+    if isinstance(value, bool):
+        raise PolicyError(f"{key} must be a number, got {value!r}")
     try:
         num = float(value)
     except (TypeError, ValueError) as exc:
@@ -151,7 +154,10 @@ def _validate(data: dict, path: Path) -> None:
     if _require_finite(micro["max_first_order_usd"],
                        "micro_entry.max_first_order_usd") <= 0:
         raise PolicyError("micro_entry.max_first_order_usd must be > 0")
-    if int(_require_finite(micro["first_n_fills"], "micro_entry.first_n_fills")) < 1:
+    fills = _require_finite(micro["first_n_fills"], "micro_entry.first_n_fills")
+    if fills != int(fills):
+        raise PolicyError(f"micro_entry.first_n_fills must be an integer, got {fills!r}")
+    if int(fills) < 1:
         raise PolicyError("micro_entry.first_n_fills must be >= 1")
     if _require_finite(micro["max_fill_deviation_pct"],
                        "micro_entry.max_fill_deviation_pct") <= 0:

@@ -6,6 +6,7 @@ ALL applicable checks must pass or the intent is rejected.
 """
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -140,6 +141,10 @@ class BrokerValidator:
             return CheckResult("freshness", False,
                                "no gate inputs/heartbeats reported — cannot verify freshness")
         for name, age in {**inputs, **heartbeats}.items():
+            # NaN would make `age > ttl` False — fail closed on non-finite ages.
+            if not math.isfinite(age):
+                return CheckResult("freshness", False,
+                                   f"'{name}' reported a non-finite age ({age!r})")
             if age > ttl:
                 return CheckResult("freshness", False,
                                    f"'{name}' is stale ({age:.0f}s > TTL {ttl:.0f}s)")

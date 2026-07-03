@@ -179,3 +179,10 @@ class TestLeaseContract:
         assert queue.acquire_lease("sessionA", -1) is True
         assert queue.acquire_lease("sessionB", 60) is True
         assert queue.lease_holder() == "sessionB"
+
+    def test_non_finite_ttl_rejected(self, queue):
+        # NaN expiry would make every lease comparison fail-open.
+        with pytest.raises(IntentError, match="finite"):
+            queue.acquire_lease("sessionA", float("nan"))
+        with pytest.raises(IntentError, match="finite"):
+            queue.renew_lease("sessionA", float("inf"))

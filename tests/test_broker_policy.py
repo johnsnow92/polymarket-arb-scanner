@@ -120,6 +120,20 @@ class TestLoadPolicyFailClosed:
             load_policy(write_policy(tmp_path, policy_data(
                 cooldown_seconds="soon")))
 
+    def test_boolean_cap_rejected(self, tmp_path):
+        # bool is an int subclass — float(True) == 1.0 would slip through.
+        with pytest.raises(PolicyError, match="principal_cap_usd"):
+            load_policy(write_policy(tmp_path, policy_data(
+                principal_cap_usd=True)))
+
+    def test_fractional_fill_count_rejected(self, tmp_path):
+        data = policy_data(micro_entry={
+            "max_first_order_usd": 10.0, "first_n_fills": 5.5,
+            "max_fill_deviation_pct": 0.05,
+        })
+        with pytest.raises(PolicyError, match="integer"):
+            load_policy(write_policy(tmp_path, data))
+
     def test_string_kill_state_rejected(self, tmp_path):
         # bool("false") is True — coercion would silently un-kill a lane.
         data = policy_data(kill_state={"global": "false", "lanes": {}})
