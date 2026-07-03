@@ -204,6 +204,16 @@ class TestHardStops:
         assert decision.status == STATUS_HARD_STOP
         executors.move_capital.assert_not_called()
 
+    def test_unknown_flip_action_rejected_not_executed(self):
+        broker, _, executors = make_broker()
+        intent = Intent("flip_lane",
+                        {"lane": "kalshi-lip", "venue": "kalshi", "action": "frobnicate"},
+                        "bad-action")
+        decision = broker.process(intent)
+        assert decision.status == STATUS_REJECTED
+        assert "enable|disable" in decision.reason
+        executors.flip_lane.assert_not_called()
+
     def test_two_factor_wall_hard_stops_never_bypassed(self):
         escalations = []
         executors = ok_executors()

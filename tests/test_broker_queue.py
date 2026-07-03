@@ -6,6 +6,7 @@ DoD item 1: append-only, idempotency-key dedupe (repeat = no-op).
 import os
 import sqlite3
 import sys
+import tempfile
 
 import pytest
 
@@ -180,3 +181,27 @@ class TestHalts:
         queue.clear_halt(HALT_SCOPE_CAPITAL, "jonathon")
         queue.record_halt(HALT_SCOPE_CAPITAL, "break 2")
         assert queue.halt_active(HALT_SCOPE_CAPITAL) is True
+
+
+# ---------------------------------------------------------------------------
+# Lease atomicity across separate connections (two competing processes)
+# ---------------------------------------------------------------------------
+
+class TestLeaseCrossConnection:
+    def test_only_one_connection_wins(self):
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            a = IntentQueue(tmp.name, lease_name="loop")
+            b = IntentQueue(tmp.name, lease_name="loop")
+            # A wins the free lease; B (separate connection) must not also win.
+            assert a.acquire_lease("A", 60) is True
+            assert b.acquire_lease("B", 60) is False
+            assert b.lease_holder() == "A"
+            # After A releases, B can take it.
+            assert a.release_lease("A") is True
+            assert b.acquire_lease("B", 60) is True
+            a.conn.close()
+            b.conn.close()
+        finally:
+            os.unlink(tmp.name)

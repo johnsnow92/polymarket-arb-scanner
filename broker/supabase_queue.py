@@ -12,6 +12,7 @@ The broker is a trusted server-side component; the broker tables are RLS-deny
 by default so only the service role can touch them.
 """
 
+import contextlib
 import logging
 import os
 
@@ -79,32 +80,45 @@ class SupabaseIntentQueue:
     # -- low-level helpers --------------------------------------------------
 
     def _post_rpc(self, fn: str, payload: dict):
-        resp = self._session.post(
-            f"{self._rpc}/{fn}", json=payload, timeout=self._timeout
-        )
+        with self._transport(fn):
+            resp = self._session.post(
+                f"{self._rpc}/{fn}", json=payload, timeout=self._timeout
+            )
         if resp.status_code >= 400:
             self._raise(fn, resp)
         return resp.json()
 
     def _get(self, table: str, params: dict):
-        resp = self._session.get(
-            f"{self._rest}/{table}", params=params, timeout=self._timeout
-        )
+        with self._transport(f"GET {table}"):
+            resp = self._session.get(
+                f"{self._rest}/{table}", params=params, timeout=self._timeout
+            )
         if resp.status_code >= 400:
             self._raise(f"GET {table}", resp)
         return resp.json()
 
     def _insert(self, table: str, row: dict):
-        resp = self._session.post(
-            f"{self._rest}/{table}",
-            json=row,
-            params={"select": "id"},
-            headers={"Prefer": "return=representation"},
-            timeout=self._timeout,
-        )
+        with self._transport(f"INSERT {table}"):
+            resp = self._session.post(
+                f"{self._rest}/{table}",
+                json=row,
+                params={"select": "id"},
+                headers={"Prefer": "return=representation"},
+                timeout=self._timeout,
+            )
         if resp.status_code >= 400:
             self._raise(f"INSERT {table}", resp)
         return resp.json()
+
+    @contextlib.contextmanager
+    def _transport(self, op: str):
+        # A transport failure surfaces as a controlled RuntimeError (with the op,
+        # never the key) so callers fail closed instead of leaking raw requests
+        # exceptions out of the queue abstraction.
+        try:
+            yield
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Supabase {op} unreachable: {exc}") from exc
 
     @staticmethod
     def _raise(op: str, resp: requests.Response) -> None:
@@ -125,7 +139,11 @@ class SupabaseIntentQueue:
             "p_type": intent.intent_type,
             "p_payload": intent.payload,
         })
-        row = rows[0] if isinstance(rows, list) else rows
+        row = rows[0] if isinstance(rows, list) and rows else rows
+        if not isinstance(row, dict) or "id" not in row or "created" not in row:
+            raise RuntimeError(
+                f"broker_submit_intent returned an unexpected response: {rows!r}"
+            )
         return int(row["id"]), bool(row["created"])
 
     def append_event(self, intent_id: int, status: str, reason: str = "") -> None:

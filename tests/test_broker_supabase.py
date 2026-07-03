@@ -96,6 +96,22 @@ class TestSubmit:
         with pytest.raises(IntentError, match="reused"):
             q.submit(flip("abc"))
 
+    def test_unexpected_rpc_response_raises(self, q):
+        q._session.post.return_value = _resp(200, [])  # empty array
+        with pytest.raises(RuntimeError, match="unexpected response"):
+            q.submit(flip("abc"))
+
+    def test_transport_error_surfaces_controlled(self, q):
+        import requests as _rq
+        q._session.post.side_effect = _rq.ConnectionError("boom")
+        with pytest.raises(RuntimeError, match="unreachable"):
+            q.submit(flip("abc"))
+        # the key never appears in the surfaced message
+        try:
+            q.submit(flip("abc"))
+        except RuntimeError as exc:
+            assert "svc-role-secret" not in str(exc)
+
 
 # ---------------------------------------------------------------------------
 # events + append-only translation

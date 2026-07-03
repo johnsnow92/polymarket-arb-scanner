@@ -244,23 +244,27 @@ class IntentQueue:
         return self.conn.execute("SELECT strftime('%s', 'now') + 0.0").fetchone()[0]
 
     def acquire_lease(self, holder: str, ttl_seconds: float) -> bool:
-        """Acquire (or idempotently renew) the loop lease. False if held."""
+        """Acquire (or idempotently renew) the loop lease. False if held.
+
+        Atomic in a single statement: a fresh INSERT wins the free lease; on
+        conflict the DO UPDATE fires only if the lease is expired or already
+        ours, so two processes can't both win. Success is read back from the
+        row rather than assumed.
+        """
         with self._lock:
             now = self._sql_now()
-            row = self.conn.execute(
-                "SELECT holder, expires_at FROM leases WHERE name = ?",
-                (self._lease_name,),
-            ).fetchone()
-            if row is not None and row["holder"] != holder and row["expires_at"] >= now:
-                return False
             self.conn.execute(
                 "INSERT INTO leases (name, holder, expires_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(name) DO UPDATE SET holder = excluded.holder, "
-                "expires_at = excluded.expires_at",
-                (self._lease_name, holder, now + ttl_seconds),
+                "expires_at = excluded.expires_at "
+                "WHERE leases.expires_at < ? OR leases.holder = excluded.holder",
+                (self._lease_name, holder, now + ttl_seconds, now),
             )
             self.conn.commit()
-            return True
+            row = self.conn.execute(
+                "SELECT holder FROM leases WHERE name = ?", (self._lease_name,),
+            ).fetchone()
+            return row is not None and row["holder"] == holder
 
     def renew_lease(self, holder: str, ttl_seconds: float) -> bool:
         with self._lock:

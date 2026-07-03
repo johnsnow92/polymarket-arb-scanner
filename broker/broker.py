@@ -92,6 +92,10 @@ class PolicyBroker:
                 duplicate=True,
             )
 
+        malformed = self._malformed_reason(intent)
+        if malformed:
+            return self._finish(intent_id, intent, STATUS_REJECTED, malformed)
+
         hard_stop = self._hard_stop_reason(intent)
         if hard_stop:
             return self._finish(intent_id, intent, STATUS_HARD_STOP, hard_stop)
@@ -105,6 +109,16 @@ class PolicyBroker:
         return self._execute(intent_id, intent)
 
     # ------------------------------------------------------------------
+
+    def _malformed_reason(self, intent: Intent) -> str:
+        """Reject payloads the rulebook can't safely interpret, before an
+        unknown value falls through to a permissive default (e.g. an unknown
+        flip_lane action being treated like a disable)."""
+        if intent.intent_type == "flip_lane":
+            action = intent.payload.get("action")
+            if action not in ("enable", "disable"):
+                return f"flip_lane action must be enable|disable, got {action!r}"
+        return ""
 
     def _hard_stop_reason(self, intent: Intent) -> str:
         """Conditions the broker never decides on its own (spec §5)."""
