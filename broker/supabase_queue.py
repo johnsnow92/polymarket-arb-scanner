@@ -12,18 +12,24 @@ The broker is a trusted server-side component; the broker tables are RLS-deny
 by default so only the service role can touch them.
 """
 
+from __future__ import annotations
+
 import contextlib
+import json
 import logging
-import math
 import os
 
-import requests
+try:
+    import requests
+except ImportError:  # SQLite-only install — this backend refuses to construct
+    requests = None
 
 from .queue import (
     STATUS_PENDING,
     VALID_STATUSES,
     Intent,
     IntentError,
+    _require_finite_ttl,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +71,11 @@ class SupabaseIntentQueue:
         lease_name: str = _DEFAULT_LEASE_NAME,
         timeout: float = 15.0,
     ):
+        if requests is None:
+            raise SupabaseConfigError(
+                "the 'requests' package is required for the Supabase broker "
+                "backend (SQLite-only installs can use broker.queue.IntentQueue)"
+            )
         self._url, api_key = _require_env(url, key)
         self._rest = f"{self._url}/rest/v1"
         self._rpc = f"{self._rest}/rpc"
@@ -135,10 +146,13 @@ class SupabaseIntentQueue:
 
     def submit(self, intent: Intent) -> tuple[int, bool]:
         """Append an intent (server-side atomic dedupe). Returns (id, created)."""
+        # Serialize from the canonical snapshot frozen at construction, so a
+        # payload dict mutated after validation can neither smuggle content
+        # nor surface a raw serialization error from the transport layer.
         rows = self._post_rpc("broker_submit_intent", {
             "p_key": intent.idempotency_key,
             "p_type": intent.intent_type,
-            "p_payload": intent.payload,
+            "p_payload": json.loads(intent.payload_json),
         })
         row = rows[0] if isinstance(rows, list) and rows else rows
         if not isinstance(row, dict) or "id" not in row or "created" not in row:
@@ -201,31 +215,22 @@ class SupabaseIntentQueue:
         return False
 
     # -- single-writer lease -------------------------------------------------
-
-    @staticmethod
-    def _require_finite_ttl(ttl_seconds: float) -> float:
-        # A NaN TTL would make every expiry comparison False (fail-open).
-        try:
-            ttl = float(ttl_seconds)
-        except (TypeError, ValueError) as exc:
-            raise IntentError(f"lease ttl_seconds must be a number: {ttl_seconds!r}") from exc
-        if not math.isfinite(ttl):
-            raise IntentError(f"lease ttl_seconds must be finite: {ttl_seconds!r}")
-        return ttl
+    # TTL guard is the shared broker.queue._require_finite_ttl — one copy, so
+    # the two backends can never drift on this safety check.
 
     def acquire_lease(self, holder: str, ttl_seconds: float) -> bool:
         """Acquire (or idempotently renew) the loop lease. False if held."""
         return bool(self._post_rpc("broker_acquire_lease", {
             "p_name": self._lease_name,
             "p_holder": holder,
-            "p_ttl_seconds": self._require_finite_ttl(ttl_seconds),
+            "p_ttl_seconds": _require_finite_ttl(ttl_seconds),
         }))
 
     def renew_lease(self, holder: str, ttl_seconds: float) -> bool:
         return bool(self._post_rpc("broker_renew_lease", {
             "p_name": self._lease_name,
             "p_holder": holder,
-            "p_ttl_seconds": self._require_finite_ttl(ttl_seconds),
+            "p_ttl_seconds": _require_finite_ttl(ttl_seconds),
         }))
 
     def release_lease(self, holder: str) -> bool:

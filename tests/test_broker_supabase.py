@@ -69,6 +69,14 @@ class TestConfig:
         monkeypatch.setenv("SUPABASE_KEY", "fallback-key")
         assert SupabaseIntentQueue()._session.headers["apikey"] == "fallback-key"
 
+    def test_missing_requests_dependency_fails_closed(self, monkeypatch):
+        # SQLite-only installs (no requests) can still `import broker`; the
+        # Supabase backend refuses to construct with a clear config error.
+        import broker.supabase_queue as sq
+        monkeypatch.setattr(sq, "requests", None)
+        with pytest.raises(SupabaseConfigError, match="requests"):
+            SupabaseIntentQueue(url="https://proj.supabase.co", key="k")
+
 
 # ---------------------------------------------------------------------------
 # submit → RPC
@@ -89,6 +97,17 @@ class TestSubmit:
     def test_duplicate_parsed_as_not_created(self, q):
         q._session.post.return_value = _resp(200, [{"id": 7, "created": False}])
         assert q.submit(flip("abc")) == (7, False)
+
+    def test_submit_sends_frozen_snapshot_not_mutated_payload(self, q):
+        # The RPC body comes from the canonical snapshot frozen at intent
+        # construction — mutating intent.payload afterwards must not change
+        # what is sent (nor crash serialization).
+        q._session.post.return_value = _resp(200, [{"id": 9, "created": True}])
+        intent = flip("snap")
+        intent.payload["lane"] = object()  # in-place mutation post-validation
+        assert q.submit(intent) == (9, True)
+        sent = q._session.post.call_args[1]["json"]["p_payload"]
+        assert sent == {"lane": "kalshi-lip", "venue": "kalshi", "action": "enable"}
 
     def test_reuse_conflict_becomes_intent_error(self, q):
         q._session.post.return_value = _resp(

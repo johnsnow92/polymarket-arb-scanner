@@ -11,6 +11,7 @@ Supabase tables (rows accumulate by design; uniqueness keeps tests correct).
 
 import os
 import sys
+import time
 import uuid
 
 import pytest
@@ -94,6 +95,21 @@ class TestSubmitContract:
                 {"amount_usd": 500, "from_venue": "kalshi", "to_venue": "polymarket"},
                 f"{pfx}-reuse"))
 
+    def test_payload_mutation_after_construction_is_inert(self, queue, pfx):
+        # The intent freezes a canonical snapshot at construction; mutating
+        # either the caller's dict or intent.payload afterwards can neither
+        # smuggle content nor surface a raw serialization error from submit.
+        raw = {"lane": "kalshi-lip", "venue": "kalshi", "action": "enable"}
+        intent = Intent("flip_lane", raw, f"{pfx}-mut")
+        raw["lane"] = "SMUGGLED"
+        intent.payload["venue"] = object()  # unserializable in-place edit
+        intent_id, created = queue.submit(intent)
+        assert created is True
+        # A pristine resubmit dedupes against the stored snapshot, proving
+        # the mutations above never reached the queue.
+        id2, created2 = queue.submit(flip(f"{pfx}-mut"))
+        assert (id2, created2) == (intent_id, False)
+
 
 # ---------------------------------------------------------------------------
 # Event-sourced status
@@ -175,8 +191,10 @@ class TestLeaseContract:
         assert queue.acquire_lease("sessionB", 60) is True
 
     def test_expired_lease_is_reclaimable(self, queue):
-        # Negative TTL puts expiry in the past → deterministically expired.
-        assert queue.acquire_lease("sessionA", -1) is True
+        # Shortest valid TTL, then wait past it (SQLite's lease clock has
+        # whole-second resolution, so the wait must cross a second boundary).
+        assert queue.acquire_lease("sessionA", 1) is True
+        time.sleep(2.2)
         assert queue.acquire_lease("sessionB", 60) is True
         assert queue.lease_holder() == "sessionB"
 
@@ -186,3 +204,13 @@ class TestLeaseContract:
             queue.acquire_lease("sessionA", float("nan"))
         with pytest.raises(IntentError, match="finite"):
             queue.renew_lease("sessionA", float("inf"))
+
+    def test_nonpositive_ttl_rejected(self, queue):
+        # A zero/negative TTL would grant a lease already expired — silently
+        # defeating the single-writer discipline.
+        with pytest.raises(IntentError, match="> 0"):
+            queue.acquire_lease("sessionA", 0)
+        with pytest.raises(IntentError, match="> 0"):
+            queue.acquire_lease("sessionA", -1)
+        with pytest.raises(IntentError, match="> 0"):
+            queue.renew_lease("sessionA", -60)

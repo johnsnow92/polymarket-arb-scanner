@@ -192,6 +192,35 @@ class TestHalts:
 
 
 # ---------------------------------------------------------------------------
+# Submit atomicity across separate connections (two competing processes)
+# ---------------------------------------------------------------------------
+
+class TestSubmitCrossConnection:
+    def test_second_connection_dedupes_instead_of_erroring(self):
+        # Two IntentQueue instances share one DB file. The atomic upsert means
+        # the loser of a same-key race gets (existing_id, created=False) — it
+        # must never see a raw sqlite3.IntegrityError.
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        try:
+            a = IntentQueue(tmp.name)
+            b = IntentQueue(tmp.name)
+            id1, c1 = a.submit(flip("race-key"))
+            id2, c2 = b.submit(flip("race-key"))
+            assert (c1, c2) == (True, False)
+            assert id1 == id2
+            # Different content under the same key is still rejected.
+            altered = Intent("flip_lane", {"lane": "OTHER", "venue": "kalshi",
+                                           "action": "enable"}, "race-key")
+            with pytest.raises(IntentError, match="reused"):
+                b.submit(altered)
+            a.conn.close()
+            b.conn.close()
+        finally:
+            os.unlink(tmp.name)
+
+
+# ---------------------------------------------------------------------------
 # Lease atomicity across separate connections (two competing processes)
 # ---------------------------------------------------------------------------
 

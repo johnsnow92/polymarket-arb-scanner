@@ -92,6 +92,16 @@ class TestCaps:
         assert not caps.ok
         assert "non-finite" in caps.reason
 
+    def test_fail_closed_on_boolean_portfolio(self):
+        # bool is an int subclass — a live source returning True must not be
+        # silently coerced to a plausible $1.00 portfolio value.
+        v = make_validator(sources=healthy_sources(
+            portfolio_value_usd=lambda: True))
+        results = v.validate(move())
+        caps = next(r for r in results if r.name == "caps")
+        assert not caps.ok
+        assert "must be a number" in caps.reason
+
     def test_fail_closed_when_portfolio_source_raises(self):
         def boom():
             raise ConnectionError("venue API down")
@@ -276,6 +286,25 @@ class TestFreshness:
         result = v._check_freshness(flip_enable())
         assert not result.ok
         assert "non-finite" in result.reason
+
+    def test_fail_closed_on_boolean_age(self):
+        # bool is an int subclass — True must not pass as a 1-second age.
+        v = make_validator(sources=healthy_sources(
+            input_ages_seconds=lambda: {"prices": True}))
+        result = v._check_freshness(flip_enable())
+        assert not result.ok
+        assert "non-finite" in result.reason
+
+    def test_non_numeric_age_is_a_targeted_freshness_failure(self):
+        # A string age must produce an explicit freshness failure, not the
+        # generic "live source unreadable" from the fail-closed wrapper.
+        v = make_validator(sources=healthy_sources(
+            heartbeat_ages_seconds=lambda: {"ws_feed": "yesterday"}))
+        results = v.validate(flip_enable())
+        fresh = next(r for r in results if r.name == "freshness")
+        assert not fresh.ok
+        assert "non-finite" in fresh.reason
+        assert "unreadable" not in fresh.reason
 
 
 # ---------------------------------------------------------------------------

@@ -96,7 +96,11 @@ class BrokerValidator:
     @staticmethod
     def _finite(value, what: str) -> float:
         """Live numbers must be finite — NaN makes every threshold comparison
-        False (fail-open). Raising here lands in the _run fail-closed path."""
+        False (fail-open). Booleans are rejected too: bool is an int subclass,
+        so True/False would silently coerce a broken live source to 1.0/0.0.
+        Raising here lands in the _run fail-closed path."""
+        if isinstance(value, bool):
+            raise ValueError(f"{what} must be a number, got {value!r}")
         num = float(value)
         if not math.isfinite(num):
             raise ValueError(f"{what} is non-finite ({value!r})")
@@ -150,13 +154,17 @@ class BrokerValidator:
             return CheckResult("freshness", False,
                                "no gate inputs/heartbeats reported — cannot verify freshness")
         for name, age in {**inputs, **heartbeats}.items():
-            # NaN would make `age > ttl` False — fail closed on non-finite ages.
-            if not math.isfinite(age):
+            # NaN would make `age > ttl` False, and a bool/str age must not
+            # coerce — parse through _finite so the failure is targeted and
+            # explicit rather than a generic "live source unreadable".
+            try:
+                age_num = self._finite(age, f"'{name}' age")
+            except (TypeError, ValueError):
                 return CheckResult("freshness", False,
                                    f"'{name}' reported a non-finite age ({age!r})")
-            if age > ttl:
+            if age_num > ttl:
                 return CheckResult("freshness", False,
-                                   f"'{name}' is stale ({age:.0f}s > TTL {ttl:.0f}s)")
+                                   f"'{name}' is stale ({age_num:.0f}s > TTL {ttl:.0f}s)")
         return CheckResult("freshness", True)
 
     def _check_capital_halt(self, intent: Intent) -> CheckResult:

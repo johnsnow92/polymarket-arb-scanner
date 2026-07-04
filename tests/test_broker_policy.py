@@ -197,3 +197,15 @@ class TestComputeGateHash:
         assert compute_gate_hash({"min_net_roi": 0.02}) != compute_gate_hash(
             {"min_net_roi": 0.05}
         )
+
+    def test_non_finite_gate_value_fails_closed(self):
+        # NaN/Infinity have no canonical-JSON form — hashing must raise, not
+        # depend on Python's non-standard JSON extensions.
+        with pytest.raises(PolicyError, match="hashable"):
+            compute_gate_hash({"threshold": float("nan")})
+        with pytest.raises(PolicyError, match="hashable"):
+            compute_gate_hash({"threshold": float("inf")})
+
+    def test_unserializable_gate_value_fails_closed(self):
+        with pytest.raises(PolicyError, match="hashable"):
+            compute_gate_hash({"lanes": {"a", "b"}})

@@ -59,8 +59,16 @@ def compute_gate_hash(gate_config: dict) -> str:
 
     Key order never affects the hash, so the registered hash only changes when
     a gate value actually changes (e.g. a merged edit to a threshold).
+    Strict JSON only: a NaN/Infinity gate value has no canonical form, so it
+    raises (fail-closed) instead of hashing a Python-specific extension.
     """
-    canonical = json.dumps(gate_config, sort_keys=True, separators=(",", ":"))
+    try:
+        canonical = json.dumps(gate_config, sort_keys=True, separators=(",", ":"),
+                               allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise PolicyError(
+            f"gate config is not canonical-JSON-hashable: {exc}"
+        ) from exc
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

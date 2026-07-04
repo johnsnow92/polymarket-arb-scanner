@@ -43,6 +43,11 @@ class Intent:
     intent_type: str
     payload: dict = field(default_factory=dict)
     idempotency_key: str = ""
+    # Canonical JSON snapshot of the payload, frozen at construction. Submit
+    # paths serialize from THIS, so mutating a dict reference after
+    # construction can neither smuggle new content under the validated key
+    # nor surface a raw serialization error past the IntentError boundary.
+    payload_json: str = field(init=False, default="", compare=False, repr=False)
 
     def __post_init__(self):
         if self.intent_type not in VALID_INTENT_TYPES:
@@ -58,11 +63,14 @@ class Intent:
         # JSON (no NaN/Infinity, no unserializable objects) or dedupe/content
         # comparisons downstream would be unreliable.
         try:
-            json.dumps(self.payload, sort_keys=True, allow_nan=False)
+            canonical = json.dumps(self.payload, sort_keys=True, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise IntentError(
                 f"payload must be JSON-serializable with finite numbers: {exc}"
             ) from exc
+        # Detach from the caller's dict so external mutation can't reach us.
+        object.__setattr__(self, "payload", json.loads(canonical))
+        object.__setattr__(self, "payload_json", canonical)
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +83,25 @@ HALT_SCOPE_ALL = "all"
 DEFAULT_LEASE_NAME = "policy_broker_loop"
 
 _APPEND_ONLY_TABLES = ("intents", "intent_events", "halts")
+
+
+def _require_finite_ttl(ttl_seconds: float) -> float:
+    """Shared lease-TTL guard for every queue backend (single copy — the two
+    backends must not drift on this safety check).
+
+    A NaN TTL would make every expiry comparison False (fail-open); a zero or
+    negative TTL grants a lease that is expired the instant it is issued,
+    silently defeating the single-writer discipline.
+    """
+    try:
+        ttl = float(ttl_seconds)
+    except (TypeError, ValueError) as exc:
+        raise IntentError(f"lease ttl_seconds must be a number: {ttl_seconds!r}") from exc
+    if not math.isfinite(ttl):
+        raise IntentError(f"lease ttl_seconds must be finite: {ttl_seconds!r}")
+    if ttl <= 0:
+        raise IntentError(f"lease ttl_seconds must be > 0: {ttl_seconds!r}")
+    return ttl
 
 
 class IntentQueue:
@@ -143,31 +170,15 @@ class IntentQueue:
         """Append an intent. Returns (intent_id, created).
 
         A repeated idempotency key is a no-op: the existing row id is returned
-        with created=False and nothing is written.
+        with created=False and nothing is written. The insert is a single
+        atomic upsert, so two connections racing on the same key can never
+        surface an IntegrityError — exactly one wins, the other dedupes.
         """
-        payload_json = json.dumps(intent.payload, sort_keys=True, allow_nan=False)
+        payload_json = intent.payload_json
         with self._lock:
-            row = self.conn.execute(
-                "SELECT id, intent_type, payload FROM intents WHERE idempotency_key = ?",
-                (intent.idempotency_key,),
-            ).fetchone()
-            if row is not None:
-                # A key reused for DIFFERENT content is not a retry — it is a
-                # bug or an attempt to smuggle a new action under an old key.
-                if (row["intent_type"] != intent.intent_type
-                        or row["payload"] != payload_json):
-                    raise IntentError(
-                        f"idempotency_key {intent.idempotency_key!r} reused "
-                        "for a different intent — rejected"
-                    )
-                logger.info(
-                    "Duplicate intent %s (id=%d) — no-op",
-                    intent.idempotency_key, row["id"],
-                )
-                return row["id"], False
             cur = self.conn.execute(
                 "INSERT INTO intents (idempotency_key, intent_type, payload, created_at) "
-                "VALUES (?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING",
                 (
                     intent.idempotency_key,
                     intent.intent_type,
@@ -176,7 +187,29 @@ class IntentQueue:
                 ),
             )
             self.conn.commit()
-            return cur.lastrowid, True
+            created = cur.rowcount == 1
+            row = self.conn.execute(
+                "SELECT id, intent_type, payload FROM intents WHERE idempotency_key = ?",
+                (intent.idempotency_key,),
+            ).fetchone()
+        if row is None:  # unreachable: rows are append-only, never deleted
+            raise RuntimeError(
+                f"intent {intent.idempotency_key!r} vanished after upsert"
+            )
+        if not created:
+            # A key reused for DIFFERENT content is not a retry — it is a
+            # bug or an attempt to smuggle a new action under an old key.
+            if (row["intent_type"] != intent.intent_type
+                    or row["payload"] != payload_json):
+                raise IntentError(
+                    f"idempotency_key {intent.idempotency_key!r} reused "
+                    "for a different intent — rejected"
+                )
+            logger.info(
+                "Duplicate intent %s (id=%d) — no-op",
+                intent.idempotency_key, row["id"],
+            )
+        return row["id"], created
 
     def append_event(self, intent_id: int, status: str, reason: str = "") -> None:
         if status not in VALID_STATUSES:
@@ -253,17 +286,6 @@ class IntentQueue:
     def _sql_now(self) -> float:
         return self.conn.execute("SELECT strftime('%s', 'now') + 0.0").fetchone()[0]
 
-    @staticmethod
-    def _require_finite_ttl(ttl_seconds: float) -> float:
-        # A NaN TTL would make every expiry comparison False (fail-open).
-        try:
-            ttl = float(ttl_seconds)
-        except (TypeError, ValueError) as exc:
-            raise IntentError(f"lease ttl_seconds must be a number: {ttl_seconds!r}") from exc
-        if not math.isfinite(ttl):
-            raise IntentError(f"lease ttl_seconds must be finite: {ttl_seconds!r}")
-        return ttl
-
     def acquire_lease(self, holder: str, ttl_seconds: float) -> bool:
         """Acquire (or idempotently renew) the loop lease. False if held.
 
@@ -272,7 +294,7 @@ class IntentQueue:
         ours, so two processes can't both win. Success is read back from the
         row rather than assumed.
         """
-        ttl_seconds = self._require_finite_ttl(ttl_seconds)
+        ttl_seconds = _require_finite_ttl(ttl_seconds)
         with self._lock:
             now = self._sql_now()
             self.conn.execute(
@@ -289,7 +311,7 @@ class IntentQueue:
             return row is not None and row["holder"] == holder
 
     def renew_lease(self, holder: str, ttl_seconds: float) -> bool:
-        ttl_seconds = self._require_finite_ttl(ttl_seconds)
+        ttl_seconds = _require_finite_ttl(ttl_seconds)
         with self._lock:
             now = self._sql_now()
             cur = self.conn.execute(
