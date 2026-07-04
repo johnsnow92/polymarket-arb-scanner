@@ -617,6 +617,54 @@ MM_TOXIC_FLOW_ENABLED = _env_bool("MM_TOXIC_FLOW_ENABLED", "false")
 MM_TOXIC_FLOW_THRESHOLD = _env_float("MM_TOXIC_FLOW_THRESHOLD", "0.60")
 MM_TOXIC_FLOW_PAUSE_SECONDS = _env_float("MM_TOXIC_FLOW_PAUSE_SECONDS", "60.0")
 
+# ---------------------------------------------------------------------------
+# Kalshi reward-MM pilot (plan 10 — docs/plans/10-mm-pilot-prep.md).
+# Independently gated from the legacy Polymarket MM_ENABLED path. Venue is
+# Kalshi ONLY: every pilot order is hard-checked platform == "kalshi" at the
+# authorize_order choke point in mm_pilot.py, on top of the
+# ENABLED_EXECUTION_PLATFORMS allowlist. All defaults are the conservative
+# tranche-1 pilot values from the spec ($2-3K bankroll, <=$300 gross/market).
+# ---------------------------------------------------------------------------
+MM_KALSHI_PILOT_ENABLED = _env_bool("MM_KALSHI_PILOT_ENABLED", "false")
+
+# Fill detection (spec section 3) — REST polling of /portfolio/fills.
+MM_FILL_POLL_SECONDS = _env_float("MM_FILL_POLL_SECONDS", "2.0")
+
+# Auto-hedge (spec section 4).
+MM_INVENTORY_TARGET_USD = _env_float("MM_INVENTORY_TARGET_USD", "0.0")
+MM_HEDGE_DEADBAND_USD = _env_float("MM_HEDGE_DEADBAND_USD", "5.0")
+MM_HEDGE_MAX_LATENCY_SECONDS = _env_float("MM_HEDGE_MAX_LATENCY_SECONDS", "10.0")
+MM_HALT_WINDOW_SECONDS = _env_float("MM_HALT_WINDOW_SECONDS", "3600.0")
+
+# Inventory caps — hard, enforced in the order path (spec section 5).
+# Both USD and contract units are enforced; the most restrictive wins.
+# The legacy MM_MAX_INVENTORY / MM_MAX_TOTAL_EXPOSURE stay untouched for the
+# old path; the pilot reads only these MM_MAX_* keys.
+MM_MAX_INVENTORY_USD = _env_float("MM_MAX_INVENTORY_USD", "100.0")
+MM_MAX_INVENTORY_CONTRACTS = _env_int("MM_MAX_INVENTORY_CONTRACTS", "250")
+MM_MAX_TOTAL_INVENTORY_USD = _env_float("MM_MAX_TOTAL_INVENTORY_USD", "250.0")
+MM_MAX_GROSS_PER_MARKET_USD = _env_float("MM_MAX_GROSS_PER_MARKET_USD", "300.0")
+MM_QUOTE_SIZE_USD = _env_float("MM_QUOTE_SIZE_USD", "10.0")
+MM_PILOT_BANKROLL_USD = _env_float("MM_PILOT_BANKROLL_USD", "2000.0")
+
+# Pre-quote gate thresholds (spec section 6).
+MM_BOOK_MAX_STALE_SECONDS = _env_float("MM_BOOK_MAX_STALE_SECONDS", "30.0")
+MM_VOL_PULL_MULTIPLIER = _env_float("MM_VOL_PULL_MULTIPLIER", "2.5")
+MM_MAX_BOOK_DEPTH_FRACTION = _env_float("MM_MAX_BOOK_DEPTH_FRACTION", "0.25")
+LIP_PRICE_BAND_LOW = _env_float("LIP_PRICE_BAND_LOW", "0.10")
+LIP_PRICE_BAND_HIGH = _env_float("LIP_PRICE_BAND_HIGH", "0.90")
+
+# Kill switch / control plane (spec section 7). Fail closed: a cache older
+# than MM_CONTROLS_MAX_STALE_SECONDS means unknown operator intent = off.
+MM_CONTROLS_POLL_SECONDS = _env_float("MM_CONTROLS_POLL_SECONDS", "60.0")
+MM_CONTROLS_MAX_STALE_SECONDS = _env_float("MM_CONTROLS_MAX_STALE_SECONDS", "300.0")
+
+# Canary phase (spec section 8). Live trading always begins in canary mode.
+MM_CANARY_FILLS = _env_int("MM_CANARY_FILLS", "10")
+MM_CANARY_QUOTE_SIZE_USD = _env_float("MM_CANARY_QUOTE_SIZE_USD", "2.0")
+MM_CANARY_MAX_LOSS_USD = _env_float("MM_CANARY_MAX_LOSS_USD", "10.0")
+MM_CANARY_MIN_HOURS = _env_float("MM_CANARY_MIN_HOURS", "24.0")
+
 # Layer 4 — Informed Trading (New)
 # #39: Social Sentiment Signals — Twitter/Reddit sentiment vs price
 SOCIAL_SENTIMENT_ENABLED = _env_bool("SOCIAL_SENTIMENT_ENABLED", "false")
@@ -1335,6 +1383,43 @@ def validate_config() -> list[str]:
             "EXECUTION_MODE=full-auto but DRY_RUN=true — "
             "no trades will be executed"
         )
+
+    # --- Kalshi MM pilot invariants (plan 10, spec sections 4-6) ---
+    if MM_KALSHI_PILOT_ENABLED:
+        # Forced preconditions: hedging and both hot-path gates are NOT
+        # optional for the pilot. Refuse a live (non-dry-run) start outright.
+        if not DRY_RUN:
+            missing = [
+                name for name, enabled in (
+                    ("MM_AUTO_HEDGE_ENABLED", MM_AUTO_HEDGE_ENABLED),
+                    ("MM_TOXIC_FLOW_ENABLED", MM_TOXIC_FLOW_ENABLED),
+                    ("MM_VOLATILITY_ADJUSTED_ENABLED", MM_VOLATILITY_ADJUSTED_ENABLED),
+                ) if not enabled
+            ]
+            if missing:
+                raise ConfigError(
+                    "MM_KALSHI_PILOT_ENABLED=true with DRY_RUN=false requires "
+                    f"{', '.join(missing)} — the pilot refuses to start live "
+                    "without auto-hedge and the toxic-flow/volatility gates."
+                )
+        if "kalshi" not in ENABLED_EXECUTION_PLATFORMS:
+            raise ConfigError(
+                "MM_KALSHI_PILOT_ENABLED=true but 'kalshi' is not in "
+                "ENABLED_EXECUTION_PLATFORMS — the pilot is Kalshi-only."
+            )
+        if not (MM_MAX_INVENTORY_USD <= MM_MAX_GROSS_PER_MARKET_USD <= 300.0):
+            warnings.append(
+                f"MM pilot cap sanity: expected MM_MAX_INVENTORY_USD "
+                f"({MM_MAX_INVENTORY_USD}) <= MM_MAX_GROSS_PER_MARKET_USD "
+                f"({MM_MAX_GROSS_PER_MARKET_USD}) <= 300 (pre-registered "
+                f"per-market ceiling)"
+            )
+        if MM_MAX_TOTAL_INVENTORY_USD > 0.15 * MM_PILOT_BANKROLL_USD:
+            warnings.append(
+                f"MM pilot cap sanity: MM_MAX_TOTAL_INVENTORY_USD "
+                f"({MM_MAX_TOTAL_INVENTORY_USD}) > 15% of pilot bankroll "
+                f"(${MM_PILOT_BANKROLL_USD})"
+            )
 
     # --- Startup summary for Phase 8 strategies ---
     strategy_status = []
