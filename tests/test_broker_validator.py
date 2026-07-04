@@ -24,7 +24,11 @@ def flip_disable(key="f2"):
 
 
 def move(amount=100.0, key="m1", **extra):
-    payload = {"amount_usd": amount, "from_venue": "kalshi", "to_venue": "polymarket"}
+    # move_capital is market-scoped; the per-market + book-depth caps cannot be
+    # verified without a named market, so a default is supplied here. Book depth
+    # is read from the LIVE source (healthy_sources), never from this payload.
+    payload = {"amount_usd": amount, "from_venue": "kalshi", "to_venue": "polymarket",
+               "market": "KXTEST"}
     payload.update(extra)
     return Intent("move_capital", payload, key)
 
@@ -65,23 +69,51 @@ class TestCaps:
         assert not v._check_caps(move(100.0)).ok
 
     def test_pass_market_scoped_within_cap_and_depth(self):
+        # Live depth 5000 (healthy source); 200 <= 300 cap and <= 5000 depth.
         v = make_validator()
-        assert v._check_caps(move(200.0, market="BTC-DEC", book_depth_usd=500.0)).ok
+        assert v._check_caps(move(200.0, market="BTC-DEC")).ok
 
     def test_fail_per_market_cap(self):
         v = make_validator()
-        result = v._check_caps(move(400.0, market="BTC-DEC", book_depth_usd=5000.0))
+        result = v._check_caps(move(400.0, market="BTC-DEC"))
         assert not result.ok
         assert "per-market cap" in result.reason
 
-    def test_fail_market_without_depth(self):
-        result = make_validator()._check_caps(move(100.0, market="BTC-DEC"))
+    def test_fail_move_without_market(self):
+        # A move that omits 'market' must NOT be silently exempt from the
+        # per-market/depth caps — it is rejected (Codex finding #4).
+        no_market = Intent("move_capital",
+                           {"amount_usd": 500.0, "from_venue": "kalshi",
+                            "to_venue": "polymarket"}, "nm1")
+        result = make_validator()._check_caps(no_market)
         assert not result.ok
-        assert "book_depth" in result.reason
+        assert "must name a 'market'" in result.reason
 
-    def test_fail_amount_over_depth(self):
-        v = make_validator()
-        assert not v._check_caps(move(200.0, market="BTC-DEC", book_depth_usd=150.0)).ok
+    def test_fail_amount_over_live_depth(self):
+        # Depth comes from the LIVE source, not the payload: a move within the
+        # $300 cap still fails when live book depth is thinner than the amount.
+        v = make_validator(sources=healthy_sources(
+            market_book_depth_usd=lambda market: 150.0))
+        result = v._check_caps(move(200.0, market="BTC-DEC"))
+        assert not result.ok
+        assert "live book depth" in result.reason
+
+    def test_payload_book_depth_cannot_override_live(self):
+        # A gamed intent claiming huge depth in its payload must be ignored;
+        # the broker trusts only the live source (Codex finding #5).
+        v = make_validator(sources=healthy_sources(
+            market_book_depth_usd=lambda market: 50.0))
+        result = v._check_caps(move(200.0, market="BTC-DEC", book_depth_usd=10000.0))
+        assert not result.ok
+        assert "live book depth" in result.reason
+
+    def test_fail_closed_on_nan_live_depth(self):
+        v = make_validator(sources=healthy_sources(
+            market_book_depth_usd=lambda market: float("nan")))
+        results = v.validate(move(200.0, market="BTC-DEC"))
+        caps = next(r for r in results if r.name == "caps")
+        assert not caps.ok
+        assert "non-finite" in caps.reason
 
     def test_fail_closed_on_nan_portfolio(self):
         # NaN > ceiling is always False — must not pass the cap check.
@@ -233,6 +265,25 @@ class TestReconciliation:
         assert not recon.ok
         assert "fail-closed" in recon.reason
 
+    def test_fail_closed_on_empty_balances(self):
+        # Empty ledger/venue maps are NOT a pass — a capital move with no live
+        # balance evidence must fail closed (Codex finding #3).
+        v = make_validator(sources=healthy_sources(
+            ledger_balances=lambda: {}, venue_balances=lambda: {}))
+        result = v._check_reconciliation(move())
+        assert not result.ok
+        assert "no live balance evidence" in result.reason
+
+    def test_fail_when_move_venue_absent_from_balances(self):
+        # The move's own venues must appear on both sides; an absent venue means
+        # there is no reconciliation evidence for the funds being moved.
+        v = make_validator(sources=healthy_sources(
+            ledger_balances=lambda: {"kalshi": 3000.0},
+            venue_balances=lambda: {"kalshi": 3000.0}))
+        result = v._check_reconciliation(move())  # move touches polymarket too
+        assert not result.ok
+        assert "no reconciliation evidence" in result.reason
+
 
 # ---------------------------------------------------------------------------
 # Capital-moves halt gate
@@ -322,6 +373,16 @@ class TestCooldown:
         assert not result.ok
         assert "cooldown" in result.reason
 
+    def test_fail_closed_on_nan_elapsed(self):
+        # NaN < cooldown is always False (fail-open, no violation); a non-finite
+        # cooldown source must fail closed instead (Codex finding #2).
+        v = make_validator(sources=healthy_sources(
+            seconds_since_last_flip=lambda: float("nan")))
+        results = v.validate(flip_enable())
+        cooldown = next(r for r in results if r.name == "cooldown")
+        assert not cooldown.ok
+        assert "non-finite" in cooldown.reason
+
 
 # ---------------------------------------------------------------------------
 # Kill-switch dry-run (DoD item 6 — BEFORE the first order)
@@ -336,6 +397,14 @@ class TestKillSwitchDryRun:
         result = v._check_kill_switch_dry_run(flip_enable())
         assert not result.ok
         assert "no order may be placed" in result.reason
+
+    def test_fail_on_nonbool_truthy_dry_run(self):
+        # A broken source returning the string "false" (truthy) must NOT read as
+        # a passing dry-run — strict True only (Codex finding #1).
+        v = make_validator(sources=healthy_sources(kill_switch_dry_run=lambda: "false"))
+        result = v._check_kill_switch_dry_run(flip_enable())
+        assert not result.ok
+        assert "did not return True" in result.reason
 
     def test_dry_run_runs_for_enable_not_disable(self):
         v = make_validator()

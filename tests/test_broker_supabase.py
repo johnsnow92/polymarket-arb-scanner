@@ -95,8 +95,30 @@ class TestSubmit:
         }
 
     def test_duplicate_parsed_as_not_created(self, q):
+        # On created=false the client re-fetches the stored row and confirms the
+        # content matches before accepting the no-op (defense-in-depth).
         q._session.post.return_value = _resp(200, [{"id": 7, "created": False}])
+        q._session.get.return_value = _resp(200, [{
+            "intent_type": "flip_lane",
+            "payload": {"lane": "kalshi-lip", "venue": "kalshi", "action": "enable"}}])
         assert q.submit(flip("abc")) == (7, False)
+
+    def test_supabase_dedupe_content_mismatch_rejected(self, q):
+        # If the RPC reports a duplicate but the stored row's content differs,
+        # the client rejects it — never trusts the RPC's dedupe alone, matching
+        # the SQLite backend (Codex finding #8).
+        q._session.post.return_value = _resp(200, [{"id": 7, "created": False}])
+        q._session.get.return_value = _resp(200, [{
+            "intent_type": "move_capital",
+            "payload": {"amount_usd": 999, "from_venue": "kalshi", "to_venue": "polymarket"}}])
+        with pytest.raises(IntentError, match="reused"):
+            q.submit(flip("abc"))
+
+    def test_supabase_dedupe_missing_stored_row_raises(self, q):
+        q._session.post.return_value = _resp(200, [{"id": 7, "created": False}])
+        q._session.get.return_value = _resp(200, [])
+        with pytest.raises(RuntimeError, match="no stored row"):
+            q.submit(flip("abc"))
 
     def test_submit_sends_frozen_snapshot_not_mutated_payload(self, q):
         # The RPC body comes from the canonical snapshot frozen at intent
@@ -211,6 +233,16 @@ class TestLease:
     def test_acquire_false_when_held(self, q):
         q._session.post.return_value = _resp(200, False)
         assert q.acquire_lease("sessionB", 60) is False
+
+    def test_nonbool_lease_response_fails_closed(self, q):
+        # A truthy container (dict/list) from an ambiguous/changed RPC contract
+        # must NOT coerce to a granted lease via bool() (Codex finding #9).
+        q._session.post.return_value = _resp(200, {"granted": False})
+        with pytest.raises(RuntimeError, match="non-boolean"):
+            q.acquire_lease("sessionA", 60)
+        q._session.post.return_value = _resp(200, [False])
+        with pytest.raises(RuntimeError, match="non-boolean"):
+            q.renew_lease("sessionA", 60)
 
     def test_renew_and_release_rpcs(self, q):
         q._session.post.return_value = _resp(200, True)

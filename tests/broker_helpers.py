@@ -51,6 +51,7 @@ def healthy_sources(**overrides) -> LiveSources:
         heartbeat_ages_seconds=lambda: {"ws_feed": 5.0},
         seconds_since_last_flip=lambda: 10 ** 9,
         kill_switch_dry_run=lambda: True,
+        market_book_depth_usd=lambda market: 5000.0,
     )
     defaults.update(overrides)
     return LiveSources(**defaults)

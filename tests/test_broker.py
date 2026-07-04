@@ -39,7 +39,8 @@ def flip_enable(key="f1", lane="kalshi-lip", venue="kalshi"):
 
 
 def move(key="m1", amount=100.0, **extra):
-    payload = {"amount_usd": amount, "from_venue": "kalshi", "to_venue": "polymarket"}
+    payload = {"amount_usd": amount, "from_venue": "kalshi", "to_venue": "polymarket",
+               "market": "KXTEST"}
     payload.update(extra)
     return Intent("move_capital", payload, key)
 
@@ -227,6 +228,24 @@ class TestHardStops:
         assert "enable|disable" in decision.reason
         executors.flip_lane.assert_not_called()
 
+    def test_move_missing_required_fields_rejected_before_execute(self):
+        # move_capital without from_venue/to_venue/market must not reach the
+        # executor (Codex finding #6).
+        broker, _, executors = make_broker()
+        intent = Intent("move_capital", {"amount_usd": 100.0, "venue": "kalshi"}, "bad-move")
+        decision = broker.process(intent)
+        assert decision.status == STATUS_REJECTED
+        assert "requires a non-empty" in decision.reason
+        executors.move_capital.assert_not_called()
+
+    def test_rotate_secret_missing_name_rejected_before_execute(self):
+        broker, _, executors = make_broker()
+        intent = Intent("rotate_secret", {"venue": "kalshi"}, "bad-rotate")
+        decision = broker.process(intent)
+        assert decision.status == STATUS_REJECTED
+        assert "secret_name" in decision.reason
+        executors.rotate_secret.assert_not_called()
+
     def test_two_factor_wall_hard_stops_never_bypassed(self):
         escalations = []
         executors = ok_executors()
@@ -275,10 +294,16 @@ class TestSecretRotation:
             with pytest.raises(SecretRotationError, match="empty"):
                 rotate_secret_via_stdin(["get"], ["set"])
 
-    def test_setter_failure_returns_false(self):
+    def test_setter_failure_raises_never_silently_succeeds(self):
+        # Spec: a rotation must RAISE on setter failure so the caller marks it
+        # IN_DOUBT and escalates — never return a falsey no-op a caller could
+        # misread (Codex finding #10). The value never leaks into the error.
         with patch("broker.secrets.subprocess.run") as run:
             run.side_effect = [self._proc(0, self.SECRET), self._proc(1)]
-            assert rotate_secret_via_stdin(["get"], ["set"]) is False
+            with pytest.raises(SecretRotationError) as excinfo:
+                rotate_secret_via_stdin(["get"], ["set"])
+            assert "exited 1" in str(excinfo.value)
+            assert "EXTREMELY-SECRET" not in str(excinfo.value)
 
     def test_getter_timeout_raises_without_value(self):
         with patch("broker.secrets.subprocess.run") as run:

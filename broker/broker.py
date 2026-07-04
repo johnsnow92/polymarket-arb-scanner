@@ -121,11 +121,28 @@ class PolicyBroker:
     def _malformed_reason(self, intent: Intent) -> str:
         """Reject payloads the rulebook can't safely interpret, before an
         unknown value falls through to a permissive default (e.g. an unknown
-        flip_lane action being treated like a disable)."""
+        flip_lane action being treated like a disable) or an executor is handed
+        an intent missing its required fields."""
+        p = intent.payload
         if intent.intent_type == "flip_lane":
-            action = intent.payload.get("action")
+            action = p.get("action")
             if action not in ("enable", "disable"):
                 return f"flip_lane action must be enable|disable, got {action!r}"
+            if not str(p.get("lane", "")).strip():
+                return "flip_lane requires a non-empty 'lane'"
+            if not str(p.get("venue", "")).strip():
+                return "flip_lane requires a non-empty 'venue'"
+        elif intent.intent_type == "move_capital":
+            for name in ("from_venue", "to_venue", "market"):
+                if not str(p.get(name, "")).strip():
+                    return f"move_capital requires a non-empty {name!r}"
+            if "amount_usd" not in p:
+                return "move_capital requires 'amount_usd'"
+        elif intent.intent_type == "rotate_secret":
+            if not str(p.get("secret_name", "")).strip():
+                return "rotate_secret requires a non-empty 'secret_name'"
+            if not str(p.get("venue", "")).strip():
+                return "rotate_secret requires a 'venue' (only allowlisted-venue creds rotate)"
         return ""
 
     def _hard_stop_reason(self, intent: Intent) -> str:
@@ -141,6 +158,18 @@ class PolicyBroker:
         return ""
 
     def _execute(self, intent_id: int, intent: Intent) -> BrokerDecision:
+        # Re-validate against LIVE sources immediately before the side effect.
+        # This shrinks the TOCTOU window between the first validate() and the
+        # executor call (spec RUNAWAY GUARD: "re-validate ... against the live
+        # source before any consequential action"). It does not eliminate the
+        # residual window between this check and the venue's own fill — that is
+        # covered by micro-entry sizing + per-fill deviation halts.
+        recheck = self.validator.validate(intent)
+        if not self.validator.passed(recheck):
+            return self._finish(
+                intent_id, intent, STATUS_REJECTED,
+                f"re-validation before execute failed: {self.validator.failures(recheck)}",
+            )
         try:
             result = self.executors.for_type(intent.intent_type)(intent)
         except TwoFactorWallError as exc:

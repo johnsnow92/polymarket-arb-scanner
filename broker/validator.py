@@ -33,6 +33,10 @@ class LiveSources:
     heartbeat_ages_seconds: Callable[[], dict[str, float]]
     seconds_since_last_flip: Callable[[], float]
     kill_switch_dry_run: Callable[[], bool]
+    # Live per-market book depth in USD, read by the broker ITSELF — never
+    # trusted from the proposer's payload (the proposer is the very thing the
+    # broker exists to constrain, so a gamed intent could claim any depth).
+    market_book_depth_usd: Callable[[str], float]
 
 
 @dataclass(frozen=True)
@@ -194,27 +198,59 @@ class BrokerValidator:
         if amount > ceiling:
             return CheckResult("caps", False,
                                f"amount ${amount:,.2f} exceeds working ceiling ${ceiling:,.2f}")
+        # Every capital move is market-scoped: the per-market cap and the
+        # book-depth cap CANNOT be verified without a named market, so a move
+        # that omits one is rejected — never silently exempt from the $/market
+        # cap by leaving 'market' out.
         market = p.get("market")
-        if market:
-            if amount > self.policy.per_market_cap_usd:
-                return CheckResult(
-                    "caps", False,
-                    f"amount ${amount:,.2f} exceeds per-market cap "
-                    f"${self.policy.per_market_cap_usd:,.2f} for '{market}'",
-                )
-            depth = p.get("book_depth_usd")
-            if depth is None:
-                return CheckResult("caps", False,
-                                   f"market-scoped move for '{market}' has no book_depth_usd — "
-                                   "cannot verify size ≤ depth")
-            if amount > self._finite(depth, "book_depth_usd"):
-                return CheckResult("caps", False,
-                                   f"amount ${amount:,.2f} exceeds book depth ${float(depth):,.2f}")
+        if not market:
+            return CheckResult(
+                "caps", False,
+                "move_capital must name a 'market' — the per-market cap and book-depth "
+                "cap cannot be verified without it",
+            )
+        if amount > self.policy.per_market_cap_usd:
+            return CheckResult(
+                "caps", False,
+                f"amount ${amount:,.2f} exceeds per-market cap "
+                f"${self.policy.per_market_cap_usd:,.2f} for '{market}'",
+            )
+        # Book depth is read LIVE by the broker, never trusted from the
+        # proposer's payload — a gamed intent could otherwise claim any depth.
+        depth = self._finite(
+            self.sources.market_book_depth_usd(str(market)),
+            f"live book depth for '{market}'",
+        )
+        if depth <= 0:
+            return CheckResult("caps", False,
+                               f"live book depth for '{market}' is ${depth:,.2f} — cannot size a move")
+        if amount > depth:
+            return CheckResult(
+                "caps", False,
+                f"amount ${amount:,.2f} exceeds live book depth ${depth:,.2f} for '{market}'",
+            )
         return CheckResult("caps", True)
 
     def _check_reconciliation(self, intent: Intent) -> CheckResult:
         ledger = self.sources.ledger_balances()
         live = self.sources.venue_balances()
+        # Empty balance maps are NOT a pass — a capital move needs live evidence
+        # on both sides. Fail closed rather than reconcile nothing against nothing.
+        if not ledger or not live:
+            return CheckResult(
+                "reconciliation", False,
+                "no live balance evidence (ledger or venue balances empty) — "
+                "cannot reconcile a capital move",
+            )
+        # The move's own venues MUST appear on both sides; an absent venue means
+        # there is no reconciliation evidence for the funds being moved.
+        for venue in self._intent_venues(intent):
+            if venue not in ledger or venue not in live:
+                return CheckResult(
+                    "reconciliation", False,
+                    f"venue '{venue}' missing from ledger or live balances — "
+                    "no reconciliation evidence for this move",
+                )
         tolerance = self.policy.recon_tolerance_usd
         for venue in sorted(set(ledger) | set(live)):
             ledger_bal = self._finite(ledger.get(venue, 0.0), f"ledger balance '{venue}'")
@@ -232,7 +268,10 @@ class BrokerValidator:
         return CheckResult("reconciliation", True)
 
     def _check_cooldown(self, intent: Intent) -> CheckResult:
-        elapsed = self.sources.seconds_since_last_flip()
+        # NaN would make `elapsed < cooldown` False (fail-open, no violation) —
+        # route through _finite so a non-finite live source fails closed.
+        elapsed = self._finite(
+            self.sources.seconds_since_last_flip(), "seconds_since_last_flip")
         if elapsed < self.policy.cooldown_seconds:
             return CheckResult(
                 "cooldown", False,
@@ -242,9 +281,12 @@ class BrokerValidator:
         return CheckResult("cooldown", True)
 
     def _check_kill_switch_dry_run(self, intent: Intent) -> CheckResult:
-        if not self.sources.kill_switch_dry_run():
+        # Strict True only: a non-bool truthy value (e.g. the string "false" or
+        # any object) from a broken live source must NOT read as a passing
+        # dry-run and let an order be placed.
+        if self.sources.kill_switch_dry_run() is not True:
             return CheckResult("kill_switch_dry_run", False,
-                               "kill-switch dry-run halt FAILED — no order may be placed")
+                               "kill-switch dry-run did not return True — no order may be placed")
         return CheckResult("kill_switch_dry_run", True)
 
     def _check_micro_entry(self, intent: Intent) -> CheckResult:

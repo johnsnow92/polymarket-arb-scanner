@@ -24,8 +24,9 @@ def rotate_secret_via_stdin(
     """Fetch a secret via get_cmd and pipe it into set_cmd's stdin.
 
     Returns True only when the setter exits 0 (verified). Raises
-    SecretRotationError when the getter fails — error messages never include
-    the secret value.
+    SecretRotationError when the getter OR setter fails — a rotation must never
+    silently "succeed" or return a falsey no-op that a caller could misread;
+    error messages never include the secret value.
     """
     if not get_cmd or not set_cmd:
         raise SecretRotationError("get_cmd and set_cmd are both required")
@@ -58,7 +59,11 @@ def rotate_secret_via_stdin(
             f"secret setter {set_cmd[0]!r} could not run: {exc}"
         ) from exc
     if set_proc.returncode != 0:
-        logger.error("Secret setter %r exited %d", set_cmd[0], set_proc.returncode)
-        return False
+        # Fail-closed: the caller marks the rotation IN_DOUBT and escalates,
+        # never retries. Returning False here would let a caller misread a
+        # failed rotation as a benign no-op.
+        raise SecretRotationError(
+            f"secret setter {set_cmd[0]!r} exited {set_proc.returncode}"
+        )
     logger.info("Secret rotated via %r -> %r (value not logged)", get_cmd[0], set_cmd[0])
     return True

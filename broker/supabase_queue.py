@@ -159,7 +159,35 @@ class SupabaseIntentQueue:
             raise RuntimeError(
                 f"broker_submit_intent returned an unexpected response: {rows!r}"
             )
-        return int(row["id"]), bool(row["created"])
+        intent_id, created = int(row["id"]), bool(row["created"])
+        if not created:
+            # Defense-in-depth + parity with the SQLite backend: never trust the
+            # RPC's dedupe alone. A key reused for DIFFERENT content must be
+            # rejected, not silently accepted as a no-op, even if the DB failed
+            # to raise on the mismatch.
+            self._assert_stored_matches(intent, intent_id)
+        return intent_id, created
+
+    def _assert_stored_matches(self, intent: Intent, intent_id: int) -> None:
+        rows = self._get("broker_intents", {
+            "idempotency_key": f"eq.{intent.idempotency_key}",
+            "select": "intent_type,payload",
+            "limit": "1",
+        })
+        if not rows:
+            raise RuntimeError(
+                f"broker_submit_intent reported a duplicate for "
+                f"{intent.idempotency_key!r} but no stored row was found"
+            )
+        stored = rows[0]
+        stored_payload = json.dumps(
+            stored.get("payload"), sort_keys=True, allow_nan=False)
+        if (stored.get("intent_type") != intent.intent_type
+                or stored_payload != intent.payload_json):
+            raise IntentError(
+                f"idempotency_key {intent.idempotency_key!r} reused "
+                "for a different intent — rejected"
+            )
 
     def append_event(self, intent_id: int, status: str, reason: str = "") -> None:
         if status not in VALID_STATUSES:
@@ -218,26 +246,36 @@ class SupabaseIntentQueue:
     # TTL guard is the shared broker.queue._require_finite_ttl — one copy, so
     # the two backends can never drift on this safety check.
 
+    @staticmethod
+    def _as_strict_bool(value, op: str) -> bool:
+        # The lease RPCs must return a bare JSON boolean. Anything else (a dict,
+        # a list, None, a string) is an ambiguous or changed contract — a plain
+        # bool() would coerce a truthy container into a *granted* lease and
+        # defeat the single-writer guarantee. Fail closed instead.
+        if isinstance(value, bool):
+            return value
+        raise RuntimeError(f"{op} returned a non-boolean response: {value!r}")
+
     def acquire_lease(self, holder: str, ttl_seconds: float) -> bool:
         """Acquire (or idempotently renew) the loop lease. False if held."""
-        return bool(self._post_rpc("broker_acquire_lease", {
+        return self._as_strict_bool(self._post_rpc("broker_acquire_lease", {
             "p_name": self._lease_name,
             "p_holder": holder,
             "p_ttl_seconds": _require_finite_ttl(ttl_seconds),
-        }))
+        }), "broker_acquire_lease")
 
     def renew_lease(self, holder: str, ttl_seconds: float) -> bool:
-        return bool(self._post_rpc("broker_renew_lease", {
+        return self._as_strict_bool(self._post_rpc("broker_renew_lease", {
             "p_name": self._lease_name,
             "p_holder": holder,
             "p_ttl_seconds": _require_finite_ttl(ttl_seconds),
-        }))
+        }), "broker_renew_lease")
 
     def release_lease(self, holder: str) -> bool:
-        return bool(self._post_rpc("broker_release_lease", {
+        return self._as_strict_bool(self._post_rpc("broker_release_lease", {
             "p_name": self._lease_name,
             "p_holder": holder,
-        }))
+        }), "broker_release_lease")
 
     def lease_holder(self) -> str | None:
         rows = self._get("broker_leases", {
