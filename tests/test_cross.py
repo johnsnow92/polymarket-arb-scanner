@@ -838,3 +838,81 @@ class TestFeePath:
             fee_path = opp["_fee_path"]
             assert "best_yes_platform" in fee_path
             assert "best_no_platform" in fee_path
+
+
+# ---------------------------------------------------------------------------
+# _refine_cross_all_with_clob — Stage-2 drop behavior (audit #77)
+# ---------------------------------------------------------------------------
+
+class TestRefineCrossAllDropsUnprofitable:
+    """Opps confirmed unprofitable at live CLOB prices must be REMOVED from
+    the opportunities list — previously they failed the re-check but stayed
+    in the returned list with their stale mid-price net_profit."""
+
+    @patch("scans.cross._fetch_clob_for_market")
+    def test_confirmed_unprofitable_opp_is_dropped(self, mock_fetch):
+        from scans.cross import _refine_cross_all_with_clob
+        # CLOB asks so high that no combination can clear min_profit.
+        mock_fetch.return_value = (None, {
+            "yes_ask": 0.95,
+            "no_ask": 0.95,
+            "yes_ask_size": 50,
+            "no_ask_size": 50,
+        })
+        bad_opp = {
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok_y", "tok_n"],
+            "prices": "polymarket_Y=0.30 kalshi_N=0.40",
+            "net_profit": 0.25,  # stale mid-price profit
+        }
+        non_pm_opp = {
+            "_platform_a": "betfair",
+            "_platform_b": "smarkets",
+            "net_profit": 0.05,
+        }
+        opps = [bad_opp, non_pm_opp]
+        _refine_cross_all_with_clob(opps, 0.005)
+        assert bad_opp not in opps, (
+            "opp confirmed unprofitable at CLOB prices must not survive with "
+            "stale mid-price net_profit"
+        )
+        assert non_pm_opp in opps  # non-PM opps pass through untouched
+
+    @patch("scans.cross._fetch_clob_for_market")
+    def test_missing_clob_data_keeps_opp_marked_unrefined(self, mock_fetch):
+        """Data unavailable is not a confirmed failure — keep the opp."""
+        from scans.cross import _refine_cross_all_with_clob
+        mock_fetch.return_value = (None, None)
+        opp = {
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok_y", "tok_n"],
+            "prices": "polymarket_Y=0.30 kalshi_N=0.40",
+            "net_profit": 0.25,
+        }
+        opps = [opp]
+        _refine_cross_all_with_clob(opps, 0.005)
+        assert opp in opps
+        assert opp["_clob_refined"] is False
+
+    @patch("scans.cross._fetch_clob_for_market")
+    def test_profitable_opp_survives_and_is_marked_refined(self, mock_fetch):
+        from scans.cross import _refine_cross_all_with_clob
+        mock_fetch.return_value = (None, {
+            "yes_ask": 0.32,
+            "no_ask": 0.32,
+            "yes_ask_size": 50,
+            "no_ask_size": 50,
+        })
+        opp = {
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok_y", "tok_n"],
+            "prices": "polymarket_Y=0.30 kalshi_N=0.40",
+            "net_profit": 0.10,
+        }
+        opps = [opp]
+        _refine_cross_all_with_clob(opps, 0.005)
+        assert opp in opps
+        assert opp["_clob_refined"] is True

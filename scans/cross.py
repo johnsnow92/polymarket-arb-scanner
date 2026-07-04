@@ -618,14 +618,20 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float,
             except Exception as e:
                 logger.debug("CLOB fetch failed for cross-all key %s: %s", key, e)
 
-    refined_out = []
+    # Opps whose CLOB re-check confirms they are unprofitable are dropped
+    # from `opportunities` in place (mirrors _refine_cross_with_clob, which
+    # returns only survivors). Opps whose CLOB data is unavailable are kept
+    # with _clob_refined=False — only a confirmed failure removes an opp.
+    dropped_ids: set[int] = set()
     for o in pm_opps:
         token_ids = o.get("_token_ids", [])
         if not token_ids or len(token_ids) < 2:
+            o["_clob_refined"] = False
             continue
 
         clob = clob_cache.get(tuple(token_ids[:2]))
         if not clob or clob["yes_ask"] is None or clob["no_ask"] is None:
+            o["_clob_refined"] = False
             continue
 
         pa = o.get("_platform_a", "")
@@ -633,6 +639,7 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float,
         fee_key = (pa, pb) if (pa, pb) in _CROSS_FEE_FUNCS else (pb, pa)
         ff = _CROSS_FEE_FUNCS.get(fee_key)
         if not ff:
+            o["_clob_refined"] = False
             continue
 
         pm_yes = clob["yes_ask"]
@@ -656,6 +663,7 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float,
                 logger.debug("Could not parse price from prices part %r", part)
 
         if other_price is None:
+            o["_clob_refined"] = False
             continue
 
         # Determine which side Polymarket is on
@@ -671,3 +679,14 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float,
             o["net_profit"] = best_r["net_profit"]
             o["fees"] = f"${best_r['fees']:.4f}"
             o["_clob_depth"] = min(clob["yes_ask_size"] or 0, clob["no_ask_size"] or 0)
+            o["_clob_refined"] = True
+        else:
+            # Confirmed unprofitable at live CLOB prices — drop it so a stale
+            # mid-price net_profit can never reach execution.
+            dropped_ids.add(id(o))
+
+    if dropped_ids:
+        opportunities[:] = [o for o in opportunities if id(o) not in dropped_ids]
+        logger.info(
+            "Dropped %d cross-all candidates at CLOB ask prices.", len(dropped_ids)
+        )

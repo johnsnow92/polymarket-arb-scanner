@@ -588,3 +588,68 @@ class TestScanTriangular:
         # Kalshi is NO side (cheapest NO=0.25)
         assert "_kalshi_ticker" in opp
         assert opp["_kalshi_ticker"] == "KTEST-01"
+
+
+# ---------------------------------------------------------------------------
+# Refinement metadata (audit #77): opp dicts must carry _price_a/_price_b and
+# _side_a/_side_b so _refine_triangular_with_clob can reprice the PM leg
+# against the OTHER leg's real price. Without them, other_price defaulted to
+# 0 and the PM leg was always treated as the YES side.
+# ---------------------------------------------------------------------------
+
+class TestRefinementMetadata(TestScanTriangular):
+    def _scan(self, mod, pm_prices, k_prices, bf_prices, fee_func):
+        pm_market = {"conditionId": "pm1", "question": "Meta Market",
+                     "outcomePrices": "[0.25, 0.65]",
+                     "clobTokenIds": '["tok_yes","tok_no"]'}
+        k_market = {"ticker": "KT1", "title": "Meta Market"}
+        bf_market = {"id": "bf1", "name": "Meta Market"}
+
+        mock_kalshi = MagicMock()
+        mock_kalshi.get_market_price.return_value = k_prices
+        mock_betfair = MagicMock()
+        mock_betfair.get_market_price.return_value = bf_prices
+
+        with patch.object(mod, "match_cross_platform", side_effect=self._setup_three_platform_mocks(mod, pm_market, k_market, bf_market)), \
+             patch.object(mod, "filter_dust", side_effect=lambda x: x), \
+             patch.object(mod, "net_profit_triangular", side_effect=fee_func), \
+             patch.object(mod, "parse_outcome_prices", return_value=list(pm_prices)), \
+             patch.object(mod, "get_clob_prices", return_value={
+                 "yes_ask": 0.28, "yes_ask_size": 40,
+                 "no_ask": 0.80, "no_ask_size": 40,
+                 "yes_bid": 0.26, "yes_bid_size": 40,
+                 "no_bid": 0.78, "no_bid_size": 40,
+             }):
+            return mod.scan_triangular(
+                {"polymarket": [pm_market], "kalshi": [k_market], "betfair": [bf_market]},
+                {"kalshi": mock_kalshi, "betfair": mock_betfair},
+                min_profit=0.001,
+            )
+
+    @staticmethod
+    def _linear_fee(yes_p, no_p, *_args, **_kwargs):
+        net = 1.0 - yes_p - no_p
+        return {"gross_spread": net, "fees": 0.0, "net_profit": net}
+
+    def test_opp_carries_price_and_side_keys(self):
+        mod = _import_triangular()
+        # PM YES 0.25 is cheapest YES; Kalshi NO 0.30 is cheapest NO.
+        opps = self._scan(mod, (0.25, 0.65), (0.35, 0.30), (0.45, 0.40),
+                          self._linear_fee)
+        assert len(opps) == 1
+        opp = opps[0]
+        assert opp["_side_a"] == "yes"
+        assert opp["_price_a"] == pytest.approx(0.25)  # stage-1 best YES
+        assert opp["_side_b"] == "no"
+        assert opp["_price_b"] == pytest.approx(0.30)  # stage-1 best NO
+
+    def test_refinement_uses_other_leg_price_not_zero(self):
+        """CLOB refinement must reprice against the real other-leg price.
+
+        PM YES ask = 0.28, Kalshi NO = 0.30 -> net = 1 - 0.28 - 0.30 = 0.42.
+        The pre-fix behavior used other_price = 0, yielding 0.72."""
+        mod = _import_triangular()
+        opps = self._scan(mod, (0.25, 0.65), (0.35, 0.30), (0.45, 0.40),
+                          self._linear_fee)
+        assert len(opps) == 1
+        assert opps[0]["net_profit"] == pytest.approx(0.42)

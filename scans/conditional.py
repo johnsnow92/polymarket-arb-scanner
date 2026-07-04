@@ -289,20 +289,22 @@ def _refine_conditional_with_clob(
         condition_clob = clob_results.get(condition_key)
         uncond_clob = clob_results.get(uncond_key)
 
-        if cond_clob:
-            p_x_given_y = cond_clob.get("yes_ask", opp["_p_x_given_y"])
-        else:
-            p_x_given_y = opp["_p_x_given_y"]
+        # Leg pricing depends on direction (see fees.net_profit_conditional):
+        # - BUY_CONDITIONAL: buy P(X|Y) and P(Y) at the ask, SELL P(X) at the bid.
+        # - BUY_UNCONDITIONAL: buy P(X) at the ask, SELL P(X|Y) and P(Y) at the bid.
+        # Sell legs realise the bid, not the ask — pricing every leg from
+        # yes_ask overstated sell proceeds and inflated net_profit.
+        buy_conditional = opp["_direction"] == "BUY_CONDITIONAL"
 
-        if condition_clob:
-            p_y = condition_clob.get("yes_ask", opp["_p_y"])
-        else:
-            p_y = opp["_p_y"]
+        def _leg_price(clob: dict | None, is_buy: bool, fallback: float) -> float:
+            if not clob:
+                return fallback
+            val = clob.get("yes_ask") if is_buy else clob.get("yes_bid")
+            return val if val is not None else fallback
 
-        if uncond_clob:
-            p_x = uncond_clob.get("yes_ask", opp["_p_x"])
-        else:
-            p_x = opp["_p_x"]
+        p_x_given_y = _leg_price(cond_clob, buy_conditional, opp["_p_x_given_y"])
+        p_y = _leg_price(condition_clob, buy_conditional, opp["_p_y"])
+        p_x = _leg_price(uncond_clob, not buy_conditional, opp["_p_x"])
 
         from fees import net_profit_conditional
         result = net_profit_conditional(

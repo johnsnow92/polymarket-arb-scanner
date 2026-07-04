@@ -321,6 +321,14 @@ def scan_triangular(
             "confidence": min_confidence,
             "_platform_a": best_yes_platform,
             "_platform_b": best_no_platform,
+            # Refinement metadata (_refine_triangular_with_clob): platform A
+            # holds the YES leg at best_yes, platform B the NO leg at best_no.
+            # Without these, refinement fell back to other_price=0 and always
+            # treated the Polymarket leg as the YES side.
+            "_side_a": "yes",
+            "_price_a": best_yes,
+            "_side_b": "no",
+            "_price_b": best_no,
             "_platforms_checked": platforms_list,
             "_clob_depth": 0,
         }
