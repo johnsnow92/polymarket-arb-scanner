@@ -169,7 +169,10 @@ class TestRefineCrossWithClob:
 
     @patch("scans.cross._fetch_clob_for_market")
     @patch("scans.cross.net_profit_cross_platform")
-    def test_clob_fetch_failure_marks_unrefined(self, mock_fee, mock_clob):
+    def test_clob_fetch_failure_drops_opp_fail_closed(self, mock_fee, mock_clob):
+        """Audit #77 round 2: CLOB verification that cannot complete must
+        DROP the opp (fail-closed), never pass it through with stale
+        mid-price profit."""
         mock_clob.side_effect = Exception("API down")
         opp = {
             "_market_key": "mk1",
@@ -178,8 +181,7 @@ class TestRefineCrossWithClob:
         }
         markets_by_key = {"mk1": {"conditionId": "mk1"}}
         result = _refine_cross_with_clob([opp], markets_by_key, 0.005)
-        assert len(result) == 1
-        assert result[0].get("_clob_refined") is False
+        assert result == []
 
     @patch("scans.cross._fetch_clob_for_market")
     @patch("scans.cross.net_profit_cross_platform")
@@ -263,14 +265,16 @@ class TestRefineCrossWithClob:
             if result:
                 assert result[0].get("_partial_clob") is True
 
-    def test_no_market_key_passes_through(self):
+    def test_no_market_key_drops_fail_closed(self):
+        """Audit #77 round 2: no market to verify against -> drop, not
+        pass-through with unverified mid-price profit."""
         opp = {"net_profit": 0.05}
         result = _refine_cross_with_clob([opp], {}, 0.005)
-        assert len(result) == 1
-        assert result[0] is opp
+        assert result == []
 
-    def test_missing_kalshi_prices_passes_through(self):
-        """Opp without _kalshi_yes/_kalshi_no should pass through."""
+    def test_missing_kalshi_prices_drops_fail_closed(self):
+        """Audit #77 round 2: opp without _kalshi_yes/_kalshi_no cannot be
+        re-verified -> drop, not pass-through."""
         opp = {"_market_key": "mk1", "net_profit": 0.05}
         markets_by_key = {"mk1": {"conditionId": "mk1"}}
         with patch("scans.cross._fetch_clob_for_market") as mock_clob:
@@ -282,7 +286,7 @@ class TestRefineCrossWithClob:
                 },
             )
             result = _refine_cross_with_clob([opp], markets_by_key, 0.005)
-            assert len(result) == 1
+            assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -880,8 +884,11 @@ class TestRefineCrossAllDropsUnprofitable:
         assert non_pm_opp in opps  # non-PM opps pass through untouched
 
     @patch("scans.cross._fetch_clob_for_market")
-    def test_missing_clob_data_keeps_opp_marked_unrefined(self, mock_fetch):
-        """Data unavailable is not a confirmed failure — keep the opp."""
+    def test_missing_clob_data_drops_opp_fail_closed(self, mock_fetch):
+        """Audit #77 round 2: verification that cannot complete -> DROP.
+
+        A stale mid-price net_profit must never survive to execution just
+        because the live book could not be fetched."""
         from scans.cross import _refine_cross_all_with_clob
         mock_fetch.return_value = (None, None)
         opp = {
@@ -893,17 +900,38 @@ class TestRefineCrossAllDropsUnprofitable:
         }
         opps = [opp]
         _refine_cross_all_with_clob(opps, 0.005)
-        assert opp in opps
-        assert opp["_clob_refined"] is False
+        assert opps == []
 
     @patch("scans.cross._fetch_clob_for_market")
-    def test_profitable_opp_survives_and_is_marked_refined(self, mock_fetch):
+    def test_unparseable_prices_drops_opp_fail_closed(self, mock_fetch):
+        """No parseable side/price for both legs -> cannot verify -> DROP."""
+        from scans.cross import _refine_cross_all_with_clob
+        mock_fetch.return_value = (None, {
+            "yes_ask": 0.32, "no_ask": 0.68,
+            "yes_ask_size": 50, "no_ask_size": 50,
+        })
+        opp = {
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok_y", "tok_n"],
+            "prices": "garbage-no-prices",
+            "net_profit": 0.25,
+        }
+        opps = [opp]
+        _refine_cross_all_with_clob(opps, 0.005)
+        assert opps == []
+
+    @patch("scans.cross._fetch_clob_for_market")
+    def test_profitable_opp_survives_with_live_prices_persisted(self, mock_fetch):
+        """Survivors carry the LIVE executable prices — the executor parses
+        the prices string at execution time, so it must reflect the refined
+        CLOB ask, not the stale mid price."""
         from scans.cross import _refine_cross_all_with_clob
         mock_fetch.return_value = (None, {
             "yes_ask": 0.32,
-            "no_ask": 0.32,
+            "no_ask": 0.68,
             "yes_ask_size": 50,
-            "no_ask_size": 50,
+            "no_ask_size": 40,
         })
         opp = {
             "_platform_a": "polymarket",
@@ -916,3 +944,39 @@ class TestRefineCrossAllDropsUnprofitable:
         _refine_cross_all_with_clob(opps, 0.005)
         assert opp in opps
         assert opp["_clob_refined"] is True
+        # PM YES leg repriced to the live 0.32 ask; Kalshi NO leg unchanged.
+        assert opp["prices"] == "polymarket_Y=0.320 kalshi_N=0.400"
+        assert opp["total_cost"] == "$0.7200"
+        # Depth comes from the PM side actually traded (YES ask size).
+        assert opp["_clob_depth"] == 50
+
+    @patch("scans.cross._fetch_clob_for_market")
+    def test_pm_no_side_repriced_from_no_ask_only(self, mock_fetch):
+        """Side-aware refinement: when the opportunity buys PM NO + other
+        YES, only that combination is evaluated, using the live no_ask.
+        The pre-fix code also evaluated (pm_yes, other_as_no) — treating the
+        other platform's YES price as a NO price, an impossible trade."""
+        from scans.cross import _refine_cross_all_with_clob
+        mock_fetch.return_value = (None, {
+            # yes_ask deliberately absurdly cheap: if the refiner wrongly
+            # evaluates the (pm_yes, other-as-NO) combination it would win.
+            "yes_ask": 0.01,
+            "no_ask": 0.55,
+            "yes_ask_size": 99,
+            "no_ask_size": 40,
+        })
+        opp = {
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok_y", "tok_n"],
+            "prices": "polymarket_N=0.50 kalshi_Y=0.40",
+            "net_profit": 0.05,
+        }
+        opps = [opp]
+        _refine_cross_all_with_clob(opps, 0.001)
+        assert opp in opps
+        # Repriced from no_ask (0.55), keeping the original PM-NO/K-YES
+        # structure — NOT the impossible PM-YES/K-"NO" combination.
+        assert opp["prices"] == "polymarket_N=0.550 kalshi_Y=0.400"
+        assert opp["total_cost"] == "$0.9500"
+        assert opp["_clob_depth"] == 40  # NO-side ask size

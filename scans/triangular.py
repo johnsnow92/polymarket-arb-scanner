@@ -443,6 +443,18 @@ def _refine_triangular_with_clob(opportunities: list[dict], min_profit: float) -
             total_cost = pm_ask + other_price
             if total_cost > 0:
                 o["net_roi"] = f"{result['net_profit'] / total_cost * 100:.2f}%"
+            # Persist the LIVE executable prices — execution parses the
+            # prices string (and _price_a/_price_b), so leaving the stale
+            # Stage-1 mid prices in place would defeat the refinement.
+            # Platform A carries the YES leg, platform B the NO leg.
+            if pa == "polymarket":
+                yes_price, no_price = pm_ask, other_price
+            else:
+                yes_price, no_price = other_price, pm_ask
+            o["prices"] = f"{pa}_Y={yes_price:.3f} {pb}_N={no_price:.3f}"
+            o["total_cost"] = f"${total_cost:.4f}"
+            o["_price_a"] = yes_price
+            o["_price_b"] = no_price
             o["_clob_depth"] = min(
                 clob.get("yes_ask_size") or 0,
                 clob.get("no_ask_size") or 0,

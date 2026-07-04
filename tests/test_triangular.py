@@ -634,14 +634,16 @@ class TestRefinementMetadata(TestScanTriangular):
     def test_opp_carries_price_and_side_keys(self):
         mod = _import_triangular()
         # PM YES 0.25 is cheapest YES; Kalshi NO 0.30 is cheapest NO.
+        # After CLOB refinement the PM YES leg is repriced to the live 0.28
+        # ask, and the refined price is persisted back onto _price_a.
         opps = self._scan(mod, (0.25, 0.65), (0.35, 0.30), (0.45, 0.40),
                           self._linear_fee)
         assert len(opps) == 1
         opp = opps[0]
         assert opp["_side_a"] == "yes"
-        assert opp["_price_a"] == pytest.approx(0.25)  # stage-1 best YES
+        assert opp["_price_a"] == pytest.approx(0.28)  # live PM ask
         assert opp["_side_b"] == "no"
-        assert opp["_price_b"] == pytest.approx(0.30)  # stage-1 best NO
+        assert opp["_price_b"] == pytest.approx(0.30)  # Kalshi NO leg
 
     def test_refinement_uses_other_leg_price_not_zero(self):
         """CLOB refinement must reprice against the real other-leg price.
@@ -653,3 +655,16 @@ class TestRefinementMetadata(TestScanTriangular):
                           self._linear_fee)
         assert len(opps) == 1
         assert opps[0]["net_profit"] == pytest.approx(0.42)
+
+    def test_refinement_persists_live_prices_and_cost(self):
+        """Audit #77 round 2: execution parses the `prices` string, so the
+        refined opp must carry the LIVE executable prices and total_cost —
+        not the stale Stage-1 mid prices."""
+        mod = _import_triangular()
+        opps = self._scan(mod, (0.25, 0.65), (0.35, 0.30), (0.45, 0.40),
+                          self._linear_fee)
+        assert len(opps) == 1
+        opp = opps[0]
+        # PM YES leg repriced 0.25 -> 0.28 (live ask); Kalshi NO stays 0.30.
+        assert opp["prices"] == "polymarket_Y=0.280 kalshi_N=0.300"
+        assert opp["total_cost"] == "$0.5800"
