@@ -497,9 +497,9 @@ class TestCalcRealizedPnl:
     def test_uses_fill_prices_when_available(self, db):
         """Should use actual fill prices instead of expected P&L.
 
-        ``size`` is recorded in DOLLARS (executor converts to contracts via
-        int(size/price)), so cost = sum of sizes and contracts = size/fill.
-        Arb payout = min contracts across legs (guaranteed winning leg)."""
+        Polymarket ``size`` is SHARES (PolymarketTrader.place_order passes it
+        through as the share count), so cost = fill × size and contracts =
+        size. Arb payout = min contracts across legs (guaranteed winner)."""
         opp_id = db.log_opportunity("Binary", "M", "", 0.85, 0.15, 0.176, 50, "traded")
         db.log_trade(opp_id, "polymarket", "BUY", 0.40, 5.0, "filled", fill_price=0.41)
         db.log_trade(opp_id, "polymarket", "BUY", 0.45, 5.0, "filled", fill_price=0.46)
@@ -507,9 +507,8 @@ class TestCalcRealizedPnl:
 
         pos = db.get_open_positions()[0]
         realized = _calc_realized_pnl(db, pos)
-        # cost = 5 + 5 = 10; payout = min(5/0.41, 5/0.46) = 10.8696
-        expected = min(5.0 / 0.41, 5.0 / 0.46) - 10.0
-        assert realized == pytest.approx(expected)
+        # cost = 0.41*5 + 0.46*5 = 4.35; payout = min(5, 5) = 5; P&L = +0.65
+        assert realized == pytest.approx(5.0 - 4.35)
 
     def test_falls_back_to_expected_when_no_trades(self, db):
         """Should fall back to expected_pnl when no trades exist."""
@@ -527,24 +526,22 @@ class TestCalcRealizedPnl:
         pos_id = db.create_position(opp_id, "m1", "polymarket", 0.15)
         pos = db.get_open_positions()[0]
         realized = _calc_realized_pnl(db, pos)
-        # No fill prices → contracts from order prices: min(5/0.40, 5/0.45);
-        # cost = 5 + 5 = 10 (sizes are dollars).
-        expected = min(5.0 / 0.40, 5.0 / 0.45) - 10.0
-        assert realized == pytest.approx(expected)
+        # PM shares at order prices: cost = 0.40*5 + 0.45*5 = 4.25;
+        # payout = min(5, 5) = 5; P&L = +0.75
+        assert realized == pytest.approx(5.0 - 4.25)
 
     def test_directional_winning_yes_bet(self, db):
-        """Directional bet on YES that resolved YES: payout = contracts * $1.
+        """Directional PM bet on YES that resolved YES: payout = shares × $1.
 
-        $10 of size at fill 0.40 → 25 contracts. Payout = $25, cost = the $10
-        dollar size actually committed (NOT fill*size — size is already in
-        dollars). Net = +$15."""
+        Polymarket size = SHARES: 10 shares at fill 0.40 → cost $4.00,
+        payout $10.00, net +$6.00."""
         opp_id = db.log_opportunity("Imbalance", "M", "", 0.40, 0.10, 0.25, 50, "traded")
         db.log_trade(opp_id, "polymarket", "yes", 0.40, 10.0, "filled", fill_price=0.40)
         db.create_position(opp_id, "m1", "polymarket", 0.10)
         pos = db.get_open_positions()[0]
         realized = _calc_realized_pnl(db, pos, winning_side="yes")
-        # contracts = 10/0.40 = 25; payout = 25; cost = 10; net = +15
-        assert realized == pytest.approx(15.0)
+        # contracts = 10 shares; payout = 10; cost = 0.40*10 = 4; net = +6
+        assert realized == pytest.approx(6.0)
 
     def test_directional_losing_yes_bet(self, db):
         """Directional bet on YES that resolved NO: payout = $0, realized = -cost.
@@ -557,8 +554,8 @@ class TestCalcRealizedPnl:
         db.create_position(opp_id, "m1", "polymarket", 0.10)
         pos = db.get_open_positions()[0]
         realized = _calc_realized_pnl(db, pos, winning_side="no")
-        # YES leg lost; payout = 0; realized = -(dollar size) = -10
-        assert realized == pytest.approx(-10.0)
+        # PM YES leg lost; payout = 0; realized = -(0.40 × 10 shares) = -4
+        assert realized == pytest.approx(-4.0)
 
     def test_directional_handles_buy_alias_for_yes(self, db):
         """Trade.side='BUY' should match winning_side='yes'."""
@@ -567,8 +564,8 @@ class TestCalcRealizedPnl:
         db.create_position(opp_id, "m1", "polymarket", 0.10)
         pos = db.get_open_positions()[0]
         realized = _calc_realized_pnl(db, pos, winning_side="yes")
-        # contracts = 5/0.50 = 10; payout = 10; cost = 5 (dollar size); net = +5
-        assert realized == pytest.approx(5.0)
+        # PM: contracts = 5 shares; payout = 5; cost = 0.50*5 = 2.5; net = +2.5
+        assert realized == pytest.approx(2.5)
 
     def test_arbitrage_default_uses_min_contracts_payout(self, db):
         """Without winning_side, arb payout = min contracts across legs × $1
@@ -580,30 +577,45 @@ class TestCalcRealizedPnl:
         db.create_position(opp_id, "m1", "polymarket", 0.15)
         pos = db.get_open_positions()[0]
         realized = _calc_realized_pnl(db, pos)
-        # cost = 0.5 + 0.5 = 1.0; payout = min(0.5/0.41, 0.5/0.46) ≈ 1.0870
-        expected = min(0.5 / 0.41, 0.5 / 0.46) - 1.0
-        assert realized == pytest.approx(expected)
+        # PM shares: cost = 0.41*0.5 + 0.46*0.5 = 0.435; payout = min(0.5, 0.5)
+        assert realized == pytest.approx(0.5 - 0.435)
 
-    def test_regression_dollar_sized_arb_pnl_not_corrupted(self, db):
-        """Regression (audit #77): trades.size is DOLLARS, not contracts.
+    def test_regression_kalshi_dollar_size_derives_integer_contracts(self, db):
+        """Regression (audit #77 round 2): Kalshi ``size`` is the requested
+        DOLLAR amount; the executor places max(1, int(size/price)) contracts.
 
-        Two-leg $50/$50 arb at fills 0.48/0.49:
-        - cost   = $50 + $50 = $100
-        - payout = min(50/0.48, 50/0.49) = 102.0408 contracts × $1
-        - P&L    = +$2.0408
-        The old formula computed cost = 0.48*50 + 0.49*50 = $48.50 and payout
-        = $1 flat, reporting -$47.50 on a profitable arb — corrupting realized
-        P&L and the daily-loss halt input.
+        Two-leg $50/$50 Kalshi arb at 0.48/0.49:
+        - leg 1: int(50/0.48) = 104 contracts, cost = 104*0.48 = 49.92
+        - leg 2: int(50/0.49) = 102 contracts, cost = 102*0.49 = 49.98
+        - payout = min(104, 102) = 102; P&L = 102 - 99.90 = +2.10
+        The pre-audit formula reported 1.0 - (0.48*50 + 0.49*50) = -47.50 on
+        this profitable arb — corrupting realized P&L and the daily-loss
+        halt input.
         """
-        opp_id = db.log_opportunity("Binary", "M", "", 0.97, 0.02, 0.02, 50, "traded")
-        db.log_trade(opp_id, "polymarket", "BUY", 0.48, 50.0, "filled", fill_price=0.48)
-        db.log_trade(opp_id, "polymarket", "BUY", 0.49, 50.0, "filled", fill_price=0.49)
-        db.create_position(opp_id, "m1", "polymarket", 0.02)
+        opp_id = db.log_opportunity("KalshiBinary", "M", "", 0.97, 0.02, 0.02, 50, "traded")
+        db.log_trade(opp_id, "kalshi", "yes", 0.48, 50.0, "filled", fill_price=0.48)
+        db.log_trade(opp_id, "kalshi", "no", 0.49, 50.0, "filled", fill_price=0.49)
+        db.create_position(opp_id, "m1", "kalshi", 0.02)
         pos = db.get_open_positions()[0]
         realized = _calc_realized_pnl(db, pos)
-        expected = min(50.0 / 0.48, 50.0 / 0.49) - 100.0  # ≈ +2.0408
+        expected = 102.0 - (104 * 0.48 + 102 * 0.49)  # +2.10
         assert realized == pytest.approx(expected)
         assert realized > 0  # profitable arb must not report a huge loss
+
+    def test_regression_mixed_venue_arb_uses_per_venue_semantics(self, db):
+        """PM leg in SHARES + Kalshi leg in DOLLARS within one opportunity.
+
+        PM: 10 shares at 0.45 → cost 4.50, contracts 10.
+        Kalshi: $5 at 0.50 → int(5/0.50) = 10 contracts, cost 5.00.
+        payout = min(10, 10) = 10; P&L = 10 - 9.50 = +0.50.
+        """
+        opp_id = db.log_opportunity("Cross", "M", "", 0.95, 0.05, 0.05, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.45, 10.0, "filled", fill_price=0.45)
+        db.log_trade(opp_id, "kalshi", "no", 0.50, 5.0, "filled", fill_price=0.50)
+        db.create_position(opp_id, "m1", "polymarket", 0.05)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos)
+        assert realized == pytest.approx(0.50)
 
 
 # ---------------------------------------------------------------------------

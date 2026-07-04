@@ -230,6 +230,34 @@ def _leg_won(trade_side: str, winning_side: str) -> bool:
     return aliases is not None and ts in aliases
 
 
+def _leg_contracts_and_cost(trade: dict) -> tuple[float, float]:
+    """Return (contracts, dollar_cost) for one trade leg, venue-aware.
+
+    ``trades.size`` semantics differ per venue (executor._execute_single_leg):
+
+    - polymarket: ``size`` is passed straight to ``PolymarketTrader.
+      place_order``, whose ``size`` parameter is the NUMBER OF SHARES.
+      contracts = size; cost = fill_price * size.
+    - kalshi / betfair / smarkets / sxbet / matchbook / gemini / ibkr:
+      ``size`` is the requested DOLLAR amount; the executor converts to an
+      integer contract count via ``max(1, int(size / price))`` using the
+      order price. contracts mirror that conversion; cost = contracts * fill.
+    """
+    platform = (trade.get("platform") or "").lower()
+    price = trade.get("price") or 0
+    fill = trade.get("fill_price") or price
+    size = trade.get("size") or 0
+
+    if platform == "polymarket":
+        contracts = float(size)
+        cost = fill * size
+    else:
+        # Mirror the executor's dollars -> integer-contracts conversion.
+        contracts = float(max(1, int(size / price))) if price > 0 else 1.0
+        cost = contracts * fill
+    return contracts, cost
+
+
 def _calc_realized_pnl(db: TradeDB, pos: dict, winning_side: str | None = None) -> float:
     """Calculate realized P&L from actual fill prices in the trades table.
 
@@ -251,16 +279,17 @@ def _calc_realized_pnl(db: TradeDB, pos: dict, winning_side: str | None = None) 
         bets — pass winning_side for those).
 
     Note:
-        ``trades.size`` is recorded in DOLLARS — the executor converts to
-        contracts via ``int(size / price)`` at order placement. The dollar
-        cost of a leg is therefore its ``size``, NOT ``price * size``, and
-        contract counts are ``size / fill_price``.
+        Contract counts and dollar costs are derived per venue by
+        ``_leg_contracts_and_cost`` — Polymarket logs ``size`` in SHARES,
+        every other venue logs the requested DOLLAR size that the executor
+        converts via ``max(1, int(size / price))``.
     """
     trades = db.get_trades_for_opportunity(pos["opportunity_id"])
     if not trades:
         return pos.get("expected_pnl", 0)
-    # size is the dollar amount committed to the leg.
-    total_fill_cost = sum(t["size"] for t in trades)
+
+    legs = [(_leg_contracts_and_cost(t), t) for t in trades]
+    total_fill_cost = sum(cost for (_, cost), _t in legs)
     if total_fill_cost <= 0:
         return pos.get("expected_pnl", 0)
 
@@ -268,24 +297,17 @@ def _calc_realized_pnl(db: TradeDB, pos: dict, winning_side: str | None = None) 
         # Arbitrage assumption: exactly one leg settles at $1 per contract.
         # Guaranteed payout = min contracts across legs (whichever leg wins,
         # at least that many contracts pay out).
-        contracts_per_leg = []
-        for t in trades:
-            fill = t.get("fill_price") or t["price"]
-            if fill and fill > 0:
-                contracts_per_leg.append(t["size"] / fill)
+        contracts_per_leg = [contracts for (contracts, _), _t in legs]
         if not contracts_per_leg:
             return pos.get("expected_pnl", 0)
         return min(contracts_per_leg) - total_fill_cost
 
     # Per-leg payout based on resolved outcome.
     total_payout = 0.0
-    for t in trades:
+    for (contracts, _cost), t in legs:
         if not _leg_won(t.get("side", ""), winning_side):
             continue
-        fill = t.get("fill_price") or t["price"]
-        if fill > 0:
-            contracts = t["size"] / fill
-            total_payout += contracts  # $1 per winning contract
+        total_payout += contracts  # $1 per winning contract
     return total_payout - total_fill_cost
 
 
