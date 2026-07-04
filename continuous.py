@@ -244,22 +244,38 @@ def _calc_realized_pnl(db: TradeDB, pos: dict, winning_side: str | None = None) 
 
     Returns:
         Realized P&L in USD. Falls back to expected_pnl when no trade data is
-        available. When winning_side is None, assumes an arbitrage payout of
-        $1 (correct for Binary/NegRisk/Cross/etc. where one side guaranteed
-        wins, INCORRECT for losing directional bets).
+        available. When winning_side is None, assumes an arbitrage payout:
+        the winning leg pays $1/contract, so guaranteed payout is the minimum
+        contract count across legs (correct for Binary/NegRisk/Cross/etc.
+        where one side guaranteed wins, INCORRECT for losing directional
+        bets — pass winning_side for those).
+
+    Note:
+        ``trades.size`` is recorded in DOLLARS — the executor converts to
+        contracts via ``int(size / price)`` at order placement. The dollar
+        cost of a leg is therefore its ``size``, NOT ``price * size``, and
+        contract counts are ``size / fill_price``.
     """
     trades = db.get_trades_for_opportunity(pos["opportunity_id"])
     if not trades:
         return pos.get("expected_pnl", 0)
-    total_fill_cost = sum(
-        (t.get("fill_price") or t["price"]) * t["size"] for t in trades
-    )
+    # size is the dollar amount committed to the leg.
+    total_fill_cost = sum(t["size"] for t in trades)
     if total_fill_cost <= 0:
         return pos.get("expected_pnl", 0)
 
     if winning_side is None:
-        # Arbitrage assumption: exactly one side pays $1 total payout.
-        return 1.0 - total_fill_cost
+        # Arbitrage assumption: exactly one leg settles at $1 per contract.
+        # Guaranteed payout = min contracts across legs (whichever leg wins,
+        # at least that many contracts pay out).
+        contracts_per_leg = []
+        for t in trades:
+            fill = t.get("fill_price") or t["price"]
+            if fill and fill > 0:
+                contracts_per_leg.append(t["size"] / fill)
+        if not contracts_per_leg:
+            return pos.get("expected_pnl", 0)
+        return min(contracts_per_leg) - total_fill_cost
 
     # Per-leg payout based on resolved outcome.
     total_payout = 0.0
