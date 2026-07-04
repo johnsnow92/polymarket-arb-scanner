@@ -971,6 +971,65 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     except Exception as exc:
         logger.debug("MarketMaker not available: %s", exc)
 
+    # Plan 10: Kalshi reward-MM pilot safety layer (docs/plans/10-mm-pilot-prep.md).
+    # Independently gated from the legacy MM_ENABLED path above. The pilot
+    # runs its own thread so the 2s fill poll / 10s quote refresh cadences
+    # are not tied to the scan interval. Fails closed at every gate.
+    _mm_pilot = None
+    _mm_pilot_thread = None
+    _mm_pilot_stop = threading.Event()
+    if config.MM_KALSHI_PILOT_ENABLED:
+        try:
+            from mm_pilot import ControlsPoller, KalshiMMPilot
+            try:
+                from alerting import alert_manager as _pilot_alerts
+            except Exception:
+                _pilot_alerts = None
+            _controls_client = None
+            try:
+                from supabase_sync import build_client_from_env
+                _controls_client = build_client_from_env()
+            except Exception as exc:
+                logger.warning(
+                    "MM pilot: Supabase controls client unavailable (%s) — "
+                    "the kill-switch cache stays stale and the pilot fails "
+                    "closed (no quotes).", exc)
+            _mm_pilot = KalshiMMPilot(
+                kalshi_client=kalshi_client,
+                db=db,
+                alert_manager=_pilot_alerts,
+                controls=ControlsPoller(supabase_client=_controls_client),
+            )
+            # Market selection is PR #43's select_lip_markets — not this
+            # plan's job. Without it the pilot never receives a selection
+            # snapshot and gate G4 fails closed (no quotes are placed).
+            _mm_pilot_selection = None
+            try:
+                from scans.lip_select import select_lip_markets
+
+                def _mm_pilot_selection():
+                    markets = select_lip_markets(kalshi_client) or []
+                    return [
+                        m.get("ticker", "") if isinstance(m, dict) else str(m)
+                        for m in markets
+                    ]
+            except ImportError:
+                logger.warning(
+                    "MM pilot: scans.lip_select not available (PR #43 not "
+                    "landed) — no market selection; G4 fails closed.")
+            _mm_pilot_thread = threading.Thread(
+                target=_mm_pilot.run_loop,
+                args=(_mm_pilot_stop, _mm_pilot_selection),
+                name="mm-pilot",
+                daemon=True,
+            )
+            _mm_pilot_thread.start()
+            logger.info("Kalshi MM pilot started (dry_run=%s).",
+                        _mm_pilot.dry_run)
+        except Exception as exc:
+            logger.exception("MM pilot failed to start: %s", exc)
+            _mm_pilot = None
+
     # Initialize reward trackers for liquidity rewards (Layer 3)
     _reward_tracker = None
     _kalshi_reward_tracker = None
@@ -1006,6 +1065,16 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             price_val = data.get("price") or data.get("yes") or data.get("yes_price")
             if price_val is not None:
                 _market_maker.update_price(ticker, float(price_val))
+
+        # Plan 10: feed the Kalshi MM pilot's book freshness + VolatilityTracker
+        # with orderbook_delta ticks for subscribed pilot tickers.
+        if _mm_pilot and platform == "kalshi":
+            price_val = data.get("price") or data.get("yes") or data.get("yes_price")
+            if price_val is not None:
+                try:
+                    _mm_pilot.on_ws_price(ticker, float(price_val))
+                except Exception as exc:
+                    logger.debug("MM pilot WS feed failed: %s", exc)
 
         # Sprint 3: Feed VolatilityTracker + LeadLagMM with per-tick prices
         _feed_sprint3_trackers(platform, ticker, data)
@@ -1629,6 +1698,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                                     t = mkt.get("ticker", "")
                                     if t:
                                         observability_market_keys.append(t)
+                        # Plan 10: pilot tickers get toxic-flow observability
+                        # even when they don't surface in the scan data.
+                        if _mm_pilot:
+                            for _pt in _mm_pilot.pilot_tickers():
+                                if _pt not in observability_market_keys:
+                                    observability_market_keys.append(_pt)
                         if args.mode in ("all", "toxic-flow"):
                             tox_opps = scan_toxic_flow_pause(observability_market_keys)
                             all_opportunities.extend(tox_opps)
@@ -2340,6 +2415,13 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         if len(kalshi_sub_tickers) >= ws_sub_limit:
                             break
 
+                # Plan 10: pilot tickers ride the Kalshi WS subscription set
+                # so the pilot's book freshness gate (G6) sees live ticks.
+                if _mm_pilot:
+                    for _pt in _mm_pilot.pilot_tickers():
+                        if _pt and _pt not in kalshi_sub_tickers:
+                            kalshi_sub_tickers.append(_pt)
+
                 if scan_count == 1 and not ws_task:
                     feed_manager.subscribe_polymarket(poly_sub_ids)
                     if kalshi_client:
@@ -2384,6 +2466,19 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 pass
 
         # Cleanup
+        # Plan 10: stop the MM pilot first — run_loop's exit path cancels
+        # every resting pilot order before the process dies (SIGTERM rule,
+        # spec section 7).
+        if _mm_pilot:
+            logger.info("Stopping Kalshi MM pilot...")
+            _mm_pilot_stop.set()
+            if _mm_pilot_thread is not None:
+                _mm_pilot_thread.join(timeout=15)
+                if _mm_pilot_thread.is_alive():
+                    logger.warning("MM pilot thread did not stop in 15s; "
+                                   "forcing order cancel directly.")
+                    _mm_pilot.stop()
+
         logger.info("Stopping WebSocket feeds...")
         feed_manager.stop()
         if ws_task:
