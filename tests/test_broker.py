@@ -188,6 +188,42 @@ class TestRejection:
         assert any("CRITICAL" in e and "capital halt" in e for e in escalations)
         executors.move_capital.assert_not_called()
 
+    def test_failed_halt_write_freezes_capital_in_process(self):
+        # After a confirmed break whose durable halt write FAILS, the in-process
+        # guard must block a LATER move even once reconciliation looks healthy
+        # again — the DB shows no halt, so only the in-process freeze protects
+        # it (Codex R3 findings #1/#3).
+        state = {"break": True}
+
+        def venue_balances():
+            return {"kalshi": 1.0 if state["break"] else 3000.0, "polymarket": 2000.0}
+
+        broker, queue, executors = make_broker(
+            sources=healthy_sources(venue_balances=venue_balances))
+        queue.record_halt = MagicMock(side_effect=RuntimeError("db down"))
+        first = broker.process(move("m1"))
+        assert first.status == STATUS_REJECTED
+        assert broker._capital_frozen is True
+        state["break"] = False  # reconciliation is now HEALTHY
+        second = broker.process(move("m2"))
+        assert second.status == STATUS_REJECTED
+        assert "frozen in-process" in second.reason
+        executors.move_capital.assert_not_called()
+
+    def test_in_doubt_move_with_failed_halt_still_records_in_doubt(self):
+        # If the executor raises AND record_halt raises, _in_doubt must still
+        # append the IN_DOUBT event, escalate, and freeze — never propagate the
+        # halt exception and skip recording (Codex R3 finding #2).
+        escalations = []
+        executors = ok_executors()
+        executors.move_capital = MagicMock(side_effect=RuntimeError("wire dropped"))
+        broker, queue, _ = make_broker(executors=executors, escalations=escalations)
+        queue.record_halt = MagicMock(side_effect=RuntimeError("db down"))
+        decision = broker.process(move("m-doubt-halt-fail"))
+        assert decision.status == STATUS_IN_DOUBT
+        assert broker._capital_frozen is True
+        assert any("CRITICAL" in e and "capital halt" in e for e in escalations)
+
     def test_capital_halt_blocks_subsequent_healthy_moves(self):
         broker, queue, executors = make_broker()
         queue.record_halt(HALT_SCOPE_CAPITAL, "prior break")

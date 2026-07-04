@@ -84,17 +84,20 @@ class PolicyConfig:
         self.tranche: str = data["tranche"]
         self.principal_cap_usd: float = float(data["principal_cap_usd"])
         self.per_market_cap_usd: float = float(data["per_market_cap_usd"])
+        # strip().lower() canonicalization everywhere a venue/lane is compared —
+        # otherwise "draftkings " (trailing space) would miss the sportsbook set
+        # while still matching a whitespace-padded allowlist entry.
         self.venue_allowlist: frozenset[str] = frozenset(
-            str(v).lower() for v in data["venue_allowlist"]
+            str(v).strip().lower() for v in data["venue_allowlist"]
         )
         self.sportsbook_venues: frozenset[str] = frozenset(
-            str(v).lower() for v in data["sportsbook_venues"]
+            str(v).strip().lower() for v in data["sportsbook_venues"]
         )
         self.gate_hashes: dict[str, str] = dict(data["gate_hashes"])
         kill_state = data["kill_state"]
         self.kill_global: bool = bool(kill_state.get("global", False))
         self.kill_lanes: dict[str, bool] = {
-            str(k).lower(): bool(v) for k, v in kill_state.get("lanes", {}).items()
+            str(k).strip().lower(): bool(v) for k, v in kill_state.get("lanes", {}).items()
         }
         self.cooldown_seconds: float = float(data["cooldown_seconds"])
         self.freshness_ttl_seconds: float = float(data["freshness_ttl_seconds"])
@@ -102,7 +105,7 @@ class PolicyConfig:
         self.micro_entry: dict = dict(data["micro_entry"])
 
     def lane_halted(self, lane: str) -> bool:
-        return self.kill_lanes.get(lane.lower(), False)
+        return self.kill_lanes.get(lane.strip().lower(), False)
 
     def any_lane_halted(self) -> bool:
         return any(self.kill_lanes.values())

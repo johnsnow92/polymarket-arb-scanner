@@ -26,6 +26,7 @@ except ImportError:  # SQLite-only install — this backend refuses to construct
 
 from .queue import (
     STATUS_PENDING,
+    TERMINAL_STATUSES,
     VALID_STATUSES,
     Intent,
     IntentError,
@@ -196,6 +197,13 @@ class SupabaseIntentQueue:
     def append_event(self, intent_id: int, status: str, reason: str = "") -> None:
         if status not in VALID_STATUSES:
             raise IntentError(f"invalid status {status!r}")
+        # Terminal outcomes are write-once (parity with the SQLite backend); the
+        # DB migration enforces this server-side too, this is the client guard.
+        if self.current_status(intent_id) in TERMINAL_STATUSES:
+            raise IntentError(
+                f"intent {intent_id} is already in a terminal status — "
+                "outcomes are write-once"
+            )
         self._insert("broker_intent_events", {
             "intent_id": intent_id, "status": status, "reason": reason,
         })

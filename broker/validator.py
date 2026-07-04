@@ -117,7 +117,9 @@ class BrokerValidator:
     def _intent_venues(self, intent: Intent) -> list[str]:
         p = intent.payload
         keys = ("venue", "from_venue", "to_venue")
-        return [str(p[k]).lower() for k in keys if p.get(k)]
+        # strip().lower() matches PolicyConfig canonicalization — a padded venue
+        # ("draftkings ") must not dodge the sportsbook/allowlist comparison.
+        return [str(p[k]).strip().lower() for k in keys if p.get(k)]
 
     def _check_allowlist(self, intent: Intent) -> CheckResult:
         venues = self._intent_venues(intent)

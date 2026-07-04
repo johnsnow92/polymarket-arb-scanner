@@ -168,6 +168,7 @@ class TestSubmit:
 
 class TestEvents:
     def test_append_event_inserts(self, q):
+        q._session.get.return_value = _resp(200, [])  # current_status → PENDING
         q._session.post.return_value = _resp(201, [{"id": 1}])
         q.append_event(3, "EXECUTED", "ok")
         url = q._session.post.call_args[0][0]
@@ -175,12 +176,20 @@ class TestEvents:
         assert q._session.post.call_args[1]["json"] == {
             "intent_id": 3, "status": "EXECUTED", "reason": "ok"}
 
+    def test_append_event_refused_after_terminal(self, q):
+        # Write-once parity with SQLite: no event past a terminal status.
+        q._session.get.return_value = _resp(200, [{"status": "REJECTED"}])
+        with pytest.raises(IntentError, match="write-once"):
+            q.append_event(3, "EXECUTED", "override")
+        q._session.post.assert_not_called()
+
     def test_invalid_status_rejected_client_side(self, q):
         with pytest.raises(IntentError, match="invalid status"):
             q.append_event(3, "NOPE")
         q._session.post.assert_not_called()
 
     def test_append_only_violation_becomes_intent_error(self, q):
+        q._session.get.return_value = _resp(200, [])  # current_status → PENDING
         q._session.post.return_value = _resp(
             400, text="broker_intent_events is append-only")
         with pytest.raises(IntentError, match="append-only"):

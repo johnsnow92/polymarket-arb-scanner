@@ -116,12 +116,15 @@ class TestStatus:
         intent_id, _ = queue.submit(flip())
         assert queue.current_status(intent_id) == STATUS_PENDING
 
-    def test_status_is_latest_event(self, queue):
+    def test_terminal_status_is_write_once(self, queue):
         intent_id, _ = queue.submit(flip())
         queue.append_event(intent_id, STATUS_REJECTED, "caps")
-        queue.append_event(intent_id, STATUS_EXECUTED, "operator override rerun")
-        assert queue.current_status(intent_id) == STATUS_EXECUTED
-        assert queue.last_reason(intent_id) == "operator override rerun"
+        # A second terminal event is refused — the outcome is write-once, so a
+        # duplicate always reads back the original decision.
+        with pytest.raises(IntentError, match="write-once"):
+            queue.append_event(intent_id, STATUS_EXECUTED, "operator override rerun")
+        assert queue.current_status(intent_id) == STATUS_REJECTED
+        assert queue.last_reason(intent_id) == "caps"
 
     def test_invalid_status_rejected(self, queue):
         intent_id, _ = queue.submit(flip())

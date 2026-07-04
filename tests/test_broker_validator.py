@@ -190,6 +190,20 @@ class TestAllowlist:
                                       "to_venue": "bovada"}, "m9")
         assert not v._check_allowlist(bad).ok
 
+    def test_sportsbook_whitespace_alias_still_blocked(self):
+        # A padded venue ("draftkings ") must not dodge the sportsbook set via
+        # lowercase-only comparison (Codex R3 finding #4).
+        policy = make_policy(venue_allowlist=["kalshi", "draftkings"],
+                             sportsbook_venues=["draftkings"])
+        result = make_validator(policy=policy)._check_allowlist(
+            flip_enable(venue="draftkings "))
+        assert not result.ok
+        assert "never permitted" in result.reason
+
+    def test_whitespace_padded_allowlisted_venue_matches(self):
+        # The flip side: a padded allowlisted venue still resolves to allowed.
+        assert make_validator()._check_allowlist(flip_enable(venue=" kalshi ")).ok
+
 
 # ---------------------------------------------------------------------------
 # Gate-config hash (DoD item 4 — simulated merged threshold edit)

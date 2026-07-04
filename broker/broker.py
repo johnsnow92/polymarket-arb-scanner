@@ -78,6 +78,11 @@ class PolicyBroker:
         self.executors = executors
         self.escalate = escalate or _default_escalate
         self.validator = BrokerValidator(policy, sources, queue)
+        # In-process fallback freeze: set only when a durable record_halt WRITE
+        # fails, so subsequent capital moves are still blocked even though the DB
+        # halt could not be persisted. The normal (successful) halt path leaves
+        # this False and relies on the DB halt (which an operator clears).
+        self._capital_frozen = False
 
     # ------------------------------------------------------------------
 
@@ -108,6 +113,15 @@ class PolicyBroker:
         if hard_stop:
             return self._finish(intent_id, intent, STATUS_HARD_STOP, hard_stop)
 
+        # In-process capital freeze (set when a prior durable halt write failed)
+        # blocks every capital move until an operator reconciles + restarts.
+        if intent.intent_type == "move_capital" and self._capital_frozen:
+            return self._finish(
+                intent_id, intent, STATUS_REJECTED,
+                "capital moves are frozen in-process pending operator reconciliation "
+                "(a durable halt write previously failed)",
+            )
+
         results = self.validator.validate(intent)
         if not self.validator.passed(results):
             self._record_capital_halt_if_flagged(results)
@@ -118,20 +132,25 @@ class PolicyBroker:
         return self._execute(intent_id, intent)
 
     def _record_capital_halt_if_flagged(self, results) -> None:
-        """A confirmed reconciliation break halts ALL capital moves. Record it
-        here in the broker's control flow — not as a validator side-effect that
-        the fail-closed wrapper could swallow — so a record_halt failure is
-        escalated loudly and a later move can never slip through unblocked."""
+        """A confirmed reconciliation break halts ALL capital moves."""
         for r in results:
             if getattr(r, "halt_capital", False):
-                try:
-                    self.queue.record_halt(HALT_SCOPE_CAPITAL, r.reason)
-                except Exception as exc:  # a halt must never fail silently
-                    self.escalate(
-                        f"[broker] CRITICAL: could not record capital halt after a "
-                        f"reconciliation break ({r.reason}): {exc} — capital lane may "
-                        "not be frozen; operator must intervene"
-                    )
+                self._freeze_capital(r.reason)
+
+    def _freeze_capital(self, reason: str) -> None:
+        """Halt ALL capital moves. Records the durable DB halt; if that WRITE
+        fails, sets the in-process guard so subsequent moves are still blocked,
+        and escalates CRITICAL. Either way capital ends up frozen — a
+        record_halt failure can never leave the lane silently open."""
+        try:
+            self.queue.record_halt(HALT_SCOPE_CAPITAL, reason)
+        except Exception as exc:
+            self._capital_frozen = True
+            self.escalate(
+                f"[broker] CRITICAL: could not durably record the capital halt "
+                f"({reason}): {exc} — in-process guard is now blocking all capital "
+                "moves; operator must reconcile and restart"
+            )
 
     # ------------------------------------------------------------------
 
@@ -166,7 +185,7 @@ class PolicyBroker:
         """Conditions the broker never decides on its own (spec §5)."""
         p = intent.payload
         if intent.intent_type == "flip_lane" and p.get("action") == "enable":
-            lane = str(p.get("lane", "")).lower()
+            lane = str(p.get("lane", "")).strip().lower()
             if lane and self.policy.lane_halted(lane):
                 return (f"restart of lane '{lane}' after a kill-switch halt "
                         "requires operator approval")
@@ -212,6 +231,14 @@ class PolicyBroker:
                 f"but status persistence failed: {exc} — ledger still shows PENDING, "
                 "operator must reconcile"
             )
+            # A capital move whose EXECUTED status could not be persisted leaves
+            # the ledger incomplete — freeze capital so a later move cannot
+            # proceed against it until the operator reconciles.
+            if intent.intent_type == "move_capital":
+                self._freeze_capital(
+                    f"post-execute status persistence failed for capital move "
+                    f"(intent {intent_id})"
+                )
         micro = (
             dict(self.policy.micro_entry)
             if intent.intent_type == "flip_lane"
@@ -224,12 +251,11 @@ class PolicyBroker:
                               micro_entry=micro)
 
     def _in_doubt(self, intent_id: int, intent: Intent, reason: str) -> BrokerDecision:
-        # An in-doubt capital move also freezes all further capital moves
-        # until an operator reconciles and clears the halt.
+        # An in-doubt capital move also freezes all further capital moves. Route
+        # through _freeze_capital so a record_halt failure here cannot propagate
+        # and skip appending the IN_DOUBT event / escalation below.
         if intent.intent_type == "move_capital":
-            self.queue.record_halt(
-                HALT_SCOPE_CAPITAL, f"in-doubt capital move (intent {intent_id}): {reason}"
-            )
+            self._freeze_capital(f"in-doubt capital move (intent {intent_id}): {reason}")
         return self._finish(intent_id, intent, STATUS_IN_DOUBT,
                             f"{reason} — marked IN-DOUBT, will never retry")
 

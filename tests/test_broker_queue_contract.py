@@ -128,12 +128,13 @@ class TestStatusContract:
         intent_id, _ = queue.submit(flip(f"{pfx}-s"))
         assert queue.current_status(intent_id) == STATUS_PENDING
 
-    def test_latest_event_wins(self, queue, pfx):
+    def test_terminal_status_is_write_once(self, queue, pfx):
         intent_id, _ = queue.submit(flip(f"{pfx}-s2"))
         queue.append_event(intent_id, STATUS_REJECTED, "caps")
-        queue.append_event(intent_id, STATUS_EXECUTED, "ok")
-        assert queue.current_status(intent_id) == STATUS_EXECUTED
-        assert queue.last_reason(intent_id) == "ok"
+        with pytest.raises(IntentError, match="write-once"):
+            queue.append_event(intent_id, STATUS_EXECUTED, "ok")
+        assert queue.current_status(intent_id) == STATUS_REJECTED
+        assert queue.last_reason(intent_id) == "caps"
 
     def test_invalid_status_rejected(self, queue, pfx):
         intent_id, _ = queue.submit(flip(f"{pfx}-s3"))

@@ -45,6 +45,13 @@ VALID_STATUSES = frozenset([
     STATUS_IN_DOUBT, STATUS_HARD_STOP,
 ])
 
+# Once an intent reaches any of these, its outcome is WRITE-ONCE — no further
+# event may be appended. This preserves the idempotency guarantee: a duplicate
+# submit always reads back the original terminal outcome, never a later override.
+TERMINAL_STATUSES = frozenset([
+    STATUS_EXECUTED, STATUS_REJECTED, STATUS_IN_DOUBT, STATUS_HARD_STOP,
+])
+
 
 class IntentError(ValueError):
     """Malformed intent — rejected before it ever reaches the queue."""
@@ -230,6 +237,20 @@ class IntentQueue:
         if status not in VALID_STATUSES:
             raise IntentError(f"invalid status {status!r}")
         with self._lock:
+            latest = self.conn.execute(
+                "SELECT status FROM intent_events WHERE intent_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (intent_id,),
+            ).fetchone()
+            current = latest["status"] if latest else STATUS_PENDING
+            # Terminal outcomes are write-once: appending EXECUTED after REJECTED
+            # (etc.) would let a duplicate read a different outcome than the one
+            # that was decided. Reject any event past a terminal status.
+            if current in TERMINAL_STATUSES:
+                raise IntentError(
+                    f"intent {intent_id} is already in terminal status {current!r} "
+                    "— outcomes are write-once"
+                )
             self.conn.execute(
                 "INSERT INTO intent_events (intent_id, status, reason, created_at) "
                 "VALUES (?, ?, ?, ?)",
