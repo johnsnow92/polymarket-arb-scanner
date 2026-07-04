@@ -618,6 +618,113 @@ class TestCalcRealizedPnl:
         assert realized == pytest.approx(0.50)
 
 
+class TestLegContractsAndCostVenueSemantics:
+    """Round-3 audit findings: stake-sized venues and fail-closed handling.
+
+    Betfair/Matchbook place round(size, 2) as a STAKE at decimal odds
+    1/price (executor.py) — a third semantics distinct from PM shares and
+    the dollar->integer-contracts venues. Unknown venues and malformed
+    money data must fail CLOSED (zero payout, full cost lost) because this
+    feeds the daily-loss halt — it may over-trigger, never under-trigger.
+    """
+
+    @pytest.fixture
+    def db(self):
+        trade_db = TradeDB(":memory:")
+        yield trade_db
+        trade_db.close()
+
+    # -- stake-sized venues (betfair / matchbook) ---------------------------
+
+    def test_betfair_winning_back_bet_pays_stake_over_price(self, db):
+        """$10 stake backed at 0.30: win returns 10/0.30 = 33.333, net
+        +23.333. The dollar-contract path would truncate to 33 contracts
+        (cost 9.90, net +23.10) — Betfair does not truncate stakes."""
+        opp_id = db.log_opportunity("BetfairArb", "M", "", 0.30, 0.10, 0.33, 50, "traded")
+        db.log_trade(opp_id, "betfair", "back", 0.30, 10.0, "filled", fill_price=0.30)
+        db.create_position(opp_id, "m1", "betfair", 0.10)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos, winning_side="yes")
+        assert realized == pytest.approx(10.0 / 0.30 - 10.0)  # +23.333...
+
+    def test_matchbook_losing_bet_forfeits_rounded_stake(self, db):
+        """Matchbook places stake=round(size, 2): size 10.456 -> $10.46
+        staked and lost. The dollar-contract path reported -$10.00
+        (int(10.456/0.50) = 20 contracts x 0.50)."""
+        opp_id = db.log_opportunity("MatchbookArb", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(opp_id, "matchbook", "back", 0.50, 10.456, "filled", fill_price=0.50)
+        db.create_position(opp_id, "m1", "matchbook", 0.10)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos, winning_side="no")
+        assert realized == pytest.approx(-10.46)
+
+    # -- fail-closed: unknown venue -----------------------------------------
+
+    def test_unknown_venue_fails_closed_with_error_log(self, db, caplog):
+        """An unrecognized platform must NOT silently take the
+        dollar->contracts path (which would report +$10 profit here) —
+        worst case is assumed: zero payout, full $10 cost lost."""
+        opp_id = db.log_opportunity("Binary", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(opp_id, "robinhood", "yes", 0.50, 10.0, "filled", fill_price=0.50)
+        db.create_position(opp_id, "m1", "robinhood", 0.10)
+        pos = db.get_open_positions()[0]
+        with caplog.at_level("ERROR", logger="continuous"):
+            realized = _calc_realized_pnl(db, pos)
+        assert realized == pytest.approx(-10.0)
+        assert any("unknown venue" in r.message for r in caplog.records)
+
+    def test_empty_platform_fails_closed(self, db, caplog):
+        """Missing platform is as unverifiable as an unknown one."""
+        opp_id = db.log_opportunity("Binary", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(opp_id, "", "yes", 0.50, 10.0, "filled", fill_price=0.50)
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+        with caplog.at_level("ERROR", logger="continuous"):
+            realized = _calc_realized_pnl(db, pos)
+        assert realized == pytest.approx(-10.0)
+        assert any("P&L fail-closed" in r.message for r in caplog.records)
+
+    # -- fail-closed: malformed money data -----------------------------------
+
+    def test_zero_price_fails_closed_not_one_phantom_contract(self, db, caplog):
+        """price=0 on a dollar-contract venue previously produced a silent
+        1-contract-at-cost-0 guess (and fell through to the expected_pnl
+        fallback). Fail closed instead: error log + full $10 size lost."""
+        opp_id = db.log_opportunity("KalshiBinary", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(opp_id, "kalshi", "yes", 0.0, 10.0, "filled")
+        db.create_position(opp_id, "m1", "kalshi", 0.10)
+        pos = db.get_open_positions()[0]
+        with caplog.at_level("ERROR", logger="continuous"):
+            realized = _calc_realized_pnl(db, pos, winning_side="yes")
+        assert realized == pytest.approx(-10.0)
+        assert any("P&L fail-closed" in r.message for r in caplog.records)
+
+    def test_stake_venue_zero_fill_fails_closed(self, db, caplog):
+        """Betfair leg with no usable price: the stake is treated as lost."""
+        opp_id = db.log_opportunity("BetfairArb", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(opp_id, "betfair", "back", 0.0, 8.0, "filled")
+        db.create_position(opp_id, "m1", "betfair", 0.10)
+        pos = db.get_open_positions()[0]
+        with caplog.at_level("ERROR", logger="continuous"):
+            realized = _calc_realized_pnl(db, pos, winning_side="yes")
+        assert realized == pytest.approx(-8.0)
+        assert any("P&L fail-closed" in r.message for r in caplog.records)
+
+    def test_malformed_leg_poisons_arb_payout_conservatively(self, db, caplog):
+        """A worst-cased leg contributes zero contracts, so the arb min-
+        contracts payout collapses to 0 and the whole position reads as
+        cost lost — the halt over-triggers rather than under-triggers."""
+        opp_id = db.log_opportunity("Cross", "M", "", 0.95, 0.05, 0.05, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.45, 10.0, "filled", fill_price=0.45)
+        db.log_trade(opp_id, "unknown-venue", "no", 0.50, 5.0, "filled", fill_price=0.50)
+        db.create_position(opp_id, "m1", "polymarket", 0.05)
+        pos = db.get_open_positions()[0]
+        with caplog.at_level("ERROR", logger="continuous"):
+            realized = _calc_realized_pnl(db, pos)
+        # PM leg cost 4.50 + worst-cased leg cost 5.00; payout min(10, 0)=0
+        assert realized == pytest.approx(-9.50)
+
+
 # ---------------------------------------------------------------------------
 # Kalshi resolution sniping in continuous mode (INTEG-03)
 # ---------------------------------------------------------------------------

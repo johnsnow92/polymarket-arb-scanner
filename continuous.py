@@ -230,32 +230,76 @@ def _leg_won(trade_side: str, winning_side: str) -> bool:
     return aliases is not None and ts in aliases
 
 
+# Venue sizing semantics, verified against executor._execute_single_leg:
+# - SHARES: Polymarket passes `size` straight to PolymarketTrader.place_order,
+#   whose `size` parameter is the number of shares.
+# - DOLLAR->CONTRACTS: Kalshi (count=max(1,int(size/price))), Smarkets,
+#   SX Bet, Gemini, IBKR (quantity=max(1,int(size/price))) convert the
+#   requested dollar size to an integer contract count at the order price.
+# - STAKE: Betfair (limitOrder size=round(size,2) at decimal odds 1/price)
+#   and Matchbook (stake=round(size,2) at decimal odds 1/price) place the
+#   dollar STAKE directly; a winning back bet returns stake/price
+#   (= stake/price one-dollar contracts), a losing one forfeits the stake.
+_SHARE_SIZED_VENUES = frozenset({"polymarket"})
+_DOLLAR_CONTRACT_VENUES = frozenset({"kalshi", "smarkets", "sxbet", "gemini", "ibkr"})
+_STAKE_SIZED_VENUES = frozenset({"betfair", "matchbook"})
+
+
 def _leg_contracts_and_cost(trade: dict) -> tuple[float, float]:
     """Return (contracts, dollar_cost) for one trade leg, venue-aware.
 
-    ``trades.size`` semantics differ per venue (executor._execute_single_leg):
-
-    - polymarket: ``size`` is passed straight to ``PolymarketTrader.
-      place_order``, whose ``size`` parameter is the NUMBER OF SHARES.
-      contracts = size; cost = fill_price * size.
-    - kalshi / betfair / smarkets / sxbet / matchbook / gemini / ibkr:
-      ``size`` is the requested DOLLAR amount; the executor converts to an
-      integer contract count via ``max(1, int(size / price))`` using the
-      order price. contracts mirror that conversion; cost = contracts * fill.
+    FAIL-CLOSED: this feeds realized P&L and therefore the daily-loss halt.
+    An unknown/missing venue or malformed money data (missing or
+    non-positive price/fill/size) must never silently produce an optimistic
+    number — instead we log an error and take the WORST CASE (payout of
+    zero contracts, full recorded cost lost), so the halt can only
+    over-trigger, never under-trigger.
     """
     platform = (trade.get("platform") or "").lower()
-    price = trade.get("price") or 0
+    price = trade.get("price")
     fill = trade.get("fill_price") or price
-    size = trade.get("size") or 0
+    size = trade.get("size")
 
-    if platform == "polymarket":
-        contracts = float(size)
-        cost = fill * size
-    else:
+    def _worst_case(reason: str) -> tuple[float, float]:
+        # Conservative direction: zero payout, full cost lost. Cost is the
+        # largest plausible interpretation of the recorded size (dollar size
+        # vs shares * fill) so the daily-loss halt can only over-trigger.
+        safe_size = size if isinstance(size, (int, float)) and size > 0 else 0.0
+        safe_fill = fill if isinstance(fill, (int, float)) and fill > 0 else 0.0
+        worst_cost = max(safe_size, safe_fill * safe_size)
+        logger.error(
+            "P&L fail-closed: %s (trade id=%s platform=%r price=%r fill=%r "
+            "size=%r) — assuming worst case: $%.2f lost, zero payout.",
+            reason, trade.get("id"), trade.get("platform"), price,
+            trade.get("fill_price"), size, worst_cost,
+        )
+        return 0.0, worst_cost
+
+    if not isinstance(size, (int, float)) or size <= 0:
+        return _worst_case("missing or non-positive trade size")
+
+    if platform in _SHARE_SIZED_VENUES:
+        if not isinstance(fill, (int, float)) or fill <= 0:
+            return _worst_case("missing or non-positive fill/order price")
+        return float(size), fill * size
+
+    if platform in _DOLLAR_CONTRACT_VENUES:
+        if (not isinstance(price, (int, float)) or price <= 0
+                or not isinstance(fill, (int, float)) or fill <= 0):
+            return _worst_case("missing or non-positive fill/order price")
         # Mirror the executor's dollars -> integer-contracts conversion.
-        contracts = float(max(1, int(size / price))) if price > 0 else 1.0
-        cost = contracts * fill
-    return contracts, cost
+        contracts = float(max(1, int(size / price)))
+        return contracts, contracts * fill
+
+    if platform in _STAKE_SIZED_VENUES:
+        stake = round(size, 2)  # mirrors round(size, 2) at placement
+        if not isinstance(fill, (int, float)) or fill <= 0:
+            return _worst_case("missing or non-positive fill/order price")
+        # Back bet: stake at decimal odds 1/fill returns stake/fill if it
+        # wins — equivalent to stake/fill one-dollar contracts.
+        return stake / fill, stake
+
+    return _worst_case(f"unknown venue {platform!r}")
 
 
 def _calc_realized_pnl(db: TradeDB, pos: dict, winning_side: str | None = None) -> float:
