@@ -117,7 +117,9 @@ class PartialFillHedger:
             if platform == "polymarket":
                 return self._hedge_polymarket(token_id, fill_price, size, max_loss)
             elif platform == "kalshi":
-                return self._hedge_kalshi(token_id, fill_price, size, max_loss, pf.get("side", "yes"))
+                return self._hedge_kalshi(token_id, fill_price, size, max_loss,
+                                          pf.get("side", "yes"),
+                                          action=pf.get("_reduce_action", "sell"))
             elif platform == "betfair":
                 return self._hedge_betfair(pf, fill_price, size, max_loss)
             elif platform == "smarkets":
@@ -154,8 +156,16 @@ class PartialFillHedger:
         resp = self.pm_trader.place_order(token_id=token_id, side="SELL", price=bid, size=size)
         return bool(resp and resp.get("success"))
 
-    def _hedge_kalshi(self, ticker: str, fill_price: float, size: float, max_loss: float, side: str) -> bool:
-        """Sell a Kalshi position at current bid."""
+    def _hedge_kalshi(self, ticker: str, fill_price: float, size: float, max_loss: float,
+                      side: str, action: str = "sell") -> bool:
+        """Reduce a Kalshi position at the current touch.
+
+        ``action="sell"`` (default, original behavior) sells an over-long
+        position into the best bid on ``side``. ``action="buy"`` buys back an
+        over-short position at the best ask on ``side`` (plan 10: the
+        buy-to-reduce direction — the ask is derived from the opposite side's
+        best bid since Kalshi orderbooks are bids-only).
+        """
         if not self.kalshi_client:
             return False
         book = self.kalshi_client.fetch_order_book(ticker)
@@ -163,21 +173,28 @@ class PartialFillHedger:
             return False
         # Selling our YES position requires hitting the best YES bid (and
         # symmetrically for NO). best_*_bid returns the highest bid + depth.
-        from kalshi_api import parse_orderbook, best_yes_bid, best_no_bid, _audit_raw_orderbook
+        # Buying back a short hits the best ask instead (best_*_ask helpers).
+        from kalshi_api import (parse_orderbook, best_yes_bid, best_no_bid,
+                                best_yes_ask, best_no_ask, _audit_raw_orderbook)
         _audit_raw_orderbook(ticker, book)
         parsed = parse_orderbook(book)
-        bid_info = best_yes_bid(parsed) if side == "yes" else best_no_bid(parsed)
-        if bid_info is None:
+        if action == "buy":
+            touch_info = best_yes_ask(parsed) if side == "yes" else best_no_ask(parsed)
+        else:
+            touch_info = best_yes_bid(parsed) if side == "yes" else best_no_bid(parsed)
+        if touch_info is None:
             return False
-        bid = bid_info[0]
-        if bid <= 0:
+        touch = touch_info[0]
+        if touch <= 0:
             return False
-        loss = fill_price - bid
+        # Loss check: selling below the fill price loses money; buying back
+        # above the (short-entry) fill price loses money.
+        loss = (touch - fill_price) if action == "buy" else (fill_price - touch)
         if loss > max_loss:
             return False
-        count = max(1, int(size / bid)) if bid > 0 else 1
-        resp = self.kalshi_client.place_order(ticker=ticker, side=side, action="sell",
-                                               count=count, price_dollars=bid)
+        count = max(1, int(size / touch)) if touch > 0 else 1
+        resp = self.kalshi_client.place_order(ticker=ticker, side=side, action=action,
+                                               count=count, price_dollars=touch)
         return resp is not None
 
     def _hedge_betfair(self, pf: dict, fill_price: float, size: float, max_loss: float) -> bool:
@@ -329,6 +346,9 @@ class PartialFillHedger:
             "_runner_id": identifiers.get("runner_id", ""),
             "_outcome_id": identifiers.get("outcome_id", ""),
             "_symbol": identifiers.get("symbol", token_id or market_key),
+            # Plan 10: "sell" reduces an over-long position at the bid;
+            # "buy" reduces an over-short position at the ask (Kalshi only).
+            "_reduce_action": identifiers.get("reduce_action", "sell"),
         }
         success = self._attempt_hedge(pf)
         logger.info(
