@@ -95,20 +95,28 @@ class TestSubmitContract:
                 {"amount_usd": 500, "from_venue": "kalshi", "to_venue": "polymarket"},
                 f"{pfx}-reuse"))
 
-    def test_payload_mutation_after_construction_is_inert(self, queue, pfx):
-        # The intent freezes a canonical snapshot at construction; mutating
-        # either the caller's dict or intent.payload afterwards can neither
-        # smuggle content nor surface a raw serialization error from submit.
+    def test_payload_frozen_after_construction(self, queue, pfx):
+        # The intent deep-freezes its payload at construction: the caller's dict
+        # is detached AND the payload is read-only, so neither a caller edit nor
+        # an in-place edit of intent.payload can smuggle content.
         raw = {"lane": "kalshi-lip", "venue": "kalshi", "action": "enable"}
         intent = Intent("flip_lane", raw, f"{pfx}-mut")
-        raw["lane"] = "SMUGGLED"
-        intent.payload["venue"] = object()  # unserializable in-place edit
+        raw["lane"] = "SMUGGLED"  # caller mutates their own dict — must not reach us
+        with pytest.raises(TypeError):
+            intent.payload["venue"] = object()  # frozen payload rejects mutation
         intent_id, created = queue.submit(intent)
         assert created is True
-        # A pristine resubmit dedupes against the stored snapshot, proving
-        # the mutations above never reached the queue.
+        # A pristine resubmit dedupes against the stored snapshot, proving the
+        # caller's mutation never reached the queue.
         id2, created2 = queue.submit(flip(f"{pfx}-mut"))
         assert (id2, created2) == (intent_id, False)
+
+    def test_nested_payload_is_deep_frozen(self, queue, pfx):
+        intent = Intent("move_capital",
+                        {"amount_usd": 100, "from_venue": "kalshi", "to_venue": "polymarket",
+                         "meta": {"note": "x", "tags": ["a"]}}, f"{pfx}-nest")
+        with pytest.raises(TypeError):
+            intent.payload["meta"]["note"] = "SMUGGLED"  # nested dict is read-only too
 
 
 # ---------------------------------------------------------------------------

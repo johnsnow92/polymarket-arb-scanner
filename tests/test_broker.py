@@ -87,6 +87,26 @@ class TestExecutePath:
         assert broker.process(move()).status == STATUS_EXECUTED
         executors.move_capital.assert_called_once()
 
+    def test_status_persistence_failure_after_execute_escalates(self):
+        # The side effect already happened; if append_event fails, surface it as
+        # CRITICAL rather than leaving the ledger silently PENDING (CR CLI #3).
+        escalations = []
+        broker, queue, executors = make_broker(escalations=escalations)
+        real_append = queue.append_event
+        calls = {"n": 0}
+
+        def flaky_append(intent_id, status, reason=""):
+            calls["n"] += 1
+            if status == STATUS_EXECUTED:
+                raise RuntimeError("supabase write failed")
+            return real_append(intent_id, status, reason)
+
+        queue.append_event = flaky_append
+        decision = broker.process(flip_enable("persist-fail"))
+        assert decision.status == STATUS_EXECUTED  # the action DID execute
+        executors.flip_lane.assert_called_once()
+        assert any("CRITICAL" in e and "persistence failed" in e for e in escalations)
+
 
 # ---------------------------------------------------------------------------
 # Idempotency — repeat = no-op, never retry
@@ -148,7 +168,24 @@ class TestRejection:
         )
         decision = broker.process(move("recon-break"))
         assert decision.status == STATUS_REJECTED
+        # The broker (not the validator) records the ALL-capital halt.
         assert queue.halt_active(HALT_SCOPE_CAPITAL) is True
+        executors.move_capital.assert_not_called()
+
+    def test_recon_break_with_failed_halt_record_escalates_loudly(self):
+        # If record_halt itself fails during a confirmed break, the failure must
+        # be escalated CRITICAL — never swallowed leaving the capital lane
+        # silently unfrozen (Codex R2 finding #4).
+        escalations = []
+        broker, queue, executors = make_broker(
+            escalations=escalations,
+            sources=healthy_sources(
+                venue_balances=lambda: {"kalshi": 1.0, "polymarket": 2000.0}),
+        )
+        queue.record_halt = MagicMock(side_effect=RuntimeError("supabase down"))
+        decision = broker.process(move("break-halt-fail"))
+        assert decision.status == STATUS_REJECTED
+        assert any("CRITICAL" in e and "capital halt" in e for e in escalations)
         executors.move_capital.assert_not_called()
 
     def test_capital_halt_blocks_subsequent_healthy_moves(self):

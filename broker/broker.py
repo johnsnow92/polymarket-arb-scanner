@@ -110,11 +110,28 @@ class PolicyBroker:
 
         results = self.validator.validate(intent)
         if not self.validator.passed(results):
+            self._record_capital_halt_if_flagged(results)
             return self._finish(
                 intent_id, intent, STATUS_REJECTED, self.validator.failures(results)
             )
 
         return self._execute(intent_id, intent)
+
+    def _record_capital_halt_if_flagged(self, results) -> None:
+        """A confirmed reconciliation break halts ALL capital moves. Record it
+        here in the broker's control flow — not as a validator side-effect that
+        the fail-closed wrapper could swallow — so a record_halt failure is
+        escalated loudly and a later move can never slip through unblocked."""
+        for r in results:
+            if getattr(r, "halt_capital", False):
+                try:
+                    self.queue.record_halt(HALT_SCOPE_CAPITAL, r.reason)
+                except Exception as exc:  # a halt must never fail silently
+                    self.escalate(
+                        f"[broker] CRITICAL: could not record capital halt after a "
+                        f"reconciliation break ({r.reason}): {exc} — capital lane may "
+                        "not be frozen; operator must intervene"
+                    )
 
     # ------------------------------------------------------------------
 
@@ -166,6 +183,7 @@ class PolicyBroker:
         # covered by micro-entry sizing + per-fill deviation halts.
         recheck = self.validator.validate(intent)
         if not self.validator.passed(recheck):
+            self._record_capital_halt_if_flagged(recheck)
             return self._finish(
                 intent_id, intent, STATUS_REJECTED,
                 f"re-validation before execute failed: {self.validator.failures(recheck)}",
@@ -182,7 +200,18 @@ class PolicyBroker:
             detail = getattr(result, "detail", "") or "outcome unverifiable"
             return self._in_doubt(intent_id, intent, detail)
 
-        self.queue.append_event(intent_id, STATUS_EXECUTED, result.detail)
+        try:
+            self.queue.append_event(intent_id, STATUS_EXECUTED, result.detail)
+        except Exception as exc:
+            # The side effect has ALREADY happened. A persistence failure must be
+            # surfaced (operator reconciles) — never leave the ledger showing
+            # PENDING while the action executed, which a later resubmit would
+            # then no-op against.
+            self.escalate(
+                f"[broker] CRITICAL: intent {intent_id} ({intent.intent_type}) EXECUTED "
+                f"but status persistence failed: {exc} — ledger still shows PENDING, "
+                "operator must reconcile"
+            )
         micro = (
             dict(self.policy.micro_entry)
             if intent.intent_type == "flip_lane"

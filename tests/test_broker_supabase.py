@@ -120,13 +120,14 @@ class TestSubmit:
         with pytest.raises(RuntimeError, match="no stored row"):
             q.submit(flip("abc"))
 
-    def test_submit_sends_frozen_snapshot_not_mutated_payload(self, q):
+    def test_submit_sends_frozen_snapshot(self, q):
         # The RPC body comes from the canonical snapshot frozen at intent
-        # construction — mutating intent.payload afterwards must not change
-        # what is sent (nor crash serialization).
+        # construction. The payload is read-only, so it cannot be mutated at
+        # all, and submit always sends the deduped/serialized content.
         q._session.post.return_value = _resp(200, [{"id": 9, "created": True}])
         intent = flip("snap")
-        intent.payload["lane"] = object()  # in-place mutation post-validation
+        with pytest.raises(TypeError):
+            intent.payload["lane"] = object()  # frozen payload rejects mutation
         assert q.submit(intent) == (9, True)
         sent = q._session.post.call_args[1]["json"]["p_payload"]
         assert sent == {"lane": "kalshi-lip", "venue": "kalshi", "action": "enable"}
@@ -140,6 +141,13 @@ class TestSubmit:
     def test_unexpected_rpc_response_raises(self, q):
         q._session.post.return_value = _resp(200, [])  # empty array
         with pytest.raises(RuntimeError, match="unexpected response"):
+            q.submit(flip("abc"))
+
+    def test_nonbool_created_fails_closed(self, q):
+        # A non-bool `created` (e.g. the string "false") must NOT coerce to True
+        # via bool() and let a DUPLICATE re-execute (Codex R2 finding #1).
+        q._session.post.return_value = _resp(200, [{"id": 7, "created": "false"}])
+        with pytest.raises(RuntimeError, match="non-boolean"):
             q.submit(flip("abc"))
 
     def test_transport_error_surfaces_controlled(self, q):

@@ -55,6 +55,21 @@ class TestCaps:
         assert not result.ok
         assert "operator-gated" in result.reason
 
+    def test_fail_new_principal_case_insensitive(self):
+        # "Principal"/"PRINCIPAL" must not slip past the gate (Codex R2 #3).
+        for variant in ("Principal", "PRINCIPAL", " principal "):
+            result = make_validator()._check_caps(move(100.0, source=variant))
+            assert not result.ok, variant
+            assert "operator-gated" in result.reason
+
+    def test_fail_post_action_over_ceiling(self):
+        # ceiling 8200; portfolio 8100 (under) but 8100 + 200 = 8300 over the
+        # working ceiling — must fail on POST-ACTION exposure (Codex R2 #2).
+        v = make_validator(sources=healthy_sources(portfolio_value_usd=lambda: 8100.0))
+        result = v._check_caps(move(200.0))
+        assert not result.ok
+        assert "post-action" in result.reason
+
     def test_fail_portfolio_over_ceiling(self):
         # ceiling = 8000 + 200 realized; portfolio 9000 breaches it
         v = make_validator(sources=healthy_sources(portfolio_value_usd=lambda: 9000.0))
@@ -232,7 +247,10 @@ class TestReconciliation:
         assert v._check_reconciliation(move()).ok
         assert queue.halt_active(HALT_SCOPE_CAPITAL) is False
 
-    def test_break_fails_and_halts_all_capital_moves(self):
+    def test_break_flags_halt_capital_without_recording_here(self):
+        # The check FLAGS a confirmed break (halt_capital) but does NOT record
+        # the halt itself — the broker records it in its control flow so a
+        # record_halt failure is escalated, not swallowed (Codex R2 finding #4).
         queue = IntentQueue(":memory:")
         v = make_validator(
             queue=queue,
@@ -242,7 +260,9 @@ class TestReconciliation:
         result = v._check_reconciliation(move())
         assert not result.ok
         assert "reconciliation break" in result.reason
-        assert queue.halt_active(HALT_SCOPE_CAPITAL) is True
+        assert result.halt_capital is True
+        # Recording is the broker's job now — the validator does not do it.
+        assert queue.halt_active(HALT_SCOPE_CAPITAL) is False
 
     def test_fail_closed_on_nan_balance_without_halt(self):
         # A NaN balance is unverifiable → fail closed; only a CONFIRMED break
@@ -273,6 +293,17 @@ class TestReconciliation:
         result = v._check_reconciliation(move())
         assert not result.ok
         assert "no live balance evidence" in result.reason
+
+    def test_break_reason_handles_numeric_string_balance(self):
+        # A numeric-string balance must not crash the ',.2f' reason formatting;
+        # the reason is built from the _finite-normalized floats (CR CLI #4).
+        v = make_validator(sources=healthy_sources(
+            ledger_balances=lambda: {"kalshi": "3000", "polymarket": 2000.0},
+            venue_balances=lambda: {"kalshi": 1.0, "polymarket": 2000.0}))
+        result = v._check_reconciliation(move())
+        assert not result.ok
+        assert result.halt_capital is True
+        assert "$3,000.00" in result.reason and "$1.00" in result.reason
 
     def test_fail_when_move_venue_absent_from_balances(self):
         # The move's own venues must appear on both sides; an absent venue means
@@ -345,6 +376,16 @@ class TestFreshness:
         result = v._check_freshness(flip_enable())
         assert not result.ok
         assert "non-finite" in result.reason
+
+    def test_stale_input_not_masked_by_fresh_heartbeat_same_name(self):
+        # A merged {**inputs, **heartbeats} would let a fresh heartbeat overwrite
+        # a stale input of the same name; both must be checked independently.
+        v = make_validator(sources=healthy_sources(
+            input_ages_seconds=lambda: {"prices": 9999.0},
+            heartbeat_ages_seconds=lambda: {"prices": 5.0}))
+        result = v._check_freshness(flip_enable())
+        assert not result.ok
+        assert "stale" in result.reason
 
     def test_non_numeric_age_is_a_targeted_freshness_failure(self):
         # A string age must produce an explicit freshness failure, not the

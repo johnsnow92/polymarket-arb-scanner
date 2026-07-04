@@ -44,6 +44,10 @@ class CheckResult:
     name: str
     ok: bool
     reason: str = ""
+    # A confirmed reconciliation break sets this so the BROKER records the
+    # ALL-capital halt in its control flow — where a record_halt failure is
+    # escalated, not swallowed by this check's fail-closed wrapper.
+    halt_capital: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +161,9 @@ class BrokerValidator:
         if not inputs or not heartbeats:
             return CheckResult("freshness", False,
                                "no gate inputs/heartbeats reported — cannot verify freshness")
-        for name, age in {**inputs, **heartbeats}.items():
+        # Iterate the two maps independently — a merged dict would let a fresh
+        # heartbeat silently overwrite (and mask) a stale input of the same name.
+        for name, age in list(inputs.items()) + list(heartbeats.items()):
             # NaN would make `age > ttl` False, and a bool/str age must not
             # coerce — parse through _finite so the failure is targeted and
             # explicit rather than a generic "live source unreadable".
@@ -182,7 +188,8 @@ class BrokerValidator:
         amount = self._finite(p.get("amount_usd", 0), "amount_usd")
         if amount <= 0:
             return CheckResult("caps", False, "amount_usd must be > 0")
-        if p.get("source") == "principal":
+        # Case-insensitive: "Principal"/"PRINCIPAL" must not slip past the gate.
+        if str(p.get("source", "")).strip().lower() == "principal":
             return CheckResult("caps", False,
                                "new principal is operator-gated — broker only moves earned gains")
         ceiling = self.policy.principal_cap_usd + self._finite(
@@ -195,9 +202,15 @@ class BrokerValidator:
                 f"portfolio ${portfolio:,.2f} exceeds working ceiling ${ceiling:,.2f} "
                 f"({self.policy.tranche} principal + realized P&L)",
             )
-        if amount > ceiling:
-            return CheckResult("caps", False,
-                               f"amount ${amount:,.2f} exceeds working ceiling ${ceiling:,.2f}")
+        # POST-ACTION ceiling: current portfolio plus this move must stay within
+        # the working ceiling — not each independently (spec: "post-action
+        # portfolio ≤ working ceiling").
+        if portfolio + amount > ceiling:
+            return CheckResult(
+                "caps", False,
+                f"post-action portfolio ${portfolio + amount:,.2f} would exceed working "
+                f"ceiling ${ceiling:,.2f}",
+            )
         # Every capital move is market-scoped: the per-market cap and the
         # book-depth cap CANNOT be verified without a named market, so a move
         # that omits one is rejected — never silently exempt from the $/market
@@ -259,12 +272,13 @@ class BrokerValidator:
             if diff > tolerance:
                 reason = (
                     f"reconciliation break on '{venue}': ledger "
-                    f"${ledger.get(venue, 0.0):,.2f} vs live ${live.get(venue, 0.0):,.2f} "
+                    f"${ledger_bal:,.2f} vs live ${live_bal:,.2f} "
                     f"(diff ${diff:,.2f} > ${tolerance:,.2f})"
                 )
-                # A break halts ALL capital moves until an operator clears it.
-                self.queue.record_halt(HALT_SCOPE_CAPITAL, reason)
-                return CheckResult("reconciliation", False, reason)
+                # Flag the confirmed break so the broker records the ALL-capital
+                # halt in its control flow (a record_halt failure there is
+                # escalated, never silently swallowed by the _run wrapper).
+                return CheckResult("reconciliation", False, reason, halt_capital=True)
         return CheckResult("reconciliation", True)
 
     def _check_cooldown(self, intent: Intent) -> CheckResult:

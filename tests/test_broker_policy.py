@@ -179,6 +179,21 @@ class TestConfigIsolation:
         # tmp_path is outside the repo — must load fine.
         assert load_policy(write_policy(tmp_path, policy_data())) is not None
 
+    def test_refuses_in_repo_symlink_even_if_target_outside(self, tmp_path):
+        # A symlink NODE inside the repo pointing to a valid OUTSIDE config must
+        # still be refused: a merge to the loop-mergeable repo could repoint it
+        # and thereby control the policy (Codex R2 finding #5).
+        target = tmp_path / "outside-policy.json"
+        target.write_text(json.dumps(policy_data()))
+        link = REPO_ROOT / "._test_policy_link.json"
+        try:
+            link.symlink_to(target)
+            with pytest.raises(PolicyError, match="INSIDE the loop-mergeable repo"):
+                load_policy(str(link))
+        finally:
+            if link.is_symlink() or link.exists():
+                link.unlink()
+
 
 # ---------------------------------------------------------------------------
 # Gate hashing

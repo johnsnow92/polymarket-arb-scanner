@@ -13,8 +13,20 @@ import sqlite3
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
+
+
+def _deep_freeze(value):
+    """Recursively make a JSON value read-only so a held Intent's payload cannot
+    be mutated after construction — every downstream reader sees exactly the
+    content that was validated, serialized, and deduped."""
+    if isinstance(value, dict):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_deep_freeze(v) for v in value)
+    return value
 
 # ---------------------------------------------------------------------------
 # Intent
@@ -68,8 +80,11 @@ class Intent:
             raise IntentError(
                 f"payload must be JSON-serializable with finite numbers: {exc}"
             ) from exc
-        # Detach from the caller's dict so external mutation can't reach us.
-        object.__setattr__(self, "payload", json.loads(canonical))
+        # Detach from the caller's dict AND deep-freeze it: a held Intent's
+        # payload (including nested dicts/lists) can no longer be mutated, so a
+        # validator reading intent.payload always sees the same content that was
+        # serialized and deduped via payload_json.
+        object.__setattr__(self, "payload", _deep_freeze(json.loads(canonical)))
         object.__setattr__(self, "payload_json", canonical)
 
 

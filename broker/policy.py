@@ -180,13 +180,24 @@ def load_policy(path: str | os.PathLike | None = None) -> PolicyConfig:
     """
     if path is None:
         path = os.getenv("BROKER_POLICY_PATH", str(DEFAULT_POLICY_PATH))
-    resolved = Path(path).expanduser().resolve()
-
-    if resolved.is_relative_to(REPO_ROOT):
-        raise PolicyError(
-            f"policy config {resolved} is INSIDE the loop-mergeable repo "
-            f"({REPO_ROOT}) — refusing (config isolation is non-negotiable)"
-        )
+    given = Path(path).expanduser()
+    resolved = given.resolve()
+    # BOTH the path AS GIVEN (the symlink node, with `..` collapsed but symlinks
+    # NOT followed) AND its resolved target must live outside the repo. Checking
+    # only the resolved target would let an in-repo symlink point outside — then
+    # a merge to the loop-mergeable repo could repoint it and control the policy.
+    literal = Path(os.path.normpath(
+        str(given if given.is_absolute() else Path.cwd() / given)))
+    for candidate, what in ((literal, "path"), (resolved, "resolved target")):
+        try:
+            inside_repo = candidate.is_relative_to(REPO_ROOT)
+        except ValueError:
+            inside_repo = False
+        if inside_repo:
+            raise PolicyError(
+                f"policy config {what} {candidate} is INSIDE the loop-mergeable repo "
+                f"({REPO_ROOT}) — refusing (config isolation is non-negotiable)"
+            )
     try:
         raw = resolved.read_text(encoding="utf-8")
     except OSError as exc:

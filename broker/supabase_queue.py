@@ -159,7 +159,11 @@ class SupabaseIntentQueue:
             raise RuntimeError(
                 f"broker_submit_intent returned an unexpected response: {rows!r}"
             )
-        intent_id, created = int(row["id"]), bool(row["created"])
+        # Strict bool on `created`: a non-bool truthy value (e.g. the string
+        # "false") would make bool() True and let a DUPLICATE be treated as
+        # newly created — re-executing a consequential action. Fail closed.
+        intent_id = int(row["id"])
+        created = self._as_strict_bool(row["created"], "broker_submit_intent.created")
         if not created:
             # Defense-in-depth + parity with the SQLite backend: never trust the
             # RPC's dedupe alone. A key reused for DIFFERENT content must be
