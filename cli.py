@@ -102,9 +102,9 @@ from config import (
     REWARDS_ENABLED as CONFIG_REWARDS_ENABLED,
 )
 
-# Load .env from project dir first, then ~/.claude/.env as fallback
+# Project-local .env only — never merge personal/global env files (e.g.
+# ~/.claude/.env) into the bot environment.
 load_dotenv()
-load_dotenv(os.path.expanduser("~/.claude/.env"))
 
 
 def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=None,
