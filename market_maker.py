@@ -251,16 +251,33 @@ class QuoteManager:
                      platform, side, market_key, price, size)
         return None
 
+    @staticmethod
+    def _cancel_on_exchange(order_id: str, trader) -> None:
+        """Best-effort live cancel (plan 10 side-finding 1).
+
+        Before this, "cancelling" only cleared the local dict — a live
+        resting order would survive process death. Dry-run order IDs
+        (``dry_`` prefix) never reach the exchange.
+        """
+        if trader is None or order_id.startswith("dry_"):
+            return
+        try:
+            trader.cancel_order(order_id)
+        except Exception as exc:
+            logger.warning("Live cancel failed for %s: %s", order_id, exc)
+
     def cancel_quote(self, order_id: str, trader=None) -> bool:
         """Cancel a resting order.
 
         Args:
             order_id: Order ID to cancel.
-            trader: Platform-specific trader/client instance.
+            trader: Platform-specific trader/client instance. When provided,
+                the cancel is also sent to the exchange (live orders only).
 
         Returns:
             True if cancelled or already gone.
         """
+        self._cancel_on_exchange(order_id, trader)
         with self._lock:
             if order_id in self._active_orders:
                 self._active_orders[order_id]["status"] = "cancelled"
@@ -270,6 +287,9 @@ class QuoteManager:
 
     def cancel_all(self, market_key: str = "", trader=None) -> int:
         """Cancel all active orders, optionally filtered by market.
+
+        When ``trader`` is provided, live orders are also cancelled on the
+        exchange (plan 10 side-finding 1).
 
         Returns number of orders cancelled.
         """
@@ -281,7 +301,9 @@ class QuoteManager:
             for oid in to_cancel:
                 self._active_orders[oid]["status"] = "cancelled"
                 del self._active_orders[oid]
-            return len(to_cancel)
+        for oid in to_cancel:
+            self._cancel_on_exchange(oid, trader)
+        return len(to_cancel)
 
     def get_active_orders(self, market_key: str = "") -> list[dict]:
         """Get all active orders, optionally filtered by market."""
@@ -561,10 +583,16 @@ class MarketMaker:
 
         return opportunities
 
-    def stop(self) -> None:
-        """Stop market making — cancel all outstanding quotes."""
+    def stop(self, trader=None) -> None:
+        """Stop market making — cancel all outstanding quotes.
+
+        Args:
+            trader: Optional platform client; when provided, live resting
+                orders are cancelled on the exchange too, not just in the
+                local dict (plan 10 side-finding 1).
+        """
         self._running = False
-        cancelled = self.quote_manager.cancel_all()
+        cancelled = self.quote_manager.cancel_all(trader=trader)
         logger.info("MM stopped: cancelled %d outstanding quotes", cancelled)
 
     def get_status(self) -> dict:
