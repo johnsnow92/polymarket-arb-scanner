@@ -556,6 +556,12 @@ class KalshiMMPilot:
             if self.dry_run:
                 self._order_seq += 1
                 order_id = f"dry_mmpilot_{ticker}_{purpose}_{self._order_seq}"
+            elif self._client is None:
+                # Fail closed: live mode without a client places nothing.
+                logger.error("MM pilot live placement with no Kalshi client — "
+                             "rejected (fail closed)")
+                self._write_decision("place_order", ticker, False, "no_client")
+                return None
             else:
                 self.place_order_calls += 1
                 # Quotes rest GTC; hedges are IOC-style fill_or_kill at touch
@@ -1025,6 +1031,14 @@ class KalshiMMPilot:
                 logger.exception("MM pilot toxicity record failed")
 
         # 3. Canary accounting (deviation checks halt the whole pilot).
+        # Realized-loss ceiling considers ALL fills — hedge exits are where
+        # canary losses actually crystallize.
+        if not self.canary_graduated:
+            realized = self.inventory.realized_pnl_total()
+            if realized < -config.MM_CANARY_MAX_LOSS_USD:
+                self.halt_all(f"canary realized P&L ${realized:.2f} below "
+                              f"-${config.MM_CANARY_MAX_LOSS_USD:.2f}")
+                return
         if not is_hedge and not self._check_canary(event, notional):
             return
 
@@ -1085,11 +1099,6 @@ class KalshiMMPilot:
                           f"{event.ticker}")
             return False
         self.canary_clean_fills += 1
-        realized = self.inventory.realized_pnl_total()
-        if realized < -config.MM_CANARY_MAX_LOSS_USD:
-            self.halt_all(f"canary realized P&L ${realized:.2f} below "
-                          f"-${config.MM_CANARY_MAX_LOSS_USD:.2f}")
-            return False
         return True
 
     def _maybe_graduate(self) -> None:
