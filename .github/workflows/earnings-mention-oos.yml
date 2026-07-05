@@ -1,0 +1,69 @@
+name: Earnings-Mention OOS Logger
+
+# Weekly out-of-sample logger for the round-2 earnings-mention NO-harvest
+# pilot (docs/plans/08-earnings-mention-oos.md): snapshots newly in-window
+# Kalshi company-KPI/earnings-mention markets, resolves previously-pending
+# snapshots against their realized settlement, and accumulates the OOS
+# richness verdict toward the pre-registered 8/3 gate. Detection/logging
+# only — no order ever places here. Runs Sundays ~09:30 ET (13:30 UTC),
+# offset from the LIP scan (12:13 UTC) to avoid runner contention.
+
+on:
+  schedule:
+    - cron: '30 13 * * 0'
+  workflow_dispatch:
+    inputs:
+      always_alert:
+        description: 'Telegram-ticket the running verdict even with no new signal this run'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Kalshi's RSA-PSS client needs cryptography + tenacity + requests;
+      # config.py needs python-dotenv. Skip arbgrid's heavier stack (web3,
+      # ib_insync, ...) that this read-only logger never touches.
+      - name: Install dependencies
+        run: pip install 'requests==2.31.0' 'cryptography==46.0.4' 'tenacity==9.1.4' 'python-dotenv==1.2.1'
+
+      # Persist pending/resolved OOS snapshots between runs so the sample
+      # accumulates toward the 8/3 verdict instead of resetting weekly.
+      - name: Restore OOS state cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/earnings_mention_oos_state.json
+          key: earnings-mention-oos-state-${{ github.run_id }}
+          restore-keys: |
+            earnings-mention-oos-state-
+
+      - name: Run earnings-mention OOS logger (detection only)
+        env:
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+          KALSHI_PRIVATE_KEY_BASE64: ${{ secrets.KALSHI_PRIVATE_KEY_BASE64 }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ALWAYS_ALERT: ${{ github.event.inputs.always_alert }}
+        run: |
+          FLAGS="--state-file /tmp/earnings_mention_oos_state.json"
+          if [[ "$ALWAYS_ALERT" == "true" ]]; then
+            FLAGS="$FLAGS --always-alert"
+          fi
+          python scripts/run_earnings_mention_oos.py $FLAGS
