@@ -505,6 +505,67 @@ class TestCanary:
         pilot.poll_fills()
         assert pilot.halted is True
         assert "taker fill" in pilot.halt_reason
+        # Codex round-3 finding: the halt must not come at the cost of
+        # forgetting the fill. It already happened at the exchange —
+        # halting stops FUTURE activity, it must never discard what
+        # already occurred. Fail-before: halt_all() + return fired BEFORE
+        # any of registry/inventory/log accounting ran, so the order
+        # stayed at its pre-fill count and inventory read zero even
+        # though 4 real contracts had actually traded.
+        assert oid not in pilot._orders  # registry: fully filled, removed
+        assert pilot.inventory.net_contracts(TICKER) == 4  # inventory recorded
+        assert pilot.inventory.net_usd(TICKER) == pytest.approx(4 * 0.49)
+
+    def test_taker_fill_on_resting_quote_records_partial_shrink(
+            self, pilot_env, clock):
+        """Same deviation, but a PARTIAL fill — the registry entry must
+        shrink (not vanish) to reflect the remaining resting size, exactly
+        like the non-deviation fill path already does. The fake client is
+        set to fail cancels so halt_all()'s own pull_all() can't ALSO
+        remove the order (via a successful cancel) before we can observe
+        the shrink — isolating what THIS fix is responsible for from the
+        pre-existing, separately-tested cancel-then-pop behavior."""
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 10, 0.49,
+                                      purpose="quote_bid")
+        client.cancel_fail_count = 999
+        client.fills_script = [kfill(oid, count=4, created=clock[0],
+                                     is_taker=True)]
+        pilot.poll_fills()
+        assert pilot.halted is True
+        assert oid in pilot._orders  # 10 - 4 = 6 remaining, not fully filled
+        assert pilot._orders[oid]["count"] == 6
+        assert pilot.inventory.net_contracts(TICKER) == 4
+
+    def test_taker_fill_on_resting_quote_persists_state_before_halting(
+            self, pilot_env, clock, tmp_path):
+        """The corrected inventory must be durably persisted before the
+        halt, not just held in memory — a crash immediately after halting
+        must still be able to reconcile from the right numbers."""
+        from mm_pilot import ControlsPoller, KalshiMMPilot, PilotStateStore
+        path = tmp_path / "state.json"
+        time_fn = lambda: clock[0]
+        controls = ControlsPoller(time_fn=time_fn)
+        controls.set_cached(True)
+        client = FakeKalshiClient()
+        pilot = KalshiMMPilot(
+            kalshi_client=client, controls=controls,
+            volatility_tracker=VolatilityTracker(min_samples=1),
+            time_fn=time_fn, mono_fn=time_fn, state_path=str(path),
+            dry_run=False,
+        )
+        pilot._reconciled = True
+        pilot.update_selection([TICKER])
+        pilot.update_book(TICKER, make_book())
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        client.fills_script = [kfill(oid, count=4, created=clock[0],
+                                     is_taker=True)]
+        pilot.poll_fills()
+        assert pilot.halted is True
+        saved = PilotStateStore(str(path)).load()
+        assert saved["inventory"]["net"].get(TICKER) == 4
 
 
 # ---------------------------------------------------------------------------

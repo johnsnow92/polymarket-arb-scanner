@@ -1506,10 +1506,18 @@ class KalshiMMPilot:
         purpose = order_info.get("purpose", "")
         is_hedge = purpose == "hedge"
 
-        # Canary deviation: a resting quote should never be the taker.
-        if event.is_taker and not is_hedge:
-            self.halt_all(f"taker fill on resting quote {event.order_id}")
-            return
+        # Fill accounting (registry, inventory, log) runs UNCONDITIONALLY,
+        # before ANY halt decision below — including the taker-fill
+        # deviation check that immediately follows. Codex round-3: this
+        # check used to halt_all() and `return` BEFORE any accounting
+        # ran, leaving the local inventory view wrong at exactly the
+        # moment — going into a halt for investigation — it most needs
+        # to be right, with the fill itself unrecorded and effectively
+        # invisible. A fill already happened at the exchange; halting
+        # must stop FUTURE quoting/hedging, it must never cause the
+        # system to forget what already occurred (mirrors the
+        # cancel-then-pop pattern used elsewhere in this branch: never
+        # discard/skip state before it's durably recorded).
 
         # Registry maintenance: shrink/remove the filled order.
         with self._lock:
@@ -1527,6 +1535,21 @@ class KalshiMMPilot:
         self._log_fill(event)
         side_price = event.price if event.side == "yes" else 1.0 - event.price
         notional = event.count * side_price
+
+        # Durably persist the corrected registry/inventory NOW, before
+        # the taker-fill halt check below — a crash immediately after
+        # halting must still be able to reconcile from the right numbers
+        # on restart, not from whatever was last saved before this fill.
+        self._persist_state()
+
+        # Canary deviation: a resting quote should never be the taker.
+        # Fill accounting above already ran and was persisted, so halting
+        # here only stops FUTURE activity (quoting, hedging, toxicity/
+        # canary bookkeeping for this event) — it never discards or
+        # delays recording what already happened.
+        if event.is_taker and not is_hedge:
+            self.halt_all(f"taker fill on resting quote {event.order_id}")
+            return
 
         # 2. Toxicity feed (quote fills only — hedges are deliberate takers).
         if not is_hedge:
