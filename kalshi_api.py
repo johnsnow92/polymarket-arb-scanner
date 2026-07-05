@@ -409,32 +409,60 @@ class KalshiClient:
         balance_cents = data.get("balance", 0)
         return balance_cents / 100.0
 
-    def get_positions(self, raise_on_error: bool = False) -> list[dict]:
-        """Get open positions.
+    def get_positions(self, limit: int = 200, max_pages: int = 10,
+                      raise_on_error: bool = False) -> list[dict]:
+        """Get open positions, walking cursor pagination across all pages.
+
+        Codex round-2 finding: this used to fetch a single page (limit=200)
+        and silently ignore the documented ``cursor`` field, exactly like
+        ``get_fills``/``get_settlements``/``get_open_orders`` already
+        pattern-match elsewhere in this file. An account with more than
+        ``limit`` resting positions would have had a pilot-market position
+        land on page 2 and never be seen — ``reconcile()`` would then mark
+        itself successful off an incomplete picture. Pagination now mirrors
+        ``get_open_orders``'s cursor loop exactly.
 
         Args:
-            raise_on_error: When True, an HTTP failure raises
-                ``KalshiPortfolioQueryError`` instead of returning ``[]``.
-                Default False preserves the original silent-empty behavior
-                for existing callers; the MM pilot's startup reconciliation
-                (mm_pilot.py) sets this True — mistaking "request failed"
-                for "confirmed flat" would let it reconcile to zero
-                inventory while a real position is unaccounted for.
+            limit: Page size per request.
+            max_pages: Maximum pages to walk (cursor pagination).
+            raise_on_error: When True, ANY page fetch failure — including
+                one on page 2+, after earlier pages looked fine — raises
+                ``KalshiPortfolioQueryError`` instead of returning whatever
+                positions were accumulated so far. A partial cross-page
+                result is exactly as ambiguous as a single-page failure:
+                the MM pilot's startup reconciliation (mm_pilot.py) must
+                never mistake "some pages missing" for "confirmed
+                complete". Default False preserves the original
+                silent-partial-return behavior for other callers.
 
         Raises:
             KalshiPortfolioQueryError: Only when ``raise_on_error`` is True
-                and the request fails.
+                and a page fetch fails.
         """
-        resp = self._request("GET", "/portfolio/positions", params={"limit": 200})
-        if not resp or resp.status_code != 200:
-            status = resp.status_code if resp is not None else "no response"
-            logger.warning("Kalshi get_positions failed: %s", status)
-            if raise_on_error:
-                raise KalshiPortfolioQueryError(
-                    f"get_positions fetch failed ({status})")
-            return []
-        data = resp.json()
-        return data.get("market_positions", [])
+        positions: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            params: dict = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._request("GET", "/portfolio/positions", params=params)
+            if not resp or resp.status_code != 200:
+                status = resp.status_code if resp is not None else "no response"
+                logger.warning("Kalshi get_positions failed: %s", status)
+                if raise_on_error:
+                    raise KalshiPortfolioQueryError(
+                        f"get_positions page fetch failed ({status}) after "
+                        f"{len(positions)} position(s) already accumulated "
+                        f"this call — result would be ambiguous (partial "
+                        f"vs. complete)")
+                break
+            data = resp.json()
+            page = data.get("market_positions", [])
+            positions.extend(page)
+            cursor = data.get("cursor")
+            if not cursor or not page:
+                break
+        return positions
 
     def get_open_orders(self, ticker: str | None = None,
                         limit: int = 200, max_pages: int = 5) -> list[dict]:

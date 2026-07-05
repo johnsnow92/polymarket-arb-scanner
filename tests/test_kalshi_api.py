@@ -347,6 +347,69 @@ class TestKalshiOrders:
         client.session.request.return_value = _mock_response(200, {"market_positions": positions})
         assert client.get_positions(raise_on_error=True) == positions
 
+    @patch("kalshi_api._rate_limit")
+    def test_get_positions_walks_all_pages(self, mock_rl, client):
+        """Codex round-2 finding: get_positions used to fetch a single page
+        (limit=200) and ignore the documented cursor field entirely — an
+        account with a pilot-market position on page 2 would never see it.
+        Mirrors the pagination already proven correct for get_fills/
+        get_open_orders/get_settlements in this same file."""
+        page1 = _mock_response(200, {
+            "market_positions": [{"ticker": "T1", "position_fp": "1"}],
+            "cursor": "abc",
+        })
+        page2 = _mock_response(200, {
+            "market_positions": [{"ticker": "T2", "position_fp": "2"}],
+            "cursor": "",
+        })
+        client.session.request.side_effect = [page1, page2]
+        result = client.get_positions()
+        assert [p["ticker"] for p in result] == ["T1", "T2"]
+        assert client.session.request.call_count == 2
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_positions_raises_on_second_page_failure_when_opted_in(
+            self, mock_rl, client):
+        """A failure on page 2+ must ALSO raise when opted in, not return
+        the page-1 partial result as if it were complete — same ambiguity
+        as a first-page failure, just discovered later."""
+        from kalshi_api import KalshiPortfolioQueryError
+        page1 = _mock_response(200, {
+            "market_positions": [{"ticker": "T1", "position_fp": "1"}],
+            "cursor": "abc",
+        })
+        page2 = _mock_response(500)
+        client.session.request.side_effect = [page1, page2]
+        with pytest.raises(KalshiPortfolioQueryError):
+            client.get_positions(raise_on_error=True)
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_positions_second_page_failure_returns_partial_when_not_opted_in(
+            self, mock_rl, client):
+        """Default (raise_on_error=False) keeps the original silent-partial
+        behavior — matches get_fills's convention exactly."""
+        page1 = _mock_response(200, {
+            "market_positions": [{"ticker": "T1", "position_fp": "1"}],
+            "cursor": "abc",
+        })
+        page2 = _mock_response(500)
+        client.session.request.side_effect = [page1, page2]
+        result = client.get_positions()
+        assert [p["ticker"] for p in result] == ["T1"]
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_positions_stops_at_max_pages(self, mock_rl, client):
+        """Pagination is bounded — an endlessly-cursoring response can't
+        spin forever."""
+        page = _mock_response(200, {
+            "market_positions": [{"ticker": "T1", "position_fp": "1"}],
+            "cursor": "always-more",
+        })
+        client.session.request.return_value = page
+        result = client.get_positions(max_pages=3)
+        assert client.session.request.call_count == 3
+        assert len(result) == 3
+
 
 # ---------------------------------------------------------------------------
 # Finding #3 / #4: get_fills / get_open_orders raise_on_error contract.
