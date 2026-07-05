@@ -1,10 +1,10 @@
 """Unit tests for the earnings-mention OOS logger (earnings_mention.py).
 
-Pure/deterministic: a fake duck-typed client supplies all market data, so these
-run with no network, no API keys, and no live KalshiClient.
+Pure/deterministic: a fake duck-typed client supplies all candlestick data, so
+these run with no network, no API keys, and no live KalshiClient.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -15,41 +15,44 @@ import earnings_mention as em
 # Fakes
 # --------------------------------------------------------------------------- #
 class FakeClient:
-    def __init__(self, events=None, settled=None):
-        self._events = events or []
-        self._settled = settled or {}
+    """Records every fetch_candlesticks call and answers from a fixed table."""
 
-    def fetch_all_events(self, *a, **k):
-        return self._events
+    def __init__(self, candles=None):
+        self._candles = candles or {}  # {ticker: [candle_dict, ...]}
+        self.calls = []
 
-    def get_market_price(self, market):
-        return market.get("_yes"), market.get("_no")
-
-    def fetch_market(self, ticker):
-        return self._settled.get(ticker)
+    def fetch_candlesticks(self, series_ticker, ticker, start_ts, end_ts, period_interval=60):
+        self.calls.append((series_ticker, ticker, start_ts, end_ts, period_interval))
+        return self._candles.get(ticker, [])
 
 
-def _market(ticker, title, close, yes=0.30, no=0.70, **extra):
-    m = {
-        "ticker": ticker,
-        "title": title,
-        "close_time": close,
-        "_yes": yes,
-        "_no": no,
-        "volume": extra.pop("volume", 1000),
-    }
+def _candle(close_dollars=None, mean_dollars=None, yes_bid=None, yes_ask=None):
+    c = {}
+    price = {}
+    if close_dollars is not None:
+        price["close_dollars"] = close_dollars
+    if mean_dollars is not None:
+        price["mean_dollars"] = mean_dollars
+    if price:
+        c["price"] = price
+    if yes_bid is not None:
+        c["yes_bid"] = {"close_dollars": yes_bid}
+    if yes_ask is not None:
+        c["yes_ask"] = {"close_dollars": yes_ask}
+    return c
+
+
+CLOSE = "2026-07-06T00:00:00Z"
+
+
+def _market(ticker="M1", title="Will Apple mention AI?", close=CLOSE, result="yes", **extra):
+    m = {"ticker": ticker, "title": title, "close_time": close, "result": result}
     m.update(extra)
     return m
 
 
-NOW = datetime(2026, 6, 25, 12, 0, tzinfo=timezone.utc)
-CLOSE_12H = "2026-06-26T00:00:00Z"   # 12h after NOW -> inside [close-24h, close-6h]
-CLOSE_2H = "2026-06-25T14:00:00Z"    # 2h after NOW  -> too close (<6h)
-CLOSE_30H = "2026-06-26T18:00:00Z"   # 30h after NOW -> too early (>24h)
-
-
 # --------------------------------------------------------------------------- #
-# classify_market
+# classify_market (unchanged by the redesign)
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("title,expected", [
     ("Will Apple mention 'AI' on its earnings call?", True),
@@ -63,61 +66,142 @@ def test_classify_market(title, expected):
 
 
 # --------------------------------------------------------------------------- #
-# in_snapshot_window
+# has_valid_result
 # --------------------------------------------------------------------------- #
-def test_in_snapshot_window_inside():
-    assert em.in_snapshot_window({"close_time": CLOSE_12H}, NOW) is True
+@pytest.mark.parametrize("result,expected", [
+    ("yes", True),
+    ("no", True),
+    ("YES", True),   # case-insensitive
+    ("", False),
+    ("void", False),
+    (None, False),
+])
+def test_has_valid_result(result, expected):
+    assert em.has_valid_result({"result": result}) is expected
 
 
-def test_in_snapshot_window_too_close():
-    assert em.in_snapshot_window({"close_time": CLOSE_2H}, NOW) is False
-
-
-def test_in_snapshot_window_too_early():
-    assert em.in_snapshot_window({"close_time": CLOSE_30H}, NOW) is False
-
-
-def test_in_snapshot_window_missing_close():
-    assert em.in_snapshot_window({}, NOW) is False
-
-
-# --------------------------------------------------------------------------- #
-# snapshot_open_markets
-# --------------------------------------------------------------------------- #
-def test_snapshot_open_markets_filters():
-    events = [{
-        "markets": [
-            _market("MENTION-IN", "Will Apple mention AI?", CLOSE_12H, yes=0.30),
-            _market("MENTION-OUT", "Will Apple mention AI?", CLOSE_2H),       # out of window
-            _market("BTC-IN", "Will BTC be above 100k?", CLOSE_12H),         # not a mention market
-        ]
-    }]
-    snaps = em.snapshot_open_markets(FakeClient(events=events), NOW)
-    assert [s.ticker for s in snaps] == ["MENTION-IN"]
-    assert snaps[0].yes_price == 0.30
-    assert snaps[0].hours_to_close == 12.0
+def test_has_valid_result_missing_key():
+    assert em.has_valid_result({}) is False
 
 
 # --------------------------------------------------------------------------- #
-# resolve_settlements
+# _series_ticker_for_candles
 # --------------------------------------------------------------------------- #
-def test_resolve_settlements():
-    pending = [
-        em.Snapshot("A", NOW.isoformat(), 12.0, 0.30, 0.70, 1000, "S"),
-        em.Snapshot("B", NOW.isoformat(), 12.0, 0.40, 0.60, 1000, "S"),
-        em.Snapshot("C", NOW.isoformat(), 12.0, 0.25, 0.75, 1000, "S"),
-    ]
-    settled = {
-        "A": {"status": "settled", "result": "yes"},
-        "B": {"status": "finalized", "result": "no"},
-        "C": {"status": "active", "result": ""},   # not settled yet -> skipped
-    }
-    resolved = em.resolve_settlements(FakeClient(settled=settled), pending)
-    assert {r.ticker: r.outcome for r in resolved} == {"A": 1.0, "B": 0.0}
+def test_series_ticker_prefers_explicit_field():
+    market = {"series_ticker": "KXEARNINGSMENTIONBA", "event_ticker": "IGNORED-26Q2"}
+    assert em._series_ticker_for_candles(market) == "KXEARNINGSMENTIONBA"
+
+
+def test_series_ticker_falls_back_to_event_ticker_prefix():
+    market = {"event_ticker": "KXEARNINGSMENTIONBA-26Q2ER"}
+    assert em._series_ticker_for_candles(market) == "KXEARNINGSMENTIONBA"
+
+
+def test_series_ticker_empty_when_neither_present():
+    assert em._series_ticker_for_candles({}) == ""
 
 
 # --------------------------------------------------------------------------- #
-# compute_oos_stats
+# _candle_yes_price
+# --------------------------------------------------------------------------- #
+def test_candle_yes_price_prefers_close_dollars():
+    assert em._candle_yes_price(_candle(close_dollars="0.2200")) == pytest.approx(0.22)
+
+
+def test_candle_yes_price_falls_back_to_mean_dollars():
+    assert em._candle_yes_price(_candle(mean_dollars="0.35")) == pytest.approx(0.35)
+
+
+def test_candle_yes_price_falls_back_to_bid_ask_midpoint():
+    candle = _candle(yes_bid="0.20", yes_ask="0.30")
+    assert em._candle_yes_price(candle) == pytest.approx(0.25)
+
+
+def test_candle_yes_price_none_when_nothing_usable():
+    assert em._candle_yes_price({}) is None
+
+
+def test_candle_yes_price_ignores_bad_types():
+    assert em._candle_yes_price(_candle(close_dollars="not-a-number")) is None
+
+
+# --------------------------------------------------------------------------- #
+# price_at_t24h — replaces the old live-snapshot window entirely
+# --------------------------------------------------------------------------- #
+def test_price_at_t24h_uses_last_candle_in_window():
+    market = _market(series_ticker="KXEARNINGSMENTIONBA")
+    client = FakeClient(candles={
+        "M1": [_candle(close_dollars="0.20"), _candle(close_dollars="0.28")],
+    })
+    price = em.price_at_t24h(client, market)
+    assert price == pytest.approx(0.28)  # last candle in the window wins
+
+
+def test_price_at_t24h_computes_correct_window_and_series():
+    close_dt = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
+    market = _market(series_ticker="KXEARNINGSMENTIONBA")
+    client = FakeClient(candles={"M1": [_candle(close_dollars="0.20")]})
+    em.price_at_t24h(client, market)
+    assert len(client.calls) == 1
+    series, ticker, start_ts, end_ts, period = client.calls[0]
+    assert series == "KXEARNINGSMENTIONBA"
+    assert ticker == "M1"
+    assert period == 60
+    expected_start = int((close_dt - timedelta(hours=26)).timestamp())
+    expected_end = int((close_dt - timedelta(hours=23)).timestamp())
+    assert start_ts == expected_start
+    assert end_ts == expected_end
+
+
+def test_price_at_t24h_falls_back_to_event_ticker_series():
+    market = _market(event_ticker="KXEARNINGSMENTIONBA-26Q2ER")
+    client = FakeClient(candles={"M1": [_candle(close_dollars="0.20")]})
+    assert em.price_at_t24h(client, market) == pytest.approx(0.20)
+
+
+def test_price_at_t24h_none_when_no_close_time():
+    market = {"ticker": "M1", "series_ticker": "S"}
+    assert em.price_at_t24h(FakeClient(), market) is None
+
+
+def test_price_at_t24h_none_when_no_ticker():
+    market = {"close_time": CLOSE, "series_ticker": "S"}
+    assert em.price_at_t24h(FakeClient(), market) is None
+
+
+def test_price_at_t24h_none_when_no_series_derivable():
+    market = {"ticker": "M1", "close_time": CLOSE}  # no series_ticker, no event_ticker
+    assert em.price_at_t24h(FakeClient(), market) is None
+
+
+def test_price_at_t24h_none_when_no_candles_in_window():
+    market = _market(series_ticker="S")
+    assert em.price_at_t24h(FakeClient(candles={}), market) is None
+
+
+def test_price_at_t24h_none_when_candle_unusable():
+    market = _market(series_ticker="S")
+    client = FakeClient(candles={"M1": [{}]})  # candle with no usable price fields
+    assert em.price_at_t24h(client, market) is None
+
+
+# --------------------------------------------------------------------------- #
+# build_resolved
+# --------------------------------------------------------------------------- #
+def test_build_resolved_yes_outcome():
+    market = _market(ticker="M1", result="yes", series_ticker="S")
+    r = em.build_resolved(market, 0.32)
+    assert r == em.Resolved(ticker="M1", yes_price=0.32, outcome=1.0, series="S")
+
+
+def test_build_resolved_no_outcome():
+    market = _market(ticker="M1", result="no", series_ticker="S")
+    r = em.build_resolved(market, 0.32)
+    assert r.outcome == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# compute_oos_stats (unchanged by the redesign)
 # --------------------------------------------------------------------------- #
 def test_compute_oos_stats_band_filter():
     resolved = [
@@ -142,7 +226,7 @@ def test_compute_oos_stats_known_numbers():
 
 
 # --------------------------------------------------------------------------- #
-# verdict (pre-registered 8/3 gate)
+# verdict (pre-registered 8/3 gate, unchanged by the redesign)
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("n,pts,z,expected", [
     (120, 10.0, 2.5, "pursue"),     # gap>=9 and z>=2

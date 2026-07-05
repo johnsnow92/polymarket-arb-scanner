@@ -3,14 +3,32 @@
 Re-runs the round-2 earnings-mention pilot out-of-sample on newly-settled Kalshi
 company-KPI / earnings-mention markets to confirm the in-sample finding that
 11-50c YES contracts are systematically ~10pts too rich at T-24h (R2-1: +10.3pts,
-z=2.41, n=240). This module is a deterministic statistical logger: it snapshots
-the YES price in the [close-24h, close-6h] window, joins each snapshot to the
-realized settlement, and computes a richness z-score. It places NO orders and
-involves NO LLM in any path. See docs/plans/08-earnings-mention-oos.md.
+z=2.41, n=240). This module is a deterministic statistical logger: it finds
+markets that have ALREADY settled, reconstructs each one's YES price at T-24h
+before close from historical candlesticks, joins that to the realized
+settlement, and computes a richness z-score. It places NO orders and involves
+NO LLM in any path. See docs/plans/08-earnings-mention-oos.md.
 
-The client is duck-typed (any object exposing ``fetch_all_events``,
-``get_market_price`` and ``fetch_market``) so the core logic is unit-testable
-without network, keys, or the live KalshiClient.
+Method note (redesign, 2026-07-05): v1 tried to snapshot markets LIVE while
+they sat inside their open [close-24h, close-6h] window. That cannot reliably
+catch a market whose entire lifetime falls between two weekly cron runs (e.g.
+one that opens Tuesday and settles before the next Sunday run never gets
+snapshotted at all) — a real coverage gap, not just a timing nuance. The
+in-sample pilot never had this problem because it worked backwards from
+settled markets via candlestick reconstruction (T1-pm-dispersion-novelty.md
+§a: "T-24h/T-6h candle reconstruction"), which needs nothing to happen while
+the market is still open. This module now does the same: look at what has
+SETTLED since the last watermark, then fetch each one's T-24h price
+after the fact. There is no "pending" snapshot state as a result — a market
+is only ever touched once, after it has already resolved.
+
+The client is duck-typed (any object exposing ``fetch_candlesticks``) so the
+core logic is unit-testable without network, keys, or the live KalshiClient.
+``fetch_settled_markets`` (the discovery step) is called directly by the
+runner (scripts/run_earnings_mention_oos.py), which also owns the
+watermark/seen-ticker bookkeeping — this module stays limited to the parts
+that are pure or that need network only to answer one question (what was the
+YES price at T-24h for this specific, already-settled market).
 """
 
 from __future__ import annotations
@@ -28,12 +46,18 @@ logger = logging.getLogger(__name__)
 # --- pre-registered constants (do not move without re-registering the gate) ---
 BAND_LO = 0.11          # YES price band lower bound (R2-1: 11-50c)
 BAND_HI = 0.50          # YES price band upper bound
-WINDOW_OPEN_H = 24.0    # snapshot window opens at close-24h
-WINDOW_CLOSE_H = 6.0    # snapshot window closes at close-6h
 PURSUE_GAP_PTS = 9.0    # OOS richness gap (points) to PURSUE
 KILL_GAP_PTS = 4.5      # OOS richness gap below which to KILL
 MIN_N = 100             # min OOS contracts before a terminal verdict
 PURSUE_Z = 2.0          # min z-score to PURSUE
+
+# Candlestick sample window for T-24h reconstruction: a 3h window at hourly
+# resolution around the T-24h mark (not a single instant), same as the
+# validated command-center pull (scripts/longshot_fade_pull.py phase3) —
+# guards against a gap in the candle series landing exactly on T-24h.
+CANDLE_WINDOW_START_H = 26.0   # window opens at close-26h
+CANDLE_WINDOW_END_H = 23.0     # window closes at close-23h
+CANDLE_PERIOD_MIN = 60         # hourly candles
 
 # Conservative (false-negative-biased) classifier defaults. Calibrate
 # SERIES_PREFIXES against the in-sample pilot market list before relying on it.
@@ -50,21 +74,8 @@ _TITLE_RE = re.compile("|".join(TITLE_PATTERNS), re.IGNORECASE)
 
 
 class _MarketClient(Protocol):
-    def fetch_all_events(self, *a, **k) -> list[dict]: ...
-    def get_market_price(self, market: dict) -> tuple[float | None, float | None]: ...
-    def fetch_market(self, ticker: str) -> dict | None: ...
-
-
-@dataclass(frozen=True)
-class Snapshot:
-    """A YES-price snapshot of one market taken inside the T-24h..T-6h window."""
-    ticker: str
-    snapshot_ts: str
-    hours_to_close: float
-    yes_price: float
-    no_price: float
-    volume: float
-    series: str
+    def fetch_candlesticks(self, series_ticker: str, ticker: str, start_ts: int, end_ts: int,
+                           *a, **k) -> list[dict]: ...
 
 
 @dataclass(frozen=True)
@@ -130,86 +141,103 @@ def _close_time(market: dict) -> datetime | None:
     return _parse_ts(market.get("close_time") or market.get("expiration_time"))
 
 
-def in_snapshot_window(market: dict, now: datetime) -> bool:
-    """True if *now* falls inside [close-24h, close-6h] for *market*."""
-    close = _close_time(market)
-    if close is None:
-        return False
-    return (close - timedelta(hours=WINDOW_OPEN_H)) <= now <= (
-        close - timedelta(hours=WINDOW_CLOSE_H)
-    )
+def has_valid_result(market: dict) -> bool:
+    """True if *market* carries a definitive yes/no settlement result.
 
-
-def _hours_to_close(market: dict, now: datetime) -> float:
-    close = _close_time(market)
-    if close is None:
-        return float("nan")
-    return (close - now).total_seconds() / 3600.0
-
-
-# --------------------------------------------------------------------------- #
-# Stage 1 — snapshot open mention/KPI markets in-window
-# --------------------------------------------------------------------------- #
-def snapshot_open_markets(client: _MarketClient, now: datetime) -> list[Snapshot]:
-    """Snapshot every in-window mention/KPI market's YES price right now."""
-    out: list[Snapshot] = []
-    for event in client.fetch_all_events() or []:
-        for market in event.get("markets", []) or []:
-            if not classify_market(market):
-                continue
-            if not in_snapshot_window(market, now):
-                continue
-            yes_price, no_price = client.get_market_price(market)
-            if yes_price is None or no_price is None:
-                continue
-            ticker = str(market.get("ticker", ""))
-            if not ticker:
-                continue
-            out.append(
-                Snapshot(
-                    ticker=ticker,
-                    snapshot_ts=now.isoformat(),
-                    hours_to_close=round(_hours_to_close(market, now), 2),
-                    yes_price=float(yes_price),
-                    no_price=float(no_price),
-                    volume=float(market.get("volume", 0) or 0),
-                    series=_series_of(market),
-                )
-            )
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# Stage 2 — resolve matured snapshots against realized settlement
-# --------------------------------------------------------------------------- #
-def resolve_settlements(
-    client: _MarketClient, pending: Iterable[Snapshot]
-) -> list[Resolved]:
-    """Join each matured snapshot to its settled outcome via ``fetch_market``.
-
-    Uses the per-market endpoint (any status) — NOT ``get_settlements``, which is
-    account-scoped and only covers markets this account actually traded.
+    A settled-but-voided/undecided market (result is empty or some other
+    sentinel) will never carry a scoreable outcome — the caller should still
+    mark such a ticker as seen (it will never resolve differently later) but
+    must not feed it into compute_oos_stats.
     """
-    out: list[Resolved] = []
-    for snap in pending:
-        market = client.fetch_market(snap.ticker)
-        if not market:
+    return str(market.get("result", "")).lower() in ("yes", "no")
+
+
+def _series_ticker_for_candles(market: dict) -> str:
+    """Series ticker for the /series/{s}/markets/{t}/candlesticks path.
+
+    Prefers the market's own ``series_ticker`` field; falls back to the
+    ``event_ticker``'s prefix before the first hyphen (series tickers never
+    contain one — e.g. ``KXEARNINGSMENTIONBA-26Q2ER`` -> ``KXEARNINGSMENTIONBA``,
+    the same derivation scripts/longshot_fade_pull.py uses), since passing
+    the wrong string 404s the candlestick endpoint outright.
+    """
+    explicit = market.get("series_ticker")
+    if explicit:
+        return str(explicit)
+    event_ticker = str(market.get("event_ticker", ""))
+    return event_ticker.split("-")[0] if event_ticker else ""
+
+
+def _candle_dollars(block: dict | None, *keys: str) -> float | None:
+    """Read the first present ``*_dollars`` string field as a float.
+
+    Candlestick price fields are dollar strings (e.g. ``close_dollars=
+    "0.2200"``), NOT bare cents — confirmed gotcha from the in-sample pilot
+    (T1-pm-dispersion-novelty.md methodology note).
+    """
+    for key in keys:
+        value = (block or {}).get(key)
+        if value is None:
             continue
-        status = str(market.get("status", "")).lower()
-        result = str(market.get("result", "")).lower()
-        if status not in ("settled", "finalized", "closed"):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
             continue
-        if result not in ("yes", "no"):
-            continue
-        out.append(
-            Resolved(
-                ticker=snap.ticker,
-                yes_price=snap.yes_price,
-                outcome=1.0 if result == "yes" else 0.0,
-                series=snap.series,
-            )
-        )
-    return out
+    return None
+
+
+def _candle_yes_price(candle: dict) -> float | None:
+    """Extract a YES price (in $0-1 terms) from one candlestick.
+
+    Prefers the trade-price block's close/mean; falls back to the midpoint
+    of the yes_bid/yes_ask close if no trades occurred in the candle.
+    """
+    price = _candle_dollars(candle.get("price"), "close_dollars", "mean_dollars")
+    if price is not None:
+        return price
+    bid = _candle_dollars(candle.get("yes_bid"), "close_dollars")
+    ask = _candle_dollars(candle.get("yes_ask"), "close_dollars")
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2.0
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# T-24h price reconstruction (replaces the old live-snapshot window)
+# --------------------------------------------------------------------------- #
+def price_at_t24h(client: _MarketClient, market: dict) -> float | None:
+    """Reconstruct *market*'s YES price at T-24h before close via candlesticks.
+
+    Samples the [close-26h, close-23h] window at hourly resolution and reads
+    the last candle in it (closest to T-24h) — the same method the in-sample
+    pilot used, so this needs nothing to have happened while the market was
+    still open. Returns None if close_time/ticker/series can't be determined,
+    the fetch fails, or the window has no candles (e.g. a market with zero
+    trading activity around T-24h).
+    """
+    close = _close_time(market)
+    ticker = str(market.get("ticker", ""))
+    series = _series_ticker_for_candles(market)
+    if close is None or not ticker or not series:
+        return None
+    start_ts = int((close - timedelta(hours=CANDLE_WINDOW_START_H)).timestamp())
+    end_ts = int((close - timedelta(hours=CANDLE_WINDOW_END_H)).timestamp())
+    candles = client.fetch_candlesticks(series, ticker, start_ts, end_ts, CANDLE_PERIOD_MIN)
+    if not candles:
+        return None
+    return _candle_yes_price(candles[-1])
+
+
+def build_resolved(market: dict, yes_price_t24h: float) -> Resolved:
+    """Build a Resolved record from an already-settled market plus its
+    reconstructed T-24h YES price. Caller must have already confirmed
+    has_valid_result(market) is True."""
+    return Resolved(
+        ticker=str(market.get("ticker", "")),
+        yes_price=yes_price_t24h,
+        outcome=1.0 if str(market.get("result", "")).lower() == "yes" else 0.0,
+        series=_series_of(market),
+    )
 
 
 # --------------------------------------------------------------------------- #
