@@ -461,7 +461,11 @@ class TestCanary:
 
     def test_canary_loss_over_ceiling_halts(self, pilot_env, clock, monkeypatch):
         monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 100.0)
-        client = FakeKalshiClient()
+        # no_bid=0.30 -> yes_ask=0.70, so a resting bid at 0.60 does not
+        # cross (finding #2's pre-submit TOCTOU guard would otherwise abort
+        # this placement outright — the default book's 0.51 ask is below
+        # 0.60 and this test isn't about crossing behavior).
+        client = FakeKalshiClient(books={TICKER: make_book(no_bid=0.30)})
         pilot = build_pilot(clock, client=client, hedger=RecordingHedger())
         # Buy 20 @ 0.60, hedge-exit 20 @ 0.05 -> realized -$11.00 < -$10
         oid = pilot.place_pilot_order(TICKER, "yes", "buy", 20, 0.60,

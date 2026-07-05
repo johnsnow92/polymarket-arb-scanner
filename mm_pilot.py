@@ -536,6 +536,44 @@ class KalshiMMPilot:
         with self._lock:
             return self._books.get(ticker)
 
+    def _would_cross(self, ticker: str, side: str, action: str,
+                     price: float) -> bool:
+        """Fresh top-of-book crossing check, used immediately before a live
+        quote submission (finding #2's TOCTOU guard — see the call site in
+        ``place_pilot_order`` for the full rationale).
+
+        Fetches the CURRENT book (not the cached one gates already
+        evaluated against) and asks: would an order at ``price`` on
+        ``side``/``action`` execute immediately as a taker right now?
+        Fails closed — any inability to establish a fresh, confident
+        answer (fetch error, empty book, unknown depth on the relevant
+        side) returns True (treat as crossing, abort the placement)
+        rather than assume it's safe to proceed.
+        """
+        if self._client is None:
+            return True
+        try:
+            raw_book = self._client.fetch_order_book(ticker)
+        except Exception:
+            logger.exception("MM pilot pre-submit book re-check failed for "
+                             "%s", ticker)
+            return True
+        if not raw_book:
+            return True
+        from kalshi_api import (parse_orderbook, best_yes_ask, best_no_ask,
+                                best_yes_bid, best_no_bid)
+        parsed = parse_orderbook(raw_book)
+        if action == "buy":
+            touch = best_yes_ask(parsed) if side == "yes" else best_no_ask(parsed)
+            if touch is None:
+                return True
+            return price >= touch[0]
+        else:
+            touch = best_yes_bid(parsed) if side == "yes" else best_no_bid(parsed)
+            if touch is None:
+                return True
+            return price <= touch[0]
+
     # -- registry helpers ----------------------------------------------------
 
     def resting_orders(self, ticker: str = "") -> list[dict]:
@@ -872,6 +910,31 @@ class KalshiMMPilot:
                 self.place_order_calls += 1
 
         if order_id is None:
+            # TOCTOU guard (finding #2): G12's crossing check ran against a
+            # CACHED book at gate-evaluation time; by the time this quote
+            # reaches the exchange the live top-of-book may have moved
+            # enough that the "resting" order we intend to place would
+            # instead execute immediately as an unintended TAKER fill.
+            # Kalshi's place_order endpoint used here has no confirmed
+            # post-only/maker-only flag (research found `post_only` on
+            # Kalshi's newer v2 events/orders endpoint, but could not
+            # confirm it on the legacy endpoint this wrapper actually
+            # calls — migrating endpoints is out of scope for this fix and
+            # too risky to guess at for live order placement), so the
+            # next-best guard is a fresh top-of-book fetch immediately
+            # before submission, aborting if price would now cross. This
+            # shrinks the race window from "one full refresh cycle" to
+            # "one network round trip" — hedge orders are IOC/fill_or_kill
+            # and are DELIBERATELY marketable, so they are exempt.
+            if purpose != "hedge" and self._would_cross(ticker, side, action,
+                                                         price):
+                logger.warning(
+                    "MM pilot quote placement aborted (TOCTOU guard): %s "
+                    "%s %s @ %.2f would now cross the live book", ticker,
+                    action, side, price)
+                self._write_decision("place_order", ticker, False,
+                                     "would_cross_toctou")
+                return None
             # Quotes rest GTC; hedges are IOC-style fill_or_kill at touch
             # (unfilled hedges are caught by _check_pending_hedges).
             tif = "fill_or_kill" if purpose == "hedge" else "gtc"

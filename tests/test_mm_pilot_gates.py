@@ -431,6 +431,103 @@ class TestCrossingGuard:
 
 
 # ---------------------------------------------------------------------------
+# Codex round-2 finding #2: TOCTOU pre-submit crossing re-check.
+# G11/G12 (above) validate against the CACHED book at gate-evaluation
+# time; place_pilot_order's _would_cross re-fetches the LIVE book
+# immediately before the real kalshi_client.place_order() call and aborts
+# if the price would now cross — closing the gap between "gates said this
+# was safe" and "the exchange actually received it".
+# Fail-before: place_pilot_order had no crossing check of its own at all;
+# it trusted whatever price refresh_market's G12 had already vetted
+# against a book that could have moved by submission time.
+# ---------------------------------------------------------------------------
+
+class TestToctouCrossingGuard:
+    class MovingBookClient(FakeKalshiClient):
+        """Returns ``first_book`` for the very first fetch_order_book call
+        (refresh_market's own gate-evaluation refresh) and ``moved_book``
+        for every call after that (place_pilot_order's pre-submit
+        re-checks) — simulates the live market moving in the gap."""
+
+        def __init__(self, first_book, moved_book):
+            super().__init__(books={TICKER: first_book})
+            self._moved_book = moved_book
+            self.fetch_calls = 0
+
+        def fetch_order_book(self, ticker):
+            self.fetch_calls += 1
+            if self.fetch_calls == 1:
+                return self.books.get(ticker)
+            return self._moved_book
+
+    def test_aborts_bid_when_live_ask_drops_before_submission(
+            self, pilot_env, clock, monkeypatch):
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 10.0)
+        # Gate-evaluation book: yes_ask=0.70 -> a bid at 0.49 is safely
+        # non-crossing, G12 leaves it unrepriced.
+        first_book = make_book(yes_bid=0.30, no_bid=0.30,
+                               yes_qty=500.0, no_qty=500.0)
+        # Live book by the time the bid's pre-submit check runs: the ask
+        # dropped to 0.45 (no_bid rose to 0.55) — 0.49 is now marketable.
+        moved_book = make_book(yes_bid=0.30, no_bid=0.55,
+                               yes_qty=500.0, no_qty=500.0)
+        client = self.MovingBookClient(first_book, moved_book)
+        pilot = build_pilot(clock, client=client)
+        pilot._quote_engine = FixedQuoteEngine(bid=0.49, ask=0.60)
+        placed = pilot.refresh_market(TICKER)
+        purposes = {pilot._orders[oid]["purpose"] for oid in placed}
+        assert "quote_bid" not in purposes  # aborted by the TOCTOU guard
+        # The ask's own pre-submit check reads a still-non-crossing price
+        # off the same moved book (no_price=0.40 vs. no_ask=0.70) — the
+        # guard is per-order, not an all-or-nothing pull of the market.
+        assert "quote_ask" in purposes
+        reasons = [d["reason"] for d in pilot._decisions
+                  if d["gate"] == "place_order"]
+        assert "would_cross_toctou" in reasons
+
+    def test_hedge_orders_exempt_from_toctou_guard(self, pilot_env, clock):
+        """Hedges are IOC/fill_or_kill and DELIBERATELY marketable — the
+        guard must never block them, even when they clearly cross."""
+        client = FakeKalshiClient(
+            books={TICKER: make_book(yes_bid=0.60, no_bid=0.60)})  # yes_ask=0.40
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 5, 0.55,
+                                      purpose="hedge", reducing=True)
+        assert oid is not None
+        assert len(client.placed) == 1
+
+    def test_fails_closed_when_presubmit_fetch_raises(self, pilot_env, clock):
+        class RaisingClient(FakeKalshiClient):
+            def fetch_order_book(self, ticker):
+                raise RuntimeError("network blip")
+
+        pilot = build_pilot(clock, client=RaisingClient())
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        assert oid is None
+
+    def test_fails_closed_when_presubmit_fetch_returns_empty(self, pilot_env,
+                                                              clock):
+        class EmptyBookClient(FakeKalshiClient):
+            def fetch_order_book(self, ticker):
+                return None
+
+        pilot = build_pilot(clock, client=EmptyBookClient())
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        assert oid is None
+
+    def test_non_crossing_placement_unaffected(self, pilot_env, clock):
+        """Sanity check: the guard isn't overly strict on the common case
+        of a genuinely still-non-crossing quote."""
+        client = FakeKalshiClient()  # default book: yes_ask=0.51
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        assert oid is not None
+
+
+# ---------------------------------------------------------------------------
 # G6/G11 companions: staleness and depth sizing
 # ---------------------------------------------------------------------------
 
@@ -486,6 +583,12 @@ class TestBookGates:
     # Fail-before: _sized_count only applied the depth cap `if best is not
     # None`, so a None best fell through to the UNBOUNDED
     # `int(size_usd / price)` — the opposite of a depth cap.
+    #
+    # Once Codex round-2's TOCTOU crossing guard (finding #2) landed, this
+    # scenario also blocks the BID side, not just the ask G11 already knew
+    # was unsizeable: yes_ask is derived FROM no_bid, so no_bid missing
+    # means the guard cannot verify a bid wouldn't cross either. See the
+    # inline comment in the test body for the full chain.
     # -----------------------------------------------------------------
 
     def test_unknown_depth_on_one_side_skips_that_side_not_full_size(
@@ -511,11 +614,21 @@ class TestBookGates:
         # Our ask sizing reads book["no_bid"] as `best` — unknown depth
         # there must skip the ask side, never fall through to full size.
         assert "quote_ask" not in purposes
-        # The bid side (yes_bid depth still present) is unaffected.
-        bid_orders = [pilot._orders[oid] for oid in placed
-                      if pilot._orders[oid]["purpose"] == "quote_bid"]
-        assert bid_orders  # still quotes the side with known depth
-        assert bid_orders[0]["count"] <= int(0.25 * 500.0)
+        # Codex round-2 finding #2 (TOCTOU pre-submit crossing guard) means
+        # the bid side is ALSO blocked here now, for a different reason:
+        # yes_ask is derived FROM no_bid (kalshi_api.best_yes_ask), so with
+        # no_bid unavailable there is no way to verify a "buy yes" bid
+        # wouldn't cross — _would_cross fails closed (aborts) exactly like
+        # it would for a genuinely stale/unreachable book. This also means
+        # the PRE-EXISTING G12 crossing guard (mm_pilot.py refresh_market)
+        # had its own latent gap here — `if best_yes_ask is not None and
+        # bid >= best_yes_ask[0]` short-circuits to "no reprice, no skip"
+        # when best_yes_ask is None, silently letting an unverified bid
+        # through. The TOCTOU guard closes that gap as a side effect: an
+        # unknown ask means neither side of this market can be safely
+        # quoted, not just the one G11 already knew was unsizeable.
+        assert "quote_bid" not in purposes
+        assert placed == []
 
     # -----------------------------------------------------------------
     # Finding #7: book LEVELS staleness must be judged independently from
