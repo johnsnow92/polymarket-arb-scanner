@@ -435,6 +435,69 @@ class TestKalshiFetchData:
         assert result == {"ticker": "TICK", "status": "active"}
 
     @patch("kalshi_api._rate_limit")
+    def test_fetch_settled_markets_single_page(self, mock_rl, client):
+        """Single page of settled markets with no cursor returns all."""
+        client.session.request.return_value = _mock_response(200, {
+            "markets": [{"ticker": "M1", "result": "yes"}, {"ticker": "M2", "result": "no"}],
+            "cursor": "",
+        })
+        result = client.fetch_settled_markets(min_close_ts=1000)
+        assert len(result) == 2
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_settled_markets_pagination(self, mock_rl, client):
+        """Multiple pages are fetched until an empty cursor."""
+        page1 = _mock_response(200, {"markets": [{"ticker": "M1"}], "cursor": "abc"})
+        page2 = _mock_response(200, {"markets": [{"ticker": "M2"}], "cursor": ""})
+        client.session.request.side_effect = [page1, page2]
+        result = client.fetch_settled_markets(min_close_ts=1000)
+        assert len(result) == 2
+        assert client.session.request.call_count == 2
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_settled_markets_stops_on_error(self, mock_rl, client):
+        """Non-200 response returns whatever was collected so far ([] on first page)."""
+        client.session.request.return_value = _mock_response(500)
+        assert client.fetch_settled_markets(min_close_ts=1000) == []
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_settled_markets_sends_status_and_min_close_ts(self, mock_rl, client):
+        """Params include status=settled and the caller's min_close_ts watermark."""
+        client.session.request.return_value = _mock_response(200, {"markets": [], "cursor": ""})
+        client.fetch_settled_markets(min_close_ts=1735000000)
+        sent_params = client.session.request.call_args.kwargs["params"]
+        assert sent_params["status"] == "settled"
+        assert sent_params["min_close_ts"] == 1735000000
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_candlesticks_success(self, mock_rl, client):
+        """Returns the unwrapped candlesticks list on 200."""
+        candles = [{"end_period_ts": 1000, "price": {"close_dollars": "0.2200"}}]
+        client.session.request.return_value = _mock_response(200, {"candlesticks": candles})
+        result = client.fetch_candlesticks("KXEARNINGSMENTIONBA", "KXEARNINGSMENTIONBA-26Q2", 100, 200)
+        assert result == candles
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_candlesticks_requests_correct_path_and_params(self, mock_rl, client):
+        """Calls GET /series/{series}/markets/{ticker}/candlesticks with the time window."""
+        client.session.request.return_value = _mock_response(200, {"candlesticks": []})
+        client.fetch_candlesticks("KXEARNINGSMENTIONBA", "KXEARNINGSMENTIONBA-26Q2", 100, 200, period_interval=60)
+        call_args = client.session.request.call_args
+        assert call_args[0][0] == "GET"
+        assert call_args[0][1] == (
+            KALSHI_BASE_URL + KALSHI_API_PATH
+            + "/series/KXEARNINGSMENTIONBA/markets/KXEARNINGSMENTIONBA-26Q2/candlesticks"
+        )
+        sent_params = call_args.kwargs["params"]
+        assert sent_params == {"start_ts": 100, "end_ts": 200, "period_interval": 60}
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_candlesticks_returns_empty_on_error(self, mock_rl, client):
+        """Returns [] on non-200 (e.g. wrong series ticker -> 404)."""
+        client.session.request.return_value = _mock_response(404)
+        assert client.fetch_candlesticks("BADSERIES", "TICK", 100, 200) == []
+
+    @patch("kalshi_api._rate_limit")
     def test_fetch_order_book_success(self, mock_rl, client):
         """Returns parsed order-book JSON on 200."""
         book = {"orderbook": {"yes": [[55, 100]], "no": [[45, 200]]}}
