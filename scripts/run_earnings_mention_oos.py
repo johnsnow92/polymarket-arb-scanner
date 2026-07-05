@@ -59,7 +59,15 @@ logger = logging.getLogger(__name__)
 # drop it so one bad ticker can't grow `pending` forever.
 STALE_PENDING_DAYS = 30.0
 
-_EMPTY_STATE = {"pending": [], "resolved": [], "last_verdict": "continue"}
+def _empty_state() -> dict:
+    """A fresh {pending, resolved, last_verdict} state — never a shared instance.
+
+    Returning a module-level constant dict here would alias its ``pending``/
+    ``resolved`` list objects across every caller; a future in-place mutation
+    (``state["pending"].append(...)``) on one caller's "empty" state would
+    silently corrupt it for every other caller in the same process.
+    """
+    return {"pending": [], "resolved": [], "last_verdict": "continue"}
 
 
 # --------------------------------------------------------------------------- #
@@ -113,14 +121,14 @@ def load_state(path: Path | None) -> dict:
     crashing the cron — the OOS sample just starts (or restarts) from zero.
     """
     if not path or not path.exists():
-        return dict(_EMPTY_STATE)
+        return _empty_state()
     try:
         data = json.loads(path.read_text())
     except (ValueError, OSError) as exc:
         logger.warning("OOS state read failed (%s) — treating as empty", exc)
-        return dict(_EMPTY_STATE)
+        return _empty_state()
     if not isinstance(data, dict):
-        return dict(_EMPTY_STATE)
+        return _empty_state()
     return {
         "pending": data.get("pending", []),
         "resolved": data.get("resolved", []),
@@ -129,11 +137,18 @@ def load_state(path: Path | None) -> dict:
 
 
 def save_state(path: Path | None, state: dict) -> None:
-    """Persist {pending, resolved, last_verdict} to the JSON state file."""
+    """Persist {pending, resolved, last_verdict} to the JSON state file.
+
+    Writes atomically (temp file + os.replace) so a crash or kill mid-write
+    can never leave a truncated/corrupt file behind — unlike a dedup cache,
+    this file *is* the accumulated OOS sample the 8/3 verdict is built on.
+    """
     if not path:
         return
     try:
-        path.write_text(json.dumps(state))
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, path)
     except OSError as exc:
         logger.warning("OOS state write failed: %s", exc)
 

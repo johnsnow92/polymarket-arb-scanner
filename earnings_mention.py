@@ -95,6 +95,7 @@ def _parse_ts(value: str | None) -> datetime | None:
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (ValueError, TypeError):
+        logger.debug("Failed to parse timestamp %r", value)
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
@@ -248,7 +249,12 @@ def compute_oos_stats(resolved: Iterable[Resolved]) -> OosStats:
 
 
 def verdict(stats: OosStats) -> str:
-    """Pre-registered 8/3 gate: 'pursue' | 'kill' | 'continue' (no override)."""
+    """Pre-registered gate toward the 8/3 decision review (no discretionary override).
+
+    'pursue' if mean_richness_pts >= PURSUE_GAP_PTS (9.0) and z >= PURSUE_Z (2.0),
+    provided n >= MIN_N (100). 'kill' if mean_richness_pts < KILL_GAP_PTS (4.5).
+    Otherwise 'continue' — including whenever n < MIN_N, which is never terminal.
+    """
     if stats.n < MIN_N:
         return "continue"
     if stats.mean_richness_pts >= PURSUE_GAP_PTS and stats.z >= PURSUE_Z:
