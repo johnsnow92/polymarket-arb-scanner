@@ -1,13 +1,33 @@
 """Earnings-mention NO-harvest OOS logger — the live weekly runner.
 
-Weekly entry point for ``earnings_mention.py``: snapshots newly in-window
-company-KPI / earnings-mention Kalshi markets, resolves previously-pending
-snapshots against their realized settlement via ``fetch_market``, accumulates
-the resolved history in a local JSON state file across runs, recomputes the
-OOS richness stats + pre-registered verdict, and Telegram-tickets the
-running verdict. Detection/logging only — this script never places an
-order, never touches capital, and has no LLM in its path. See
-docs/plans/08-earnings-mention-oos.md.
+Weekly entry point for ``earnings_mention.py``: finds Kalshi company-KPI /
+earnings-mention markets that have SETTLED since the last watermark,
+reconstructs each one's YES price at T-24h before close via candlesticks,
+accumulates the resolved history in a local JSON state file across runs,
+recomputes the OOS richness stats + pre-registered verdict, and
+Telegram-tickets the running verdict. Detection/logging only — this script
+never places an order, never touches capital, and has no LLM in its path.
+See docs/plans/08-earnings-mention-oos.md.
+
+Redesign (2026-07-05): v1 tried to snapshot markets LIVE while they sat
+inside their open [close-24h, close-6h] window, tracked as "pending" state
+resolved on a later run. That approach cannot reliably catch a market whose
+entire lifetime (open -> settle) falls between two weekly cron runs — a
+real coverage gap. This version instead looks backwards from what has
+ALREADY settled (client.fetch_settled_markets, watermark-bounded) and
+reconstructs each one's T-24h price after the fact via candlesticks
+(earnings_mention.price_at_t24h) — the same method the in-sample pilot used
+(T1-pm-dispersion-novelty.md §a). There is no "pending" state as a result:
+state is just a time watermark + a set of already-processed tickers + the
+accumulated resolved history.
+
+Fail-closed on partial failures: if fetch_settled_markets returns a market
+whose candlestick fetch fails this cycle, it is neither marked seen nor
+counted, and the watermark never advances past it — it's retried next
+cycle. Any such failure this cycle suppresses the normal verdict alert (a
+partial-cycle verdict could be biased if the failures aren't random) in
+favor of a distinct failure notice; state changes are still saved so
+progress from tickers that DID resolve cleanly this cycle isn't lost.
 
 State: v1 persists locally as JSON, restored across scheduled runs via
 ``actions/cache`` — the same convention scripts/run_edgar_scan.py uses for
@@ -16,7 +36,16 @@ Supabase ``pnl`` table: that table is realized P&L (see
 scripts/run_pnl_digest.py), and this logger produces $0 statistical rows
 that would corrupt its rollups. Spec step 6 gates "add Supabase secrets ->
 activate weekly cron" as an explicit operator follow-up once a dedicated
-table exists — not assumed here.
+table exists — not assumed here. actions/cache is this repo's only existing
+cross-run state convention (no workflow here commits state back to git);
+introducing an auto-push-to-master capability for a rolling state blob was
+judged a materially bigger, riskier change than the problem warranted for a
+~4-week campaign window, so instead: the workflow also uploads the state
+file as a 90-day build artifact (human-recoverable backup, not part of the
+automated restore path), and _check_state_anomaly gives a best-effort,
+self-referential guard against a silent cache reset (see its docstring for
+the one case it structurally cannot detect: a *total* cache wipe erases its
+own reference point too).
 
 Cron-safe at every missing-config boundary: no Kalshi creds, a failed
 auth, or missing Telegram creds all log a warning and exit 0 rather than
@@ -42,10 +71,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from earnings_mention import (  # noqa: E402
     OosStats,
     Resolved,
-    Snapshot,
+    _close_time,
+    build_resolved,
+    classify_market,
     compute_oos_stats,
-    resolve_settlements,
-    snapshot_open_markets,
+    has_valid_result,
+    price_at_t24h,
     verdict,
 )
 from kalshi_api import KalshiClient  # noqa: E402
@@ -54,49 +85,29 @@ from notifier import WebhookNotifier  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# A pending snapshot that is still unresolved this long after it was taken is
-# almost certainly a voided/cancelled market (no yes/no result ever lands) —
-# drop it so one bad ticker can't grow `pending` forever.
-STALE_PENDING_DAYS = 30.0
+# A loaded state older than this with zero resolved records is suspicious
+# enough to log/alert loudly rather than silently proceed (see
+# _check_state_anomaly).
+ANOMALY_MIN_AGE_DAYS = 14.0
+
 
 def _empty_state() -> dict:
-    """A fresh {pending, resolved, last_verdict} state — never a shared instance.
+    """A fresh state — never a shared instance.
 
-    Returning a module-level constant dict here would alias its ``pending``/
-    ``resolved`` list objects across every caller; a future in-place mutation
-    (``state["pending"].append(...)``) on one caller's "empty" state would
-    silently corrupt it for every other caller in the same process.
+    Returning a module-level constant dict here would alias its ``seen``/
+    ``resolved`` list objects across every caller; a future in-place
+    mutation on one caller's "empty" state would silently corrupt it for
+    every other caller in the same process. ``watermark_ts``/``first_seen_ts``
+    are None (not 0/epoch) so run_cycle knows to seed them from "now" on a
+    genuine first run rather than attempting to page Kalshi's entire
+    settlement history.
     """
-    return {"pending": [], "resolved": [], "last_verdict": "continue"}
+    return {"watermark_ts": None, "seen": [], "resolved": [], "last_verdict": "continue", "first_seen_ts": None}
 
 
 # --------------------------------------------------------------------------- #
-# JSON (de)serialization for the two earnings_mention dataclasses
+# JSON (de)serialization for the Resolved dataclass
 # --------------------------------------------------------------------------- #
-def _snapshot_to_dict(s: Snapshot) -> dict:
-    return {
-        "ticker": s.ticker,
-        "snapshot_ts": s.snapshot_ts,
-        "hours_to_close": s.hours_to_close,
-        "yes_price": s.yes_price,
-        "no_price": s.no_price,
-        "volume": s.volume,
-        "series": s.series,
-    }
-
-
-def _snapshot_from_dict(d: dict) -> Snapshot:
-    return Snapshot(
-        ticker=d["ticker"],
-        snapshot_ts=d["snapshot_ts"],
-        hours_to_close=d["hours_to_close"],
-        yes_price=d["yes_price"],
-        no_price=d["no_price"],
-        volume=d["volume"],
-        series=d["series"],
-    )
-
-
 def _resolved_to_dict(r: Resolved, resolved_ts: str) -> dict:
     return {
         "ticker": r.ticker,
@@ -111,11 +122,17 @@ def _resolved_from_dict(d: dict) -> Resolved:
     return Resolved(ticker=d["ticker"], yes_price=d["yes_price"], outcome=d["outcome"], series=d["series"])
 
 
+def _close_ts(market: dict) -> int | None:
+    """Unix-seconds close_time for watermark bookkeeping, or None."""
+    dt = _close_time(market)
+    return int(dt.timestamp()) if dt is not None else None
+
+
 # --------------------------------------------------------------------------- #
 # State (accumulate OOS resolutions across weekly runs)
 # --------------------------------------------------------------------------- #
 def load_state(path: Path | None) -> dict:
-    """Load {pending, resolved, last_verdict} from the JSON state file.
+    """Load {watermark_ts, seen, resolved, last_verdict, first_seen_ts}.
 
     A missing file or corrupt JSON degrades to an empty state rather than
     crashing the cron — the OOS sample just starts (or restarts) from zero.
@@ -130,14 +147,16 @@ def load_state(path: Path | None) -> dict:
     if not isinstance(data, dict):
         return _empty_state()
     return {
-        "pending": data.get("pending", []),
+        "watermark_ts": data.get("watermark_ts"),
+        "seen": data.get("seen", []),
         "resolved": data.get("resolved", []),
         "last_verdict": data.get("last_verdict", "continue"),
+        "first_seen_ts": data.get("first_seen_ts"),
     }
 
 
 def save_state(path: Path | None, state: dict) -> None:
-    """Persist {pending, resolved, last_verdict} to the JSON state file.
+    """Persist state to the JSON state file.
 
     Writes atomically (temp file + os.replace) so a crash or kill mid-write
     can never leave a truncated/corrupt file behind — unlike a dedup cache,
@@ -153,29 +172,28 @@ def save_state(path: Path | None, state: dict) -> None:
         logger.warning("OOS state write failed: %s", exc)
 
 
-def _drop_stale_pending(pending: list[Snapshot], now: datetime, max_age_days: float = STALE_PENDING_DAYS) -> list[Snapshot]:
-    """Drop pending snapshots that have sat unresolved past ``max_age_days``.
-
-    A market can close without ever reaching a settled yes/no result (e.g.
-    voided/cancelled) — without this guard such a ticker would stay in
-    ``pending`` and get re-queried by resolve_settlements on every run
-    indefinitely.
+def _check_state_anomaly(state: dict, now: datetime, min_age_days: float = ANOMALY_MIN_AGE_DAYS) -> str | None:
+    """Best-effort check: does the freshly-loaded state look like it silently
+    reset (e.g. an actions/cache eviction) rather than being a genuine first
+    run? Self-referential: if the ENTIRE cache is wiped, first_seen_ts is
+    wiped along with it, so this specific case can't be detected here — this
+    is a floor on visibility, not a guarantee. See the module docstring for
+    the reasoning on why a second, independently-durable store (e.g.
+    committing state to git) was not added on top of this.
     """
-    kept = []
-    for s in pending:
-        try:
-            age_days = (now - datetime.fromisoformat(s.snapshot_ts)).total_seconds() / 86400.0
-        except (ValueError, TypeError):
-            kept.append(s)  # can't parse -> don't guess, keep it
-            continue
-        if age_days > max_age_days:
-            logger.warning(
-                "Dropping stale pending snapshot %s (age %.1fd, never settled yes/no)",
-                s.ticker, age_days,
-            )
-            continue
-        kept.append(s)
-    return kept
+    first_seen = state.get("first_seen_ts")
+    if not first_seen:
+        return None  # genuinely the first run -- nothing to compare against
+    try:
+        age_days = (now - datetime.fromisoformat(first_seen)).total_seconds() / 86400.0
+    except (ValueError, TypeError):
+        return None
+    if age_days >= min_age_days and not state.get("resolved"):
+        return (
+            f"state has first_seen_ts={first_seen} ({age_days:.1f}d ago) but 0 "
+            "resolved records loaded -- possible actions/cache eviction or reset."
+        )
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -183,39 +201,88 @@ def _drop_stale_pending(pending: list[Snapshot], now: datetime, max_age_days: fl
 # client's own network calls. Fully testable with a fake client, no network.
 # --------------------------------------------------------------------------- #
 def run_cycle(client, now: datetime, state: dict) -> dict:
-    """Snapshot, resolve, accumulate, and compute the running OOS verdict.
+    """Find newly-settled mention/KPI markets, reconstruct each one's T-24h
+    price, and accumulate the running OOS verdict. No "pending" snapshot
+    state: a market is only ever looked at once, after it has already
+    settled.
 
-    Returns the updated persistable state ({pending, resolved, last_verdict})
-    plus three caller-facing extras the caller pops before saving:
-    ``_stats`` (OosStats), ``_prev_verdict`` (str), ``_new_resolved`` (int).
+    Fail-closed: a market whose candlestick fetch fails this cycle is
+    neither marked seen nor counted, and the watermark is rolled back to
+    guarantee it's re-included in the next fetch_settled_markets call — it
+    is retried, never silently dropped.
+
+    Returns the updated persistable state ({watermark_ts, seen, resolved,
+    last_verdict, first_seen_ts}) plus caller-facing extras the caller pops
+    before saving: ``_stats`` (OosStats), ``_prev_verdict`` (str),
+    ``_new_resolved`` (int), ``_failed_tickers`` (list[str]).
     """
-    pending = [_snapshot_from_dict(d) for d in state.get("pending", [])]
+    seen: set[str] = set(state.get("seen", []))
     resolved_dicts = list(state.get("resolved", []))
     resolved_objs = [_resolved_from_dict(d) for d in resolved_dicts]
 
-    already_seen = {s.ticker for s in pending} | {r.ticker for r in resolved_objs}
-    fresh = snapshot_open_markets(client, now)
-    pending = pending + [s for s in fresh if s.ticker not in already_seen]
-    pending = _drop_stale_pending(pending, now)
+    watermark = state.get("watermark_ts")
+    watermark = int(now.timestamp()) if watermark is None else int(watermark)
 
-    newly_resolved = resolve_settlements(client, pending)
-    resolved_tickers = {r.ticker for r in newly_resolved}
-    pending = [s for s in pending if s.ticker not in resolved_tickers]
+    raw_markets = client.fetch_settled_markets(watermark) or []
 
+    newly_resolved: list[Resolved] = []
+    newly_seen: set[str] = set()
+    failed_tickers: list[str] = []
+    max_close_ts = watermark
+    min_failed_close_ts: int | None = None
+
+    for market in raw_markets:
+        ticker = str(market.get("ticker", ""))
+        if not ticker or ticker in seen:
+            continue
+
+        close_ts = _close_ts(market)
+        if close_ts is not None:
+            max_close_ts = max(max_close_ts, close_ts + 1)
+
+        if not classify_market(market):
+            continue  # not mention/KPI -- watermark advancement above is enough
+
+        if not has_valid_result(market):
+            newly_seen.add(ticker)  # voided/undecided -- will never resolve differently
+            continue
+
+        price = price_at_t24h(client, market)
+        if price is None:
+            failed_tickers.append(ticker)
+            if close_ts is not None:
+                min_failed_close_ts = close_ts if min_failed_close_ts is None else min(min_failed_close_ts, close_ts)
+            continue
+
+        newly_resolved.append(build_resolved(market, price))
+        newly_seen.add(ticker)
+
+    seen |= newly_seen
     resolved_ts = now.isoformat()
     resolved_dicts = resolved_dicts + [_resolved_to_dict(r, resolved_ts) for r in newly_resolved]
-    resolved_objs = resolved_objs + list(newly_resolved)
+    resolved_objs = resolved_objs + newly_resolved
+
+    # A failure rolls the watermark back to just before the earliest failed
+    # ticker's close_time, so the NEXT fetch_settled_markets call is
+    # guaranteed to include it again regardless of inclusive/exclusive
+    # boundary semantics. Tickers that already succeeded in this same batch
+    # get re-fetched too on that retry, but `seen` skips them without a
+    # redundant candlestick call -- idempotent by construction.
+    new_watermark = (min_failed_close_ts - 1) if min_failed_close_ts is not None else max_close_ts
 
     stats = compute_oos_stats(resolved_objs)
     verdict_str = verdict(stats)
 
     return {
-        "pending": [_snapshot_to_dict(s) for s in pending],
+        "watermark_ts": new_watermark,
+        "seen": sorted(seen),
         "resolved": resolved_dicts,
         "last_verdict": verdict_str,
+        "first_seen_ts": state.get("first_seen_ts") or now.isoformat(),
         "_stats": stats,
         "_prev_verdict": state.get("last_verdict", "continue"),
         "_new_resolved": len(newly_resolved),
+        "_failed_tickers": failed_tickers,
     }
 
 
@@ -246,13 +313,25 @@ def format_message(stats: OosStats, verdict_str: str, new_resolved: int) -> str:
     return "\n".join(lines)
 
 
+def _format_failure_notice(failed_tickers: list[str]) -> str:
+    """Render the fail-closed failure-notice Telegram ticket text."""
+    shown = ", ".join(failed_tickers[:10])
+    more = f" (+{len(failed_tickers) - 10} more)" if len(failed_tickers) > 10 else ""
+    return (
+        "⚠️ Earnings-Mention OOS Logger — "
+        f"{len(failed_tickers)} market(s) could not be resolved this cycle "
+        f"(candlestick fetch failed): {shown}{more}. Will retry next run; "
+        "verdict not recomputed/alerted this cycle (fail-closed)."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 def main() -> None:
     parser = argparse.ArgumentParser(description="Earnings-mention NO-harvest OOS logger (weekly)")
     parser.add_argument("--state-file", type=Path, default=None,
-                        help="JSON file accumulating pending/resolved snapshots across runs")
+                        help="JSON file accumulating the watermark/seen/resolved state across runs")
     parser.add_argument("--always-alert", action="store_true",
                         help="Telegram-ticket the running verdict even with no new signal this run")
     args = parser.parse_args()
@@ -278,27 +357,45 @@ def main() -> None:
 
     now = datetime.now(timezone.utc)
     state = load_state(args.state_file)
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    anomaly = _check_state_anomaly(state, now)
+    if anomaly:
+        logger.error("OOS STATE ANOMALY: %s", anomaly)
+        if token and chat_id:
+            WebhookNotifier("telegram").notify_text(f"⚠️ Earnings-Mention OOS Logger anomaly: {anomaly}")
+
     result = run_cycle(client, now, state)
 
     stats: OosStats = result.pop("_stats")
     prev_verdict: str = result.pop("_prev_verdict")
     new_resolved: int = result.pop("_new_resolved")
+    failed_tickers: list[str] = result.pop("_failed_tickers")
     verdict_str: str = result["last_verdict"]
 
     logger.info(
-        "OOS cycle: pending=%d resolved_total=%d new_resolved=%d n=%d mean=%.2fpts z=%.2f verdict=%s",
-        len(result["pending"]), len(result["resolved"]), new_resolved,
-        stats.n, stats.mean_richness_pts, stats.z, verdict_str,
+        "OOS cycle: seen=%d resolved_total=%d new_resolved=%d failed=%d n=%d mean=%.2fpts z=%.2f verdict=%s watermark_ts=%d",
+        len(result["seen"]), len(result["resolved"]), new_resolved, len(failed_tickers),
+        stats.n, stats.mean_richness_pts, stats.z, verdict_str, result["watermark_ts"],
     )
     save_state(args.state_file, result)
+
+    if failed_tickers:
+        logger.warning(
+            "OOS cycle had %d fetch failure(s); skipping the verdict alert this cycle, will retry next run: %s",
+            len(failed_tickers), ", ".join(failed_tickers),
+        )
+        if token and chat_id:
+            WebhookNotifier("telegram").notify_text(_format_failure_notice(failed_tickers))
+        return  # fail-closed: never alert a verdict computed from a cycle with fetch failures
 
     if not _should_alert(new_resolved, prev_verdict, verdict_str, args.always_alert):
         logger.info("No new resolutions and verdict unchanged (%s) — skipping Telegram.", verdict_str)
         return
 
     message = format_message(stats, verdict_str, new_resolved)
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         logger.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — printing instead:\n%s", message)
         return

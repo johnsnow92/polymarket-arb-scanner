@@ -1,12 +1,21 @@
 name: Earnings-Mention OOS Logger
 
 # Weekly out-of-sample logger for the round-2 earnings-mention NO-harvest
-# pilot (docs/plans/08-earnings-mention-oos.md): snapshots newly in-window
-# Kalshi company-KPI/earnings-mention markets, resolves previously-pending
-# snapshots against their realized settlement, and accumulates the OOS
-# richness verdict toward the pre-registered 8/3 gate. Detection/logging
-# only — no order ever places here. Runs Sundays ~09:30 ET (13:30 UTC),
-# offset from the LIP scan (12:13 UTC) to avoid runner contention.
+# pilot (docs/plans/08-earnings-mention-oos.md): finds Kalshi company-KPI/
+# earnings-mention markets that have SETTLED since the last watermark,
+# reconstructs each one's T-24h YES price via candlesticks, and accumulates
+# the OOS richness verdict toward the pre-registered 8/3 gate.
+# Detection/logging only — no order ever places here. Runs Sundays ~09:30 ET
+# (13:30 UTC), offset from the LIP scan (12:13 UTC) to avoid runner
+# contention.
+#
+# State durability: the primary restore path is actions/cache (this repo's
+# only existing cross-run state convention — see edgar-scan.yml). The state
+# JSON is ALSO uploaded as a 90-day build artifact on every run as a
+# human-recoverable backup (not part of the automated restore path) in case
+# the cache is ever evicted/cleared before the 8/3 decision date — see
+# scripts/run_earnings_mention_oos.py's module docstring for the full
+# reasoning on why a git-committed durable store wasn't added instead.
 
 on:
   schedule:
@@ -67,3 +76,18 @@ jobs:
             FLAGS="$FLAGS --always-alert"
           fi
           python scripts/run_earnings_mention_oos.py $FLAGS
+
+      # Human-recoverable backup, independent of the cache's eviction policy:
+      # if the cache is ever wiped, an operator can pull the most recent
+      # artifact and manually reseed --state-file rather than silently
+      # restarting the OOS sample from zero. Not part of the automated
+      # restore path (kept simple on purpose) and skipped gracefully if the
+      # runner exited before writing the file (e.g. no Kalshi creds yet).
+      - name: Upload state backup artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: earnings-mention-oos-state
+          path: /tmp/earnings_mention_oos_state.json
+          retention-days: 90
+          if-no-files-found: ignore

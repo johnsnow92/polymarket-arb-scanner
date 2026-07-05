@@ -1,10 +1,11 @@
 """Tests for the earnings-mention OOS runner (scripts/run_earnings_mention_oos.py).
 
-The deterministic richness/verdict math lives in earnings_mention.py (tested
-separately); this pins the runner's own logic: JSON state roundtrip, stale
-pending pruning, and the snapshot -> resolve -> accumulate -> verdict wiring
-in run_cycle. All network is faked via a duck-typed client — no live Kalshi
-calls, matching earnings_mention.py's own FakeClient convention.
+The deterministic richness/verdict math and candlestick reconstruction live in
+earnings_mention.py (tested separately); this pins the runner's own logic:
+JSON state roundtrip, the state-anomaly guard, and the
+discover-settled -> reconstruct-T24h -> accumulate -> verdict wiring in
+run_cycle, including the fail-closed retry behavior on a partial-fetch
+failure. All network is faked via a duck-typed client — no live Kalshi calls.
 """
 from __future__ import annotations
 
@@ -12,11 +13,14 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from earnings_mention import OosStats, Snapshot
+from earnings_mention import OosStats
 from scripts.run_earnings_mention_oos import (
-    _drop_stale_pending,
+    _check_state_anomaly,
+    _format_failure_notice,
     _should_alert,
     format_message,
     load_state,
@@ -26,38 +30,47 @@ from scripts.run_earnings_mention_oos import (
 
 
 # --------------------------------------------------------------------------- #
-# Fake client (mirrors tests/test_earnings_mention.py's FakeClient)
+# Fake client — a settled-markets list + a per-ticker candlestick table.
 # --------------------------------------------------------------------------- #
 class FakeClient:
-    def __init__(self, events=None, settled=None):
-        self._events = events or []
-        self._settled = settled or {}
+    def __init__(self, settled=None, candles=None):
+        self._settled = settled if settled is not None else []
+        self._candles = candles or {}
+        self.candlestick_tickers: list[str] = []
 
-    def fetch_all_events(self, *a, **k):
-        return self._events
+    def fetch_settled_markets(self, min_close_ts, *a, **k):
+        return self._settled
 
-    def get_market_price(self, market):
-        return market.get("_yes"), market.get("_no")
-
-    def fetch_market(self, ticker):
-        return self._settled.get(ticker)
+    def fetch_candlesticks(self, series_ticker, ticker, start_ts, end_ts, period_interval=60):
+        self.candlestick_tickers.append(ticker)
+        return self._candles.get(ticker, [])
 
 
-def _market(ticker, title, close, yes=0.30, no=0.70, **extra):
-    m = {
-        "ticker": ticker,
-        "title": title,
-        "close_time": close,
-        "_yes": yes,
-        "_no": no,
-        "volume": extra.pop("volume", 1000),
-    }
+def _candle(close_dollars: str) -> dict:
+    return {"price": {"close_dollars": close_dollars}}
+
+
+def _market(ticker: str, close: str, result: str = "yes", title: str = "Will Foo mention Bar?",
+            series_ticker: str = "S", **extra) -> dict:
+    m = {"ticker": ticker, "title": title, "close_time": close, "result": result, "series_ticker": series_ticker}
     m.update(extra)
     return m
 
 
+def _fresh_state() -> dict:
+    return {"watermark_ts": None, "seen": [], "resolved": [], "last_verdict": "continue", "first_seen_ts": None}
+
+
+def _persistable(result: dict) -> dict:
+    """Strip the caller-facing underscore-prefixed extras run_cycle returns,
+    leaving exactly what a caller would pass into the NEXT run_cycle call."""
+    return {k: v for k, v in result.items() if not k.startswith("_")}
+
+
 NOW = datetime(2026, 7, 5, 12, 0, tzinfo=timezone.utc)
-CLOSE_12H = "2026-07-06T00:00:00Z"  # 12h after NOW -> inside [close-24h, close-6h]
+CLOSE_DT = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
+CLOSE_ISO = "2026-07-06T00:00:00Z"
+CLOSE_TS = int(CLOSE_DT.timestamp())
 
 
 # --------------------------------------------------------------------------- #
@@ -65,149 +78,174 @@ CLOSE_12H = "2026-07-06T00:00:00Z"  # 12h after NOW -> inside [close-24h, close-
 # --------------------------------------------------------------------------- #
 class TestState:
     def test_load_state_missing_file_returns_empty(self, tmp_path):
-        state = load_state(tmp_path / "does-not-exist.json")
-        assert state == {"pending": [], "resolved": [], "last_verdict": "continue"}
+        assert load_state(tmp_path / "does-not-exist.json") == _fresh_state()
 
     def test_load_state_none_path_returns_empty(self):
-        assert load_state(None) == {"pending": [], "resolved": [], "last_verdict": "continue"}
+        assert load_state(None) == _fresh_state()
 
     def test_load_state_corrupt_json_returns_empty(self, tmp_path):
         path = tmp_path / "state.json"
         path.write_text("{not valid json")
-        assert load_state(path) == {"pending": [], "resolved": [], "last_verdict": "continue"}
+        assert load_state(path) == _fresh_state()
 
     def test_load_state_non_dict_json_returns_empty(self, tmp_path):
         path = tmp_path / "state.json"
         path.write_text("[1, 2, 3]")
-        assert load_state(path) == {"pending": [], "resolved": [], "last_verdict": "continue"}
+        assert load_state(path) == _fresh_state()
 
     def test_save_and_load_roundtrip(self, tmp_path):
         path = tmp_path / "state.json"
         state = {
-            "pending": [{"ticker": "A", "snapshot_ts": NOW.isoformat(), "hours_to_close": 12.0,
-                         "yes_price": 0.3, "no_price": 0.7, "volume": 500, "series": "S"}],
-            "resolved": [{"ticker": "B", "yes_price": 0.4, "outcome": 1.0, "series": "S",
+            "watermark_ts": 1735000000,
+            "seen": ["M1", "M2"],
+            "resolved": [{"ticker": "M1", "yes_price": 0.3, "outcome": 1.0, "series": "S",
                           "resolved_ts": NOW.isoformat()}],
             "last_verdict": "continue",
+            "first_seen_ts": NOW.isoformat(),
         }
         save_state(path, state)
         assert load_state(path) == state
 
     def test_save_state_noop_when_path_none(self):
-        save_state(None, {"pending": []})  # must not raise
+        save_state(None, _fresh_state())  # must not raise
+
+    def test_save_state_atomic_write_leaves_no_tmp_file(self, tmp_path):
+        path = tmp_path / "state.json"
+        save_state(path, _fresh_state())
+        assert path.exists()
+        assert not (tmp_path / "state.json.tmp").exists()
 
 
 # --------------------------------------------------------------------------- #
-# _drop_stale_pending
+# _check_state_anomaly
 # --------------------------------------------------------------------------- #
-class TestDropStalePending:
-    def test_keeps_recent_pending(self):
-        snap = Snapshot("A", NOW.isoformat(), 12.0, 0.3, 0.7, 1000, "S")
-        assert _drop_stale_pending([snap], NOW) == [snap]
+class TestCheckStateAnomaly:
+    def test_no_anomaly_on_genuine_first_run(self):
+        assert _check_state_anomaly({"first_seen_ts": None, "resolved": []}, NOW) is None
 
-    def test_drops_pending_past_max_age(self):
-        old_ts = (NOW - timedelta(days=31)).isoformat()
-        snap = Snapshot("A", old_ts, 12.0, 0.3, 0.7, 1000, "S")
-        assert _drop_stale_pending([snap], NOW, max_age_days=30.0) == []
+    def test_no_anomaly_when_young(self):
+        state = {"first_seen_ts": NOW.isoformat(), "resolved": []}
+        assert _check_state_anomaly(state, NOW + timedelta(days=3)) is None
 
-    def test_keeps_pending_exactly_at_boundary(self):
-        boundary_ts = (NOW - timedelta(days=30)).isoformat()
-        snap = Snapshot("A", boundary_ts, 12.0, 0.3, 0.7, 1000, "S")
-        assert _drop_stale_pending([snap], NOW, max_age_days=30.0) == [snap]
+    def test_no_anomaly_when_resolved_present_even_if_old(self):
+        state = {"first_seen_ts": (NOW - timedelta(days=30)).isoformat(), "resolved": [{"ticker": "X"}]}
+        assert _check_state_anomaly(state, NOW) is None
 
-    def test_unparseable_timestamp_is_kept_not_guessed(self):
-        snap = Snapshot("A", "not-a-timestamp", 12.0, 0.3, 0.7, 1000, "S")
-        assert _drop_stale_pending([snap], NOW) == [snap]
+    def test_anomaly_when_old_and_empty(self):
+        state = {"first_seen_ts": (NOW - timedelta(days=30)).isoformat(), "resolved": []}
+        msg = _check_state_anomaly(state, NOW)
+        assert msg is not None
+        assert "eviction" in msg or "reset" in msg
+
+    def test_no_anomaly_with_unparseable_first_seen(self):
+        assert _check_state_anomaly({"first_seen_ts": "not-a-date", "resolved": []}, NOW) is None
 
 
 # --------------------------------------------------------------------------- #
-# run_cycle — the core wiring: snapshot -> resolve -> accumulate -> verdict
+# run_cycle — discover settled -> reconstruct T-24h -> accumulate -> verdict
 # --------------------------------------------------------------------------- #
 class TestRunCycle:
-    def test_fresh_market_is_added_to_pending_not_resolved(self):
-        events = [{"markets": [_market("M1", "Will Apple mention AI?", CLOSE_12H, yes=0.30)]}]
-        client = FakeClient(events=events)
-        result = run_cycle(client, NOW, {"pending": [], "resolved": [], "last_verdict": "continue"})
-        assert [p["ticker"] for p in result["pending"]] == ["M1"]
+    def test_first_run_seeds_watermark_from_now_when_nothing_settled(self):
+        result = run_cycle(FakeClient(settled=[]), NOW, _fresh_state())
+        assert result["watermark_ts"] == int(NOW.timestamp())
         assert result["resolved"] == []
-        assert result["_stats"].n == 0
-        assert result["last_verdict"] == "continue"
+        assert result["seen"] == []
+        assert result["first_seen_ts"] == NOW.isoformat()
         assert result["_new_resolved"] == 0
-        assert result["_prev_verdict"] == "continue"
+        assert result["_failed_tickers"] == []
 
-    def test_pending_from_prior_run_resolves_and_accumulates_stats(self):
-        prior_state = {
-            "pending": [{"ticker": "M1", "snapshot_ts": NOW.isoformat(), "hours_to_close": 12.0,
-                         "yes_price": 0.30, "no_price": 0.70, "volume": 1000, "series": "S"}],
-            "resolved": [],
-            "last_verdict": "continue",
-        }
-        client = FakeClient(events=[], settled={"M1": {"status": "settled", "result": "no"}})
-        later = NOW + timedelta(days=7)
-        result = run_cycle(client, later, prior_state)
-        assert result["pending"] == []
-        assert len(result["resolved"]) == 1
-        assert result["resolved"][0]["ticker"] == "M1"
-        assert result["resolved"][0]["outcome"] == 0.0
+    def test_settled_market_with_valid_candle_is_resolved(self):
+        market = _market("M1", CLOSE_ISO, result="yes")
+        client = FakeClient(settled=[market], candles={"M1": [_candle("0.30")]})
+        state = {**_fresh_state(), "watermark_ts": 0}
+        result = run_cycle(client, NOW, state)
+        assert [r["ticker"] for r in result["resolved"]] == ["M1"]
+        assert result["resolved"][0]["outcome"] == 1.0
+        assert result["resolved"][0]["yes_price"] == pytest.approx(0.30)
+        assert result["seen"] == ["M1"]
         assert result["_new_resolved"] == 1
-        # yes_price 0.30, settled NO -> richness = 0.30 - 0.0 = +30pts, n=1 (band 11-50c)
-        assert result["_stats"].n == 1
-        assert result["_stats"].mean_richness_pts == 30.0
+        assert result["watermark_ts"] == CLOSE_TS + 1
 
-    def test_resolved_history_persists_across_two_cycles(self):
-        """Simulates two weekly runs: cycle 1 snapshots, cycle 2 (a week later)
-        resolves it and the accumulated resolved log now has that entry."""
-        events = [{"markets": [_market("M1", "Will Apple mention AI?", CLOSE_12H, yes=0.30)]}]
-        client = FakeClient(events=events)
-        state0 = {"pending": [], "resolved": [], "last_verdict": "continue"}
-        state1 = run_cycle(client, NOW, state0)
-        for k in ("_stats", "_prev_verdict", "_new_resolved"):
-            state1.pop(k)
-        assert [p["ticker"] for p in state1["pending"]] == ["M1"]
+    def test_non_mention_market_advances_watermark_but_is_not_tracked_seen(self):
+        market = _market("BTC1", CLOSE_ISO, result="yes", title="Will BTC hit 100k?")
+        client = FakeClient(settled=[market])
+        state = {**_fresh_state(), "watermark_ts": 0}
+        result = run_cycle(client, NOW, state)
+        assert result["resolved"] == []
+        assert result["seen"] == []  # never tracked -- watermark advancement is enough
+        assert result["watermark_ts"] == CLOSE_TS + 1
+        assert client.candlestick_tickers == []  # never even attempted a candle fetch
 
-        week_later = NOW + timedelta(days=7)
-        client2 = FakeClient(events=[], settled={"M1": {"status": "finalized", "result": "yes"}})
-        result2 = run_cycle(client2, week_later, state1)
-        assert result2["pending"] == []
+    def test_voided_market_marked_seen_but_not_resolved(self):
+        market = _market("M1", CLOSE_ISO, result="")  # settled but voided / no result
+        client = FakeClient(settled=[market])
+        state = {**_fresh_state(), "watermark_ts": 0}
+        result = run_cycle(client, NOW, state)
+        assert result["resolved"] == []
+        assert result["seen"] == ["M1"]  # tracked -- it will never resolve differently
+        assert result["watermark_ts"] == CLOSE_TS + 1
+
+    def test_already_seen_ticker_is_skipped_entirely(self):
+        market = _market("M1", CLOSE_ISO, result="yes")
+        client = FakeClient(settled=[market], candles={"M1": [_candle("0.30")]})
+        state = {**_fresh_state(), "watermark_ts": 0, "seen": ["M1"]}
+        result = run_cycle(client, NOW, state)
+        assert result["resolved"] == []
+        assert client.candlestick_tickers == []  # never even attempted
+        assert result["watermark_ts"] == 0  # unchanged -- the only candidate was already seen
+
+    def test_candlestick_failure_is_not_marked_seen_and_rolls_back_watermark(self):
+        market = _market("M1", CLOSE_ISO, result="yes")
+        client = FakeClient(settled=[market], candles={})  # no candles -> price_at_t24h -> None
+        state = {**_fresh_state(), "watermark_ts": 0}
+        result = run_cycle(client, NOW, state)
+        assert result["resolved"] == []
+        assert result["seen"] == []
+        assert result["_failed_tickers"] == ["M1"]
+        assert result["watermark_ts"] == CLOSE_TS - 1  # rolled back so it's retried next cycle
+
+    def test_failed_ticker_is_retried_and_succeeds_next_cycle(self):
+        market = _market("M1", CLOSE_ISO, result="yes")
+        client1 = FakeClient(settled=[market], candles={})  # fails this cycle
+        result1 = run_cycle(client1, NOW, {**_fresh_state(), "watermark_ts": 0})
+        assert result1["_failed_tickers"] == ["M1"]
+        state1 = _persistable(result1)
+
+        later = NOW + timedelta(days=7)
+        client2 = FakeClient(settled=[market], candles={"M1": [_candle("0.30")]})  # succeeds now
+        result2 = run_cycle(client2, later, state1)
         assert [r["ticker"] for r in result2["resolved"]] == ["M1"]
         assert result2["_new_resolved"] == 1
+        assert result2["_failed_tickers"] == []
 
-    def test_does_not_resnapshot_a_ticker_already_resolved(self):
-        """A ticker already in the resolved log must not be re-added to pending
-        even if it still (implausibly) shows up in a fresh events fetch."""
-        events = [{"markets": [_market("M1", "Will Apple mention AI?", CLOSE_12H, yes=0.30)]}]
-        client = FakeClient(events=events)
-        state = {
-            "pending": [],
-            "resolved": [{"ticker": "M1", "yes_price": 0.30, "outcome": 1.0, "series": "S",
-                          "resolved_ts": NOW.isoformat()}],
-            "last_verdict": "continue",
-        }
-        result = run_cycle(client, NOW, state)
-        assert result["pending"] == []
-        assert len(result["resolved"]) == 1
+    def test_resolved_history_accumulates_across_cycles(self):
+        market1 = _market("M1", CLOSE_ISO, result="yes")
+        client1 = FakeClient(settled=[market1], candles={"M1": [_candle("0.30")]})
+        result1 = run_cycle(client1, NOW, {**_fresh_state(), "watermark_ts": 0})
+        state1 = _persistable(result1)
 
-    def test_drops_stale_pending_that_never_settles(self):
-        old_ts = (NOW - timedelta(days=45)).isoformat()
-        state = {
-            "pending": [{"ticker": "VOID1", "snapshot_ts": old_ts, "hours_to_close": 12.0,
-                         "yes_price": 0.30, "no_price": 0.70, "volume": 1000, "series": "S"}],
-            "resolved": [],
-            "last_verdict": "continue",
-        }
-        client = FakeClient(events=[], settled={})  # VOID1 never resolves
-        result = run_cycle(client, NOW, state)
-        assert result["pending"] == []
-        assert result["resolved"] == []
+        close2_iso = "2026-07-13T00:00:00Z"
+        market2 = _market("M2", close2_iso, result="no")
+        client2 = FakeClient(settled=[market2], candles={"M2": [_candle("0.20")]})
+        later = NOW + timedelta(days=7)
+        result2 = run_cycle(client2, later, state1)
+        assert sorted(r["ticker"] for r in result2["resolved"]) == ["M1", "M2"]
+        assert result2["_stats"].n == 2
 
     def test_verdict_flip_is_visible_via_prev_verdict(self):
-        """_prev_verdict carries the state's last_verdict through untouched so
-        callers can detect continue -> pursue/kill transitions."""
-        state = {"pending": [], "resolved": [], "last_verdict": "pursue"}
-        client = FakeClient(events=[])
-        result = run_cycle(client, NOW, state)
+        state = {**_fresh_state(), "watermark_ts": 0, "last_verdict": "pursue"}
+        result = run_cycle(FakeClient(settled=[]), NOW, state)
         assert result["_prev_verdict"] == "pursue"
         assert result["last_verdict"] == "continue"  # n=0 -> always continue
+
+    def test_first_seen_ts_set_once_and_preserved(self):
+        result1 = run_cycle(FakeClient(settled=[]), NOW, _fresh_state())
+        assert result1["first_seen_ts"] == NOW.isoformat()
+        state1 = _persistable(result1)
+
+        later = NOW + timedelta(days=7)
+        result2 = run_cycle(FakeClient(settled=[]), later, state1)
+        assert result2["first_seen_ts"] == NOW.isoformat()  # unchanged, not overwritten
 
 
 # --------------------------------------------------------------------------- #
@@ -228,7 +266,7 @@ class TestShouldAlert:
 
 
 # --------------------------------------------------------------------------- #
-# format_message
+# format_message / _format_failure_notice
 # --------------------------------------------------------------------------- #
 class TestFormatMessage:
     def test_includes_core_fields(self):
@@ -244,3 +282,16 @@ class TestFormatMessage:
         msg = format_message(stats, "continue", new_resolved=0)
         assert "CONTINUE" in msg
         assert "n=0" in msg
+
+
+class TestFormatFailureNotice:
+    def test_includes_count_and_tickers(self):
+        msg = _format_failure_notice(["M1", "M2"])
+        assert "2 market(s)" in msg
+        assert "M1" in msg and "M2" in msg
+        assert "retry" in msg.lower()
+
+    def test_truncates_long_list(self):
+        tickers = [f"M{i}" for i in range(15)]
+        msg = _format_failure_notice(tickers)
+        assert "+5 more" in msg
