@@ -1030,7 +1030,13 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         _mm_pilot.dry_run)
         except Exception as exc:
             logger.exception("MM pilot failed to start: %s", exc)
+            # If the failure landed after the thread started, signal it now
+            # so it cancels any resting orders and exits (fail closed).
+            _mm_pilot_stop.set()
+            if _mm_pilot_thread is not None:
+                _mm_pilot_thread.join(timeout=15)
             _mm_pilot = None
+            _mm_pilot_thread = None
 
     # Initialize reward trackers for liquidity rewards (Layer 3)
     _reward_tracker = None
@@ -2470,13 +2476,15 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         # Cleanup
         # Plan 10: stop the MM pilot first — run_loop's exit path cancels
         # every resting pilot order before the process dies (SIGTERM rule,
-        # spec section 7).
-        if _mm_pilot:
+        # spec section 7). Gate on the THREAD, not just _mm_pilot, so a
+        # late startup failure that reset _mm_pilot still signals the
+        # thread it left running.
+        if _mm_pilot or _mm_pilot_thread is not None:
             logger.info("Stopping Kalshi MM pilot...")
             _mm_pilot_stop.set()
             if _mm_pilot_thread is not None:
                 _mm_pilot_thread.join(timeout=15)
-                if _mm_pilot_thread.is_alive():
+                if _mm_pilot_thread.is_alive() and _mm_pilot:
                     logger.warning("MM pilot thread did not stop in 15s; "
                                    "forcing order cancel directly.")
                     _mm_pilot.stop()

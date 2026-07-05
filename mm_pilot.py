@@ -419,8 +419,9 @@ class KalshiMMPilot:
         if mid is not None:
             try:
                 self._vol.record_price(ticker, mid)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("MM pilot vol record failed (book) for %s "
+                             "mid=%.4f: %s", ticker, mid, exc)
 
     def on_ws_price(self, ticker: str, yes_price: float) -> None:
         """Mid update from the orderbook_delta WS channel (freshness only)."""
@@ -431,8 +432,9 @@ class KalshiMMPilot:
                 book["updated_at"] = self._time_fn()
         try:
             self._vol.record_price(ticker, float(yes_price))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("MM pilot vol record failed (WS) for %s price=%s: %s",
+                         ticker, yes_price, exc)
 
     def get_raw_book(self, ticker: str) -> dict | None:
         with self._lock:
@@ -1133,7 +1135,9 @@ class KalshiMMPilot:
             try:
                 if self._toxic.get_toxicity(ticker) >= config.MM_TOXIC_FLOW_THRESHOLD:
                     toxic += 1
-            except Exception:
+            except Exception as exc:
+                logger.debug("MM pilot toxicity check failed for %s: %s",
+                             ticker, exc)
                 continue
         return toxic >= 2
 
