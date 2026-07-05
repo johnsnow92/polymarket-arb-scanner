@@ -82,6 +82,20 @@ class _RateLimitError(Exception):
     pass
 
 
+class PaginationIncompleteError(Exception):
+    """Raised when a paginated fetch could not retrieve the complete result
+    set — either a page request failed partway through pagination, or the
+    max_pages budget was exhausted while the cursor was still live.
+
+    Callers must treat this as a total failure for the call, never as
+    "here's what we got so far": cursor order is not guaranteed to be
+    sorted by any caller-meaningful field (e.g. close_time), so a silently
+    partial result could be missing entries earlier than ones already
+    fetched. A caller that advances a time-based watermark off a partial
+    result could permanently skip the missed entries.
+    """
+
+
 class KalshiClient:
     """Kalshi API client with RSA-PSS API key authentication."""
 
@@ -255,8 +269,13 @@ class KalshiClient:
         page through the platform's entire settlement history every call.
 
         Returns:
-            A list of settled market dicts (each carries 'result', 'ticker',
-            'event_ticker', 'close_time', etc.). Empty list on failure.
+            The complete list of settled market dicts (each carries
+            'result', 'ticker', 'event_ticker', 'close_time', etc.).
+
+        Raises:
+            PaginationIncompleteError: if any page request fails, or if
+                max_pages is exhausted while the cursor is still live —
+                never returns a silently-partial list.
         """
         out: list[dict] = []
         cursor = None
@@ -266,19 +285,25 @@ class KalshiClient:
                 params["cursor"] = cursor
             resp = self._request("GET", "/markets", params=params)
             if not resp or resp.status_code != 200:
-                logger.warning("Kalshi settled-markets request failed: %s",
-                               resp.status_code if resp else 'no response')
-                break
+                raise PaginationIncompleteError(
+                    f"Kalshi settled-markets request failed mid-pagination: "
+                    f"{resp.status_code if resp else 'no response'} ({len(out)} markets fetched so far)"
+                )
             data = resp.json()
             markets = data.get("markets", [])
             out.extend(markets)
             cursor = data.get("cursor")
             if not cursor or not markets:
                 break
+        else:
+            raise PaginationIncompleteError(
+                f"Kalshi settled-markets pagination did not finish within max_pages={max_pages} "
+                f"({len(out)} markets fetched, cursor still live) — raise max_pages or narrow min_close_ts"
+            )
         return out
 
     def fetch_candlesticks(self, series_ticker: str, ticker: str, start_ts: int, end_ts: int,
-                           period_interval: int = 60) -> list[dict]:
+                           period_interval: int = 60) -> list[dict] | None:
         """Fetch candlesticks via GET /series/{series_ticker}/markets/{ticker}/candlesticks.
 
         Reconstructs a settled market's YES price at a specific historical
@@ -299,16 +324,32 @@ class KalshiClient:
             period_interval: Candle width in minutes (default 60 = hourly).
 
         Returns:
-            The raw 'candlesticks' list (possibly empty) or [] on failure.
+            The raw 'candlesticks' list — [] if the request succeeded but
+            found no candles in the window (e.g. the market didn't exist
+            yet), or None if the request itself failed: a non-200 response,
+            or a network/timeout/rate-limit exception that _request's
+            internal retry (see the @retry decorator above) re-raises once
+            exhausted (reraise=True). Callers MUST distinguish [] from None
+            — they mean opposite things (permanent no-data vs. transient
+            failure) and are not interchangeable.
         """
-        resp = self._request(
-            "GET",
-            f"/series/{series_ticker}/markets/{ticker}/candlesticks",
-            params={"start_ts": start_ts, "end_ts": end_ts, "period_interval": period_interval},
-        )
+        try:
+            resp = self._request(
+                "GET",
+                f"/series/{series_ticker}/markets/{ticker}/candlesticks",
+                params={"start_ts": start_ts, "end_ts": end_ts, "period_interval": period_interval},
+            )
+        except (requests.RequestException, _RateLimitError) as exc:
+            # _request already retried transient errors internally; this is
+            # only reached once those retries are exhausted, so it's a real,
+            # currently-unrecoverable failure. Convert to this method's own
+            # None sentinel instead of propagating tenacity's implementation
+            # detail up through price_at_t24h and crashing the OOS cycle.
+            logger.warning("Kalshi candlesticks request failed for %s/%s: %s", series_ticker, ticker, exc)
+            return None
         if resp is not None and resp.status_code == 200:
             return resp.json().get("candlesticks", [])
-        return []
+        return None
 
     def fetch_order_book(self, ticker: str) -> dict | None:
         """Fetch order book for a given market ticker."""

@@ -455,10 +455,35 @@ class TestKalshiFetchData:
         assert client.session.request.call_count == 2
 
     @patch("kalshi_api._rate_limit")
-    def test_fetch_settled_markets_stops_on_error(self, mock_rl, client):
-        """Non-200 response returns whatever was collected so far ([] on first page)."""
+    def test_fetch_settled_markets_raises_on_request_failure(self, mock_rl, client):
+        """A failed request (even the very first page) raises rather than
+        silently returning a partial (here: empty) list as if it were
+        complete -- a caller advancing a time watermark off a silently
+        partial list could skip markets forever."""
         client.session.request.return_value = _mock_response(500)
-        assert client.fetch_settled_markets(min_close_ts=1000) == []
+        with pytest.raises(kalshi_api.PaginationIncompleteError):
+            client.fetch_settled_markets(min_close_ts=1000)
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_settled_markets_raises_on_mid_pagination_failure(self, mock_rl, client):
+        """Page 1 succeeds (more data signaled via a live cursor); page 2
+        fails -- must raise, not return page 1's markets as if complete."""
+        page1 = _mock_response(200, {"markets": [{"ticker": "M1"}], "cursor": "abc"})
+        page2 = _mock_response(500)
+        client.session.request.side_effect = [page1, page2]
+        with pytest.raises(kalshi_api.PaginationIncompleteError):
+            client.fetch_settled_markets(min_close_ts=1000)
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_settled_markets_raises_when_page_budget_exhausted(self, mock_rl, client):
+        """Every page returns a live cursor -- pagination never naturally
+        terminates within max_pages, so this must raise rather than return
+        a silently-truncated list."""
+        page = _mock_response(200, {"markets": [{"ticker": "M1"}], "cursor": "still-more"})
+        client.session.request.return_value = page
+        with pytest.raises(kalshi_api.PaginationIncompleteError):
+            client.fetch_settled_markets(min_close_ts=1000, max_pages=3)
+        assert client.session.request.call_count == 3
 
     @patch("kalshi_api._rate_limit")
     def test_fetch_settled_markets_sends_status_and_min_close_ts(self, mock_rl, client):
@@ -492,10 +517,39 @@ class TestKalshiFetchData:
         assert sent_params == {"start_ts": 100, "end_ts": 200, "period_interval": 60}
 
     @patch("kalshi_api._rate_limit")
-    def test_fetch_candlesticks_returns_empty_on_error(self, mock_rl, client):
-        """Returns [] on non-200 (e.g. wrong series ticker -> 404)."""
+    def test_fetch_candlesticks_returns_none_on_error(self, mock_rl, client):
+        """Returns None (the failure sentinel) on non-200 (e.g. wrong series
+        ticker -> 404) -- NOT [], which must mean "succeeded, no data"."""
         client.session.request.return_value = _mock_response(404)
-        assert client.fetch_candlesticks("BADSERIES", "TICK", 100, 200) == []
+        assert client.fetch_candlesticks("BADSERIES", "TICK", 100, 200) is None
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_candlesticks_returns_empty_list_on_success_with_no_data(self, mock_rl, client):
+        """A 200 OK with zero candles (e.g. the market didn't exist yet in
+        this window) is a genuinely empty list, distinct from None -- a
+        successful request that found nothing, not a failed request."""
+        client.session.request.return_value = _mock_response(200, {"candlesticks": []})
+        result = client.fetch_candlesticks("KXEARNINGSMENTIONBA", "TICK", 100, 200)
+        assert result == []
+        assert result is not None
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_candlesticks_returns_none_on_connection_error_after_retries(self, mock_rl, client):
+        """_request retries ConnectionError internally (tenacity) and
+        re-raises once exhausted (reraise=True) -- fetch_candlesticks must
+        catch that and convert it to the same None failure sentinel, not
+        let it propagate uncaught and crash the whole OOS cycle."""
+        import requests as _req
+        client.session.request.side_effect = _req.ConnectionError("down")
+        assert client.fetch_candlesticks("S", "TICK", 100, 200) is None
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_candlesticks_returns_none_on_rate_limit_exhausted(self, mock_rl, client):
+        """Repeated 429s exhaust tenacity's retries and re-raise
+        _RateLimitError (reraise=True) -- also must convert to None, not
+        propagate."""
+        client.session.request.return_value = _mock_response(429)
+        assert client.fetch_candlesticks("S", "TICK", 100, 200) is None
 
     @patch("kalshi_api._rate_limit")
     def test_fetch_order_book_success(self, mock_rl, client):
