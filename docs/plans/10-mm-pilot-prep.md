@@ -234,8 +234,8 @@ Live trading begins in canary mode, always:
 | `hedger.py` | `_hedge_kalshi` gains buy-to-reduce direction (currently sell-only) |
 | `config.py` | `MM_KALSHI_PILOT_ENABLED` + the `MM_*` keys tabled in §4-§8; `validate_config()` pilot invariants (§5); forced-precondition checks (§4, §6) |
 | `continuous.py` | Instantiate + drive `KalshiMMPilot` when flag on; subscribe pilot tickers to Kalshi WS; feed `VolatilityTracker.record_price`; wire `scan_toxic_flow_pause(pilot_tickers)` observability |
-| `supabase/migrations/0003_mm_pilot_controls.sql` (new) | Seed `mm_pilot_enabled=false` in `bot_controls` |
-| `db.py` | `strategy="KalshiMMPilot"` fill/hedge log rows if schema needs a column (likely reuses existing trade tables) |
+| `supabase/migrations/0004_mm_pilot_controls.sql` (new) | Seed `mm_pilot_enabled=false` in `bot_controls` (0003 was already taken by the pnl schema — deviation #1) |
+| `db.py` | UNCHANGED — the existing `opportunities` (`type="KalshiMMPilot"`) + `trades` tables cover fill/hedge rows; no new column was needed (deviation #8) |
 | `tests/test_mm_pilot.py`, `tests/test_mm_pilot_gates.py` (new); `tests/test_hedger.py` (extend) | §10 |
 | `docs/plans/10-mm-pilot-prep.md` | This spec, finalized, once approved |
 | `CLAUDE.md` / `docs/strategy-framework-v2.md` | Register flag + mode |

@@ -8,12 +8,23 @@ new); every test here fails on master by construction.
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import importlib
+
 import pytest
 
-import config
-import market_maker
 from market_maker import ToxicFlowDetector, VolatilityTracker
 from mm_pilot import ControlsPoller, FillEvent, KalshiMMPilot
+
+
+def live_config():
+    """Resolve the LIVE config module.
+
+    Other test files in this suite pop/replace sys.modules["config"], so a
+    module-level `import config` binding can go stale — mm_pilot reads config
+    off sys.modules at call time and would see a different object (same
+    pattern as tests/test_negrisk_no_side.py).
+    """
+    return importlib.import_module("config")
 
 
 TICKER = "KXTEST-26DEC31"
@@ -97,12 +108,17 @@ def clock():
 
 @pytest.fixture
 def pilot_env(monkeypatch):
-    """Force the pilot's flag preconditions on for the duration of a test."""
-    monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", True)
-    monkeypatch.setattr(config, "MM_TOXIC_FLOW_ENABLED", True)
-    monkeypatch.setattr(config, "MM_VOLATILITY_ADJUSTED_ENABLED", True)
-    monkeypatch.setattr(config, "MM_AUTO_HEDGE_ENABLED", True)
-    yield
+    """Force the pilot's flag preconditions on (against the LIVE config).
+
+    Yields the live config module so tests can monkeypatch further keys on
+    the object mm_pilot actually reads.
+    """
+    cfg = live_config()
+    monkeypatch.setattr(cfg, "MM_KALSHI_PILOT_ENABLED", True)
+    monkeypatch.setattr(cfg, "MM_TOXIC_FLOW_ENABLED", True)
+    monkeypatch.setattr(cfg, "MM_VOLATILITY_ADJUSTED_ENABLED", True)
+    monkeypatch.setattr(cfg, "MM_AUTO_HEDGE_ENABLED", True)
+    yield cfg
 
 
 def build_pilot(clock, client=None, dry_run=False, hedger=None,
@@ -270,7 +286,7 @@ class TestHedgeFailClosed:
 
     def test_hedge_failure_during_canary_halts_whole_pilot(self, pilot_env,
                                                            clock, monkeypatch):
-        monkeypatch.setattr(config, "MM_CANARY_QUOTE_SIZE_USD", 100.0)
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 100.0)
         client = FakeKalshiClient()
         hedger = RecordingHedger(result=False)
         pilot = build_pilot(clock, client=client, hedger=hedger)
@@ -300,7 +316,7 @@ class TestHedgeFailClosed:
 class TestHedgeLatency:
     def test_latency_over_ceiling_takes_halt_path(self, pilot_env, clock,
                                                   monkeypatch):
-        monkeypatch.setattr(config, "MM_CANARY_QUOTE_SIZE_USD", 100.0)
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 100.0)
         client = FakeKalshiClient()
         hedger = RecordingHedger(result=True)  # hedge eventually lands...
         pilot = build_pilot(clock, client=client, hedger=hedger)
@@ -354,7 +370,7 @@ class TestKillSwitch:
         assert pilot.resting_orders() == []
 
     def test_env_flag_off_rejects_orders(self, clock, monkeypatch):
-        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", False)
+        monkeypatch.setattr(live_config(), "MM_KALSHI_PILOT_ENABLED", False)
         client = FakeKalshiClient()
         pilot = build_pilot(clock, client=client)
         result = pilot.authorize_order(TICKER, "yes", "buy", 4, 0.49)
@@ -394,7 +410,7 @@ class TestCanary:
                    for d in pilot._decisions)
 
     def test_canary_loss_over_ceiling_halts(self, pilot_env, clock, monkeypatch):
-        monkeypatch.setattr(config, "MM_CANARY_QUOTE_SIZE_USD", 100.0)
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 100.0)
         client = FakeKalshiClient()
         pilot = build_pilot(clock, client=client, hedger=RecordingHedger())
         # Buy 20 @ 0.60, hedge-exit 20 @ 0.05 -> realized -$11.00 < -$10

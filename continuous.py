@@ -983,7 +983,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             from mm_pilot import ControlsPoller, KalshiMMPilot
             try:
                 from alerting import alert_manager as _pilot_alerts
-            except Exception:
+            except ImportError as exc:
+                logger.debug("MM pilot: alerting unavailable (%s) — "
+                             "halts will log but not page.", exc)
                 _pilot_alerts = None
             _controls_client = None
             try:

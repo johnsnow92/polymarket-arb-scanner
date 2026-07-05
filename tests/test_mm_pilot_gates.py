@@ -11,6 +11,8 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
+import importlib
+
 import pytest
 
 import config
@@ -19,7 +21,13 @@ from market_maker import ToxicFlowDetector, VolatilityTracker
 from mm_pilot import KalshiMMPilot
 
 from test_mm_pilot import (TICKER, FakeKalshiClient, RecordingHedger,
-                           build_pilot, make_book, pilot_env, clock)
+                           build_pilot, live_config, make_book, pilot_env,
+                           clock)
+
+
+def live_market_maker():
+    """Resolve the LIVE market_maker module (see live_config)."""
+    return importlib.import_module("market_maker")
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +211,7 @@ class TestToxicityGate:
     def test_pilot_fills_feed_the_detector_and_arm_the_pause(self, pilot_env,
                                                              clock,
                                                              monkeypatch):
-        monkeypatch.setattr(config, "MM_CANARY_QUOTE_SIZE_USD", 100.0)
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 100.0)
         detector = ToxicFlowDetector()
         client = FakeKalshiClient()
         pilot = build_pilot(clock, client=client, detector=detector)
@@ -238,14 +246,14 @@ class TestVolatilityGate:
     def _pilot_with_multiplier(self, clock, multiplier):
         fake = FakeVolTracker(multiplier)
         # QuoteEngine reads the module singleton for widening; G8 reads the
-        # injected tracker. Point both at the fake.
-        market_maker._volatility_tracker = fake
+        # injected tracker. Point both at the fake (on the LIVE module).
+        live_market_maker()._volatility_tracker = fake
         client = FakeKalshiClient()
         pilot = build_pilot(clock, client=client, vol=fake)
         return pilot, client
 
     def teardown_method(self, method):
-        market_maker._volatility_tracker = None
+        live_market_maker()._volatility_tracker = None
 
     def test_multiplier_two_widens_spread(self, pilot_env, clock):
         pilot, _client = self._pilot_with_multiplier(clock, 2.0)
@@ -278,47 +286,52 @@ class TestConfigInvariants:
     ])
     def test_live_pilot_without_precondition_raises(self, monkeypatch,
                                                     missing_flag):
-        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", True)
-        monkeypatch.setattr(config, "DRY_RUN", False)
+        cfg = live_config()
+        monkeypatch.setattr(cfg, "MM_KALSHI_PILOT_ENABLED", True)
+        monkeypatch.setattr(cfg, "DRY_RUN", False)
         for flag in ("MM_AUTO_HEDGE_ENABLED", "MM_TOXIC_FLOW_ENABLED",
                      "MM_VOLATILITY_ADJUSTED_ENABLED"):
-            monkeypatch.setattr(config, flag, flag != missing_flag)
-        with pytest.raises(config.ConfigError, match=missing_flag):
-            config.validate_config()
+            monkeypatch.setattr(cfg, flag, flag != missing_flag)
+        with pytest.raises(cfg.ConfigError, match=missing_flag):
+            cfg.validate_config()
 
     def test_live_pilot_with_all_preconditions_validates(self, monkeypatch):
-        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", True)
-        monkeypatch.setattr(config, "DRY_RUN", False)
+        cfg = live_config()
+        monkeypatch.setattr(cfg, "MM_KALSHI_PILOT_ENABLED", True)
+        monkeypatch.setattr(cfg, "DRY_RUN", False)
         for flag in ("MM_AUTO_HEDGE_ENABLED", "MM_TOXIC_FLOW_ENABLED",
                      "MM_VOLATILITY_ADJUSTED_ENABLED"):
-            monkeypatch.setattr(config, flag, True)
-        config.validate_config()  # must not raise
+            monkeypatch.setattr(cfg, flag, True)
+        cfg.validate_config()  # must not raise
 
     def test_dry_run_pilot_does_not_require_preconditions(self, monkeypatch):
-        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", True)
-        monkeypatch.setattr(config, "DRY_RUN", True)
-        monkeypatch.setattr(config, "MM_AUTO_HEDGE_ENABLED", False)
-        config.validate_config()  # D0 dry-run may start without them
+        cfg = live_config()
+        monkeypatch.setattr(cfg, "MM_KALSHI_PILOT_ENABLED", True)
+        monkeypatch.setattr(cfg, "DRY_RUN", True)
+        monkeypatch.setattr(cfg, "MM_AUTO_HEDGE_ENABLED", False)
+        cfg.validate_config()  # D0 dry-run may start without them
 
     def test_pilot_without_kalshi_in_allowlist_raises(self, monkeypatch):
-        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", True)
-        monkeypatch.setattr(config, "ENABLED_EXECUTION_PLATFORMS",
+        cfg = live_config()
+        monkeypatch.setattr(cfg, "MM_KALSHI_PILOT_ENABLED", True)
+        monkeypatch.setattr(cfg, "ENABLED_EXECUTION_PLATFORMS",
                             frozenset({"polymarket"}))
-        with pytest.raises(config.ConfigError, match="Kalshi-only"):
-            config.validate_config()
+        with pytest.raises(cfg.ConfigError, match="Kalshi-only"):
+            cfg.validate_config()
 
     def test_cap_sanity_warnings(self, monkeypatch):
-        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", True)
-        monkeypatch.setattr(config, "MM_MAX_GROSS_PER_MARKET_USD", 500.0)
-        monkeypatch.setattr(config, "MM_MAX_TOTAL_INVENTORY_USD", 400.0)
-        warnings = config.validate_config()
+        cfg = live_config()
+        monkeypatch.setattr(cfg, "MM_KALSHI_PILOT_ENABLED", True)
+        monkeypatch.setattr(cfg, "MM_MAX_GROSS_PER_MARKET_USD", 500.0)
+        monkeypatch.setattr(cfg, "MM_MAX_TOTAL_INVENTORY_USD", 400.0)
+        warnings = cfg.validate_config()
         assert any("MM pilot cap sanity" in w for w in warnings)
 
     def test_pilot_flag_default_is_false(self):
         # Default must stay false — activation is operator-gated (D1/D2).
-        import os
+        cfg = live_config()
         assert os.getenv("MM_KALSHI_PILOT_ENABLED") in (None, "", "false") or \
-            config.MM_KALSHI_PILOT_ENABLED is False
+            cfg.MM_KALSHI_PILOT_ENABLED is False
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +403,7 @@ class TestBookGates:
 
     def test_depth_sizing_caps_quote_to_book_fraction(self, pilot_env, clock,
                                                       monkeypatch):
-        monkeypatch.setattr(config, "MM_CANARY_QUOTE_SIZE_USD", 50.0)
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 50.0)
         # Same-side best size 8 -> depth cap = int(0.25 * 8) = 2 contracts
         client = FakeKalshiClient(
             books={TICKER: make_book(yes_qty=8.0, no_qty=8.0)})
@@ -402,7 +415,7 @@ class TestBookGates:
 
     def test_depth_below_one_contract_skips_side(self, pilot_env, clock,
                                                  monkeypatch):
-        monkeypatch.setattr(config, "MM_CANARY_QUOTE_SIZE_USD", 50.0)
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 50.0)
         # Best size 3 -> int(0.25 * 3) = 0 contracts -> side skipped
         client = FakeKalshiClient(
             books={TICKER: make_book(yes_qty=3.0, no_qty=500.0)})

@@ -1165,10 +1165,48 @@ def validate_config() -> list[str]:
         "LIP_MAX_MARKETS": LIP_MAX_MARKETS,
         "LIP_SELECT_INTERVAL": LIP_SELECT_INTERVAL,
         "LIP_DEPTH_PROBE_LIMIT": LIP_DEPTH_PROBE_LIMIT,
+        # Plan 10 — Kalshi MM pilot keys
+        "MM_FILL_POLL_SECONDS": MM_FILL_POLL_SECONDS,
+        "MM_HEDGE_MAX_LATENCY_SECONDS": MM_HEDGE_MAX_LATENCY_SECONDS,
+        "MM_HALT_WINDOW_SECONDS": MM_HALT_WINDOW_SECONDS,
+        "MM_MAX_INVENTORY_USD": MM_MAX_INVENTORY_USD,
+        "MM_MAX_INVENTORY_CONTRACTS": MM_MAX_INVENTORY_CONTRACTS,
+        "MM_MAX_TOTAL_INVENTORY_USD": MM_MAX_TOTAL_INVENTORY_USD,
+        "MM_MAX_GROSS_PER_MARKET_USD": MM_MAX_GROSS_PER_MARKET_USD,
+        "MM_QUOTE_SIZE_USD": MM_QUOTE_SIZE_USD,
+        "MM_PILOT_BANKROLL_USD": MM_PILOT_BANKROLL_USD,
+        "MM_BOOK_MAX_STALE_SECONDS": MM_BOOK_MAX_STALE_SECONDS,
+        "MM_VOL_PULL_MULTIPLIER": MM_VOL_PULL_MULTIPLIER,
+        "MM_MAX_BOOK_DEPTH_FRACTION": MM_MAX_BOOK_DEPTH_FRACTION,
+        "MM_CONTROLS_POLL_SECONDS": MM_CONTROLS_POLL_SECONDS,
+        "MM_CONTROLS_MAX_STALE_SECONDS": MM_CONTROLS_MAX_STALE_SECONDS,
+        "MM_CANARY_FILLS": MM_CANARY_FILLS,
+        "MM_CANARY_QUOTE_SIZE_USD": MM_CANARY_QUOTE_SIZE_USD,
+        "MM_CANARY_MAX_LOSS_USD": MM_CANARY_MAX_LOSS_USD,
+        "MM_CANARY_MIN_HOURS": MM_CANARY_MIN_HOURS,
+        "LIP_PRICE_BAND_LOW": LIP_PRICE_BAND_LOW,
+        "LIP_PRICE_BAND_HIGH": LIP_PRICE_BAND_HIGH,
     }
     for name, val in _positive.items():
         if val <= 0:
             raise ConfigError(f"{name}={val} must be > 0")
+
+    # Plan 10 non-negative / band keys (zero is a valid value for these)
+    if MM_INVENTORY_TARGET_USD < 0:
+        raise ConfigError(
+            f"MM_INVENTORY_TARGET_USD={MM_INVENTORY_TARGET_USD} must be >= 0")
+    if MM_HEDGE_DEADBAND_USD < 0:
+        raise ConfigError(
+            f"MM_HEDGE_DEADBAND_USD={MM_HEDGE_DEADBAND_USD} must be >= 0")
+    if not (0 < LIP_PRICE_BAND_LOW < LIP_PRICE_BAND_HIGH < 1):
+        raise ConfigError(
+            f"LIP price band invalid: need 0 < LIP_PRICE_BAND_LOW "
+            f"({LIP_PRICE_BAND_LOW}) < LIP_PRICE_BAND_HIGH "
+            f"({LIP_PRICE_BAND_HIGH}) < 1")
+    if not (0 < MM_MAX_BOOK_DEPTH_FRACTION <= 1):
+        raise ConfigError(
+            f"MM_MAX_BOOK_DEPTH_FRACTION={MM_MAX_BOOK_DEPTH_FRACTION} "
+            f"must be in (0, 1]")
 
     # --- Non-negative checks ---
     _non_negative = {
