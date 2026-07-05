@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -33,6 +34,12 @@ logger = logging.getLogger(__name__)
 PLATFORM = "kalshi"  # hardcoded venue — the pilot never routes anywhere else
 KALSHI_TICK = 0.01
 DECISIONS_LOG_PATH = "decisions.jsonl"
+STATE_PATH = "mm_pilot_state.json"
+
+# Startup reconciliation (finding #4): when there is no persisted checkpoint
+# to anchor the fill lookback, use a wide fixed window rather than "now" —
+# "safely early" beats guessing at how long the process was down.
+RECONCILE_FALLBACK_LOOKBACK_SECONDS = 24 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +165,63 @@ class PilotInventory:
         with self._lock:
             return [t for t, n in self._net.items() if n != 0]
 
+    def snapshot(self) -> dict:
+        """Serializable snapshot for restart persistence."""
+        with self._lock:
+            return {
+                "net": dict(self._net),
+                "avg": dict(self._avg),
+                "realized": dict(self._realized),
+            }
+
+    def restore(self, snap: dict) -> None:
+        """Restore a snapshot() payload (restart reconciliation)."""
+        with self._lock:
+            self._net = {t: int(v) for t, v in (snap.get("net") or {}).items()}
+            self._avg = {t: float(v) for t, v in (snap.get("avg") or {}).items()}
+            self._realized = {t: float(v)
+                              for t, v in (snap.get("realized") or {}).items()}
+
+
+# ---------------------------------------------------------------------------
+# PilotStateStore — minimal restart persistence (fail-closed reconciliation)
+# ---------------------------------------------------------------------------
+
+class PilotStateStore:
+    """Atomic JSON persistence for the pilot's minimal restart state.
+
+    Persists last_fill_ts, the open-order registry, the inventory snapshot,
+    and recent seen fill ids so a restart can reconcile against the venue
+    instead of assuming zero inventory and a 60s fill lookback.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._lock = threading.Lock()
+
+    def save(self, state: dict) -> None:
+        tmp = f"{self.path}.tmp"
+        with self._lock:
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(state, fh)
+                os.replace(tmp, self.path)
+            except Exception:
+                logger.exception("MM pilot state persist failed (%s)", self.path)
+
+    def load(self) -> dict | None:
+        with self._lock:
+            try:
+                with open(self.path, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except FileNotFoundError:
+                return None
+            except Exception:
+                logger.exception("MM pilot state load failed (%s) — treating "
+                                 "as unrecoverable, reconciliation must fail",
+                                 self.path)
+                raise
+
 
 # ---------------------------------------------------------------------------
 # ControlsPoller — Supabase bot_controls kill switch (spec section 7)
@@ -282,6 +346,8 @@ class KalshiMMPilot:
         decision_writer=None,
         dry_run: bool | None = None,
         time_fn=time.time,
+        mono_fn=time.monotonic,
+        state_path: str | None = STATE_PATH,
     ):
         import config
         from market_maker import (QuoteEngine, get_toxic_flow_detector,
@@ -296,6 +362,9 @@ class KalshiMMPilot:
         self._toxic = toxic_detector or get_toxic_flow_detector()
         self._vol = volatility_tracker or get_volatility_tracker()
         self._time_fn = time_fn
+        # Latency/aging measurements use a monotonic clock — wall-clock steps
+        # (NTP, DST, frozen clocks) must not defeat or false-trigger ceilings.
+        self._mono_fn = mono_fn
         self.dry_run = config.DRY_RUN if dry_run is None else dry_run
 
         # Pilot-owned hedger over the choke-point proxy (spec section 4).
@@ -330,6 +399,15 @@ class KalshiMMPilot:
         # Fill dedupe (bounded to last 1,000 fill ids)
         self._seen_fill_ids: dict[str, None] = {}
         self._last_fill_ts: float = self._time_fn()
+
+        # Fill-poll blindness (fail closed: never quote without fill sight)
+        self._fill_poll_failures = 0
+        self._fills_blind = False
+
+        # State persistence + startup reconciliation. Live quoting is refused
+        # until reconcile() succeeds; dry-run needs no venue reconciliation.
+        self._state_store = PilotStateStore(state_path) if state_path else None
+        self._reconciled = bool(self.dry_run)
 
         # Canary state (spec section 8)
         self.canary_graduated = False
@@ -408,13 +486,20 @@ class KalshiMMPilot:
         if yes_bid and yes_ask:
             mid = (yes_bid[0] + yes_ask[0]) / 2.0
         with self._lock:
+            now = self._time_fn()
             self._books[ticker] = {
                 "raw": raw_book,
                 "mid": mid,
                 "yes_bid": yes_bid,      # (price, qty) | None
                 "no_bid": no_bid,        # (price, qty) | None
                 "yes_ask": yes_ask,      # (price, qty) | None
-                "updated_at": self._time_fn(),
+                "updated_at": now,
+                # Distinct from `updated_at`: only a REST book fetch (this
+                # method) refreshes actual resting-order levels. WS mid
+                # ticks (on_ws_price) refresh `updated_at` far more often
+                # without carrying any level data — G11/G12 must never
+                # judge levels fresh just because the price looked fresh.
+                "levels_updated_at": now,
             }
         if mid is not None:
             try:
@@ -424,7 +509,13 @@ class KalshiMMPilot:
                              "mid=%.4f: %s", ticker, mid, exc)
 
     def on_ws_price(self, ticker: str, yes_price: float) -> None:
-        """Mid update from the orderbook_delta WS channel (freshness only)."""
+        """Mid update from the orderbook_delta WS channel (freshness only).
+
+        Deliberately does NOT touch ``levels_updated_at`` — a WS price tick
+        carries no book-depth information, only a mid. Gates that consume
+        actual levels (G11 depth sizing, G12 crossing guard) must keep
+        judging staleness off the last REST book fetch, not this.
+        """
         with self._lock:
             book = self._books.get(ticker)
             if book is not None:
@@ -461,6 +552,197 @@ class KalshiMMPilot:
                        for info in self._orders.values()
                        if info["ticker"] == ticker)
 
+    # -- restart persistence / startup reconciliation (finding #4) -----------
+
+    def _persist_state(self) -> None:
+        """Best-effort snapshot of restart-recovery state.
+
+        Non-blocking on failure: a write failure here must never interrupt
+        live trading. This file is a diagnostic aid and a fallback seed for
+        the fill lookback window on the next restart — it is NOT the
+        authoritative safety mechanism. ``reconcile()`` querying the live
+        venue at startup is; this snapshot only narrows the fill lookback
+        and gives ``reconcile()`` something to fall back on if a
+        position-query endpoint is ever unavailable.
+        """
+        if self._state_store is None:
+            return
+        with self._lock:
+            orders_snapshot = {oid: dict(info)
+                              for oid, info in self._orders.items()}
+        state = {
+            "last_fill_ts": self._last_fill_ts,
+            "orders": orders_snapshot,
+            "inventory": self.inventory.snapshot(),
+            "seen_fill_ids": list(self._seen_fill_ids.keys())[-200:],
+            "saved_at": self._time_fn(),
+        }
+        self._state_store.save(state)
+
+    def reconcile(self) -> bool:
+        """Startup reconciliation against LIVE venue state (finding #4).
+
+        ``_seen_fill_ids``, ``_last_fill_ts``, and ``_orders`` are in-memory
+        only. On a naive restart ``_last_fill_ts`` reseeds to "now" and the
+        fill poll only looks back 60s (``poll_fills``), so any fill during
+        the crash-to-restart downtime is silently lost and caps/inventory
+        tracking restarts from zero while real inventory may be nonzero.
+
+        This is the required minimum fix: before ANY quoting, pull the
+        venue's own view of positions and fills, and cancel every resting
+        order the venue reports (rather than guess at a stale order's
+        purpose/pricing and adopt it — a fresh quote next cycle at current
+        prices is strictly safer than trusting an unknown-vintage order).
+        ``authorize_order`` fails closed on every order while
+        ``self._reconciled`` is False, so nothing above this gate can place
+        or reduce until it returns True.
+
+        Dry-run carries no real venue state and reconciles trivially (set
+        True in ``__init__`` already; this still no-ops safely if called).
+
+        Returns:
+            True on success. False on any failure — ``self._reconciled``
+            stays/becomes False (fail closed) and the caller (``run_loop``)
+            is expected to retry on a cadence.
+        """
+        if self.dry_run:
+            self._reconciled = True
+            return True
+        if self._client is None:
+            logger.error("MM pilot reconcile: no live client configured — "
+                         "fail closed, quoting stays disabled")
+            self._reconciled = False
+            return False
+
+        persisted = None
+        if self._state_store is not None:
+            try:
+                persisted = self._state_store.load()
+            except Exception:
+                logger.exception("MM pilot reconcile: persisted state file "
+                                 "unreadable — continuing with venue-only "
+                                 "reconciliation (not fatal by itself)")
+                persisted = None
+
+        try:
+            positions = self._client.get_positions(raise_on_error=True)
+            since_ts = int((persisted or {}).get(
+                "last_fill_ts", self._time_fn() - RECONCILE_FALLBACK_LOOKBACK_SECONDS))
+            fills = self._client.get_fills(min_ts=since_ts, raise_on_error=True)
+            open_orders = self._client.get_open_orders()
+        except Exception:
+            logger.exception("MM pilot reconcile: venue query failed — "
+                             "fail closed, quoting stays disabled")
+            self._reconciled = False
+            return False
+
+        cancel_failures = 0
+        for order in open_orders or []:
+            oid = str(order.get("order_id") or order.get("id") or "")
+            if not oid:
+                continue
+            try:
+                ok = bool(self._client.cancel_order(oid))
+            except Exception:
+                ok = False
+            if not ok:
+                cancel_failures += 1
+                logger.error("MM pilot reconcile: could not cancel stale "
+                             "resting order %s found on startup", oid)
+        if cancel_failures:
+            self._alert("MM_PILOT_RECONCILE_FAILED", "CRITICAL",
+                        f"MM pilot startup reconciliation could not cancel "
+                        f"{cancel_failures} pre-existing resting order(s) — "
+                        f"fail closed, quoting stays disabled until this is "
+                        f"resolved manually on the Kalshi UI",
+                        {"cancel_failures": cancel_failures})
+            self._reconciled = False
+            return False
+
+        net_map: dict[str, int] = {}
+        avg_map: dict[str, float] = {}
+        for pos in positions or []:
+            ticker = pos.get("ticker", "")
+            if not ticker:
+                continue
+            # Kalshi's documented MarketPosition schema (docs.kalshi.com/
+            # api-reference/portfolio/get-positions) has no plain "position"
+            # or "net_contracts" key — the signed net-contracts field is
+            # "position_fp" (a STRING; negative = NO contracts, positive =
+            # YES contracts). Guessing at the wrong key here would silently
+            # read every real position as flat (net=0), which is worse than
+            # the bug this reconciliation exists to fix: it would report
+            # "reconciled successfully" while still seeding from a wrong
+            # zero baseline.
+            try:
+                net = int(float(pos.get("position_fp", 0) or 0))
+            except (TypeError, ValueError):
+                logger.warning("MM pilot reconcile: unparsable position_fp "
+                               "%r for %s — treating as flat",
+                               pos.get("position_fp"), ticker)
+                net = 0
+            if net == 0:
+                continue
+            net_map[ticker] = net
+            # No average-cost field exists on market_positions at all (not
+            # average_price_dollars, not avg_price) — derive a positive
+            # per-contract basis from total dollar exposure over the signed
+            # contract count (CodeRabbit round-3: the signed CONTRACT count
+            # above is correct regardless, but net_usd() = net * avg, so an
+            # avg of 0.0 would make USD-denominated caps read this ticker
+            # as $0 exposure no matter how many contracts it holds —
+            # silently bypassing MM_MAX_INVENTORY_USD /
+            # MM_MAX_TOTAL_INVENTORY_USD / the gross cap for exactly the
+            # ticker reconciliation just discovered real inventory on).
+            # Fail closed toward OVER-estimating risk instead: when the
+            # exposure field is missing or unparsable, assume the
+            # worst-case $1.00/contract (the maximum possible price for a
+            # binary contract) so a bad read trips caps EARLY rather than
+            # masking real exposure as zero.
+            raw_exposure = pos.get("market_exposure_dollars")
+            if raw_exposure is None:
+                avg_map[ticker] = 1.0
+            else:
+                try:
+                    avg_map[ticker] = abs(float(raw_exposure)) / abs(net)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    avg_map[ticker] = 1.0
+        # restore() replaces the inventory wholesale under its own lock —
+        # this IS the "seed from venue truth, not an assumed zero" fix.
+        # Realized P&L has no live-venue source in scope here (that would
+        # be get_settlements()/account history, beyond this minimum fix),
+        # so carry forward the last persisted total rather than reset the
+        # canary's cumulative-loss counter to zero on every restart — a
+        # canary near its loss ceiling must stay near it across a crash.
+        # No persisted file (fresh state_path, or first-ever run) means no
+        # history to carry forward; the counter legitimately starts at 0.0.
+        realized_map: dict = {}
+        if persisted and persisted.get("inventory"):
+            realized_map = dict(persisted["inventory"].get("realized") or {})
+        self.inventory.restore({"net": net_map, "avg": avg_map,
+                               "realized": realized_map})
+
+        with self._lock:
+            self._orders = {}
+            for fill in fills or []:
+                fid = self._fill_id(fill)
+                if fid:
+                    self._mark_seen(fid)
+            if fills:
+                self._last_fill_ts = max(
+                    _parse_created_ts(f, self._last_fill_ts) for f in fills)
+            elif persisted and persisted.get("last_fill_ts"):
+                self._last_fill_ts = max(self._last_fill_ts,
+                                         float(persisted["last_fill_ts"]))
+
+        self._reconciled = True
+        logger.info("MM pilot reconciled at startup: %d ticker(s) with "
+                    "inventory, %d prior resting order(s) cancelled, fills "
+                    "checked since %s", len(self.inventory.tickers_with_inventory()),
+                    len(open_orders or []), since_ts)
+        self._persist_state()
+        return True
+
     # -- choke point (spec section 5) ----------------------------------------
 
     def authorize_order(self, ticker: str, side: str, action: str,
@@ -492,6 +774,14 @@ class KalshiMMPilot:
 
     def _authorize(self, ticker: str, side: str, action: str, count: int,
                    price: float, reducing: bool, config) -> GateResult:
+        # 0. Startup reconciliation gate (finding #4). Refuse EVERY order —
+        # including reducing orders — until reconcile() has confirmed live
+        # venue state at least once this process lifetime. An unreconciled
+        # restart has stale in-memory inventory and a fill cursor that can
+        # silently skip fills from crash-to-restart downtime; a "reduce"
+        # order computed off that stale state is not trustworthy either.
+        if not self._reconciled:
+            return GateResult(False, "not_reconciled")
         # 1. Kill switch (env flag + fresh control-plane cache)
         if not config.MM_KALSHI_PILOT_ENABLED:
             return GateResult(False, "kill_switch_env")
@@ -549,6 +839,19 @@ class KalshiMMPilot:
         Returns the order id (synthetic in dry-run), or None on rejection or
         placement failure. This method contains the pilot's single reference
         to ``kalshi_client.place_order``.
+
+        CodeRabbit round-3: the live venue round-trip runs OUTSIDE
+        ``self._lock`` so a slow/blocked network call cannot hold up
+        ``on_ws_price``/``update_book`` (a different thread — the WS feed
+        handler — touching disjoint state, ``self._books``). The lock is
+        held only for the authorization decision and, separately, to
+        record the result into ``self._orders``. In the CURRENT
+        architecture (one dedicated ``run_loop`` thread drives all
+        quoting/hedging/fill-processing sequentially) nothing else calls
+        this method concurrently, so releasing the lock between "authorized"
+        and "recorded" is safe today; a future concurrent caller would
+        reopen the check-then-act race the original full-method lock
+        prevented, and would need its own de-duplication if introduced.
         """
         with self._lock:
             verdict = self.authorize_order(ticker, side, action, count, price,
@@ -565,23 +868,28 @@ class KalshiMMPilot:
                 self._write_decision("place_order", ticker, False, "no_client")
                 return None
             else:
+                order_id = None  # placed live, below, outside the lock
                 self.place_order_calls += 1
-                # Quotes rest GTC; hedges are IOC-style fill_or_kill at touch
-                # (unfilled hedges are caught by _check_pending_hedges).
-                tif = "fill_or_kill" if purpose == "hedge" else "gtc"
-                resp = self._client.place_order(
-                    ticker=ticker, side=side, action=action, count=count,
-                    price_dollars=price, time_in_force=tif,
-                )
-                if resp is None:
-                    logger.warning("MM pilot place_order failed on %s", ticker)
-                    return None
-                order = resp.get("order", resp) if isinstance(resp, dict) else {}
-                order_id = order.get("order_id") or order.get("id")
-                if not order_id:
-                    logger.warning("MM pilot place_order returned no id on %s",
-                                   ticker)
-                    return None
+
+        if order_id is None:
+            # Quotes rest GTC; hedges are IOC-style fill_or_kill at touch
+            # (unfilled hedges are caught by _check_pending_hedges).
+            tif = "fill_or_kill" if purpose == "hedge" else "gtc"
+            resp = self._client.place_order(
+                ticker=ticker, side=side, action=action, count=count,
+                price_dollars=price, time_in_force=tif,
+            )
+            if resp is None:
+                logger.warning("MM pilot place_order failed on %s", ticker)
+                return None
+            order = resp.get("order", resp) if isinstance(resp, dict) else {}
+            order_id = order.get("order_id") or order.get("id")
+            if not order_id:
+                logger.warning("MM pilot place_order returned no id on %s",
+                               ticker)
+                return None
+
+        with self._lock:
             self._orders[order_id] = {
                 "ticker": ticker,
                 "side": side,
@@ -590,22 +898,81 @@ class KalshiMMPilot:
                 "price": price,
                 "purpose": purpose,
                 "placed_at": self._time_fn(),
+                # Monotonic placement time — _check_pending_hedges ages
+                # hedge orders off this, not wall-clock `placed_at`, so NTP
+                # steps / DST / a frozen clock can't defeat or false-trigger
+                # the latency ceiling.
+                "placed_mono": self._mono_fn(),
             }
-            return order_id
+        self._persist_state()
+        return order_id
 
-    def _cancel_order(self, order_id: str) -> None:
-        """Cancel one resting pilot order (remote best-effort, retry once)."""
+    MAX_CANCEL_ATTEMPTS = 3
+
+    def _cancel_order(self, order_id: str) -> bool:
+        """Cancel one resting pilot order — exchange FIRST, registry second.
+
+        The registry entry is popped only after the exchange confirms the
+        cancel; a failed cancel stays in the registry (flagged
+        ``pending_cancel``) so it remains visible to fill attribution, gross
+        accounting, and retries. After MAX_CANCEL_ATTEMPTS failures the pilot
+        halts with a persistent CRITICAL alert — a live GTC order we cannot
+        cancel is an unbounded exposure.
+        """
         with self._lock:
-            info = self._orders.pop(order_id, None)
+            info = self._orders.get(order_id)
         if info is None:
-            return
-        if self.dry_run or self._client is None or order_id.startswith("dry_"):
-            return
+            return True
+        if self.dry_run or order_id.startswith("dry_"):
+            with self._lock:
+                self._orders.pop(order_id, None)
+            self._persist_state()
+            return True
+        ok = False
         try:
-            if not self._client.cancel_order(order_id):
-                self._client.cancel_order(order_id)
+            ok = bool(self._client.cancel_order(order_id))
         except Exception:
             logger.exception("MM pilot cancel_order raised for %s", order_id)
+        if ok:
+            with self._lock:
+                self._orders.pop(order_id, None)
+            self._persist_state()
+            return True
+        with self._lock:
+            info["pending_cancel"] = True
+            info["cancel_attempts"] = info.get("cancel_attempts", 0) + 1
+            attempts = info["cancel_attempts"]
+            # Exponential backoff before the next retry (1s, 2s, 4s, ...,
+            # capped at 30s) so a stuck cancel doesn't hammer the exchange
+            # every run-loop pass while still recovering promptly once the
+            # venue is responsive again.
+            backoff = min(2 ** (attempts - 1), 30)
+            info["next_retry_at"] = self._time_fn() + backoff
+        logger.warning("MM pilot cancel FAILED for %s (attempt %d/%d) — "
+                       "order stays in registry, retry in %ds",
+                       order_id, attempts, self.MAX_CANCEL_ATTEMPTS, backoff)
+        if attempts >= self.MAX_CANCEL_ATTEMPTS:
+            self._alert("MM_PILOT_CANCEL_STUCK", "CRITICAL",
+                        f"MM pilot could not cancel live order {order_id} "
+                        f"after {attempts} attempts — order may still be "
+                        f"resting on Kalshi; manual intervention required",
+                        {"order_id": order_id, "ticker": info.get("ticker")})
+            self.halt_all(f"uncancellable live order {order_id}")
+        return False
+
+    def _retry_pending_cancels(self) -> None:
+        """Retry exchange cancels that previously failed, respecting each
+        order's backoff window. Intended to run once per run-loop pass so a
+        cancel that failed transiently (network blip, momentary 5xx) gets
+        confirmed and popped from the registry without waiting for the next
+        cancel/replace cycle on that specific market."""
+        now = self._time_fn()
+        with self._lock:
+            pending = [oid for oid, info in self._orders.items()
+                       if info.get("pending_cancel")
+                       and now >= info.get("next_retry_at", 0.0)]
+        for oid in pending:
+            self._cancel_order(oid)
 
     def pull_market(self, ticker: str, reason: str) -> int:
         """Cancel every resting pilot order in a market (fail closed)."""
@@ -677,6 +1044,14 @@ class KalshiMMPilot:
             self._write_decision(name, ticker, ok, reason)
             return ok
 
+        # G0 startup reconciliation (finding #4). Not part of the spec's
+        # numbered G1-G12 chain; this is a pre-check so an unreconciled
+        # pilot gets a clear audit-trail reason here rather than only
+        # discovering the block later at authorize_order (the actual hard
+        # choke point — this is belt-and-suspenders, not the enforcement).
+        if not self._reconciled:
+            gate("G0_reconciled", False, "not_reconciled")
+            return {"action": "pull", "reason": "not_reconciled"}
         # G1 kill switch
         g1 = config.MM_KALSHI_PILOT_ENABLED and self._controls.is_enabled()
         if not gate("G1_kill_switch", g1, "ok" if g1 else "kill_switch"):
@@ -712,15 +1087,36 @@ class KalshiMMPilot:
         g6 = age <= config.MM_BOOK_MAX_STALE_SECONDS
         if not gate("G6_book_staleness", g6, "ok" if g6 else "book_stale"):
             return {"action": "pull", "reason": "book_stale"}
+        # G6b book LEVELS staleness — distinct from mid/price freshness
+        # above. WS mid ticks refresh `updated_at` far more often than REST
+        # book fetches refresh actual resting-order levels; G11 depth
+        # sizing and G12 crossing guard (both later in refresh_market)
+        # consume levels (yes_bid/no_bid/yes_ask), so they must never run
+        # on levels older than MM_BOOK_MAX_STALE_SECONDS even while price
+        # looks fresh from WS. Failing here (before refresh_market reaches
+        # G11/G12) is what makes that guarantee airtight.
+        levels_age = self._time_fn() - book.get("levels_updated_at", 0.0)
+        g6b = levels_age <= config.MM_BOOK_MAX_STALE_SECONDS
+        if not gate("G6b_book_levels_staleness", g6b,
+                    "ok" if g6b else "book_levels_stale"):
+            return {"action": "pull", "reason": "book_levels_stale"}
         # G7 toxic-flow pause
         g7 = not self._toxic.should_pause(ticker)
         if not gate("G7_toxic_flow", g7, "ok" if g7 else "toxic_flow_pause"):
             return {"action": "pull", "reason": "toxic_flow_pause"}
-        # G8 volatility ceiling (G9 widening is applied inside QuoteEngine)
+        # G8 volatility ceiling (G9 widening is applied inside QuoteEngine).
+        # Insufficient samples must fail closed — get_volatility() returns
+        # 0.0 (the calmest possible reading) both when a market is truly
+        # calm and when there simply isn't enough data yet; treating warm-up
+        # as "calm" would let a fast mover quote at base spread before there
+        # is any real data to judge it by.
+        has_samples = self._vol.has_min_samples(ticker)
         multiplier = self._vol.get_spread_multiplier(ticker)
-        g8 = multiplier < config.MM_VOL_PULL_MULTIPLIER
+        g8 = has_samples and multiplier < config.MM_VOL_PULL_MULTIPLIER
         if not gate("G8_volatility_ceiling", g8,
-                    "ok" if g8 else "volatility_ceiling"):
+                    "ok" if g8 else
+                    ("insufficient_samples" if not has_samples
+                     else "volatility_ceiling")):
             return {"action": "pull", "reason": "volatility_ceiling"}
         gate("G9_volatility_widening", True,
              f"multiplier={multiplier:.2f}")
@@ -834,14 +1230,17 @@ class KalshiMMPilot:
         size_usd = self._quote_size_usd()
 
         # G11 depth sizing: quote count <= fraction of same-side best size.
+        # Fail closed when depth is unknown: a side with no resting size to
+        # measure against must be skipped, never fall through to full
+        # notional sizing (that would defeat the entire depth cap).
         def _sized_count(price: float, best: tuple | None) -> int:
             if price <= 0:
                 return 0
+            if best is None:
+                return 0
             count = int(size_usd / price)
-            if best is not None:
-                depth_cap = int(config.MM_MAX_BOOK_DEPTH_FRACTION * best[1])
-                count = min(count, depth_cap)
-            return count
+            depth_cap = int(config.MM_MAX_BOOK_DEPTH_FRACTION * best[1])
+            return min(count, depth_cap)
 
         # Our bid = buy YES at `bid`; same side of the book = resting YES bids.
         bid_count = 0 if skip_bid else _sized_count(bid, book.get("yes_bid"))
@@ -882,11 +1281,15 @@ class KalshiMMPilot:
 
     # -- fill detection (spec section 3) ----------------------------------------
 
-    def _fill_id(self, fill: dict) -> str:
+    def _fill_id(self, fill: dict) -> str | None:
+        """Unique fill id, or None when the record has no trade_id.
+
+        No fallback key: (order_id, created_time, count) collapses distinct
+        partial fills that share a second and a size. The caller halts on
+        None — fail closed beats undercounting inventory.
+        """
         fid = fill.get("trade_id")
-        if fid:
-            return str(fid)
-        return f"{fill.get('order_id')}|{fill.get('created_time')}|{fill.get('count')}"
+        return str(fid) if fid else None
 
     def _mark_seen(self, fid: str) -> None:
         self._seen_fill_ids[fid] = None
@@ -904,16 +1307,29 @@ class KalshiMMPilot:
                 return []
             min_ts = int(self._last_fill_ts - 60)  # 60s overlap window
             try:
-                raw_fills = self._client.get_fills(min_ts=min_ts)
+                raw_fills = self._client.get_fills(min_ts=min_ts,
+                                                   raise_on_error=True)
             except Exception:
-                logger.exception("MM pilot get_fills failed — no fills "
-                                 "processed this cycle (fail closed on next "
-                                 "hedge check)")
+                logger.exception("MM pilot get_fills failed")
+                self._on_fill_poll_failure()
                 return []
+        # A successful poll restores fill sight.
+        if self._fill_poll_failures or self._fills_blind:
+            logger.info("MM pilot fill polling recovered after %d failures",
+                        self._fill_poll_failures)
+        self._fill_poll_failures = 0
+        self._fills_blind = False
         events: list[FillEvent] = []
         pilot_markets = set(self.pilot_tickers())
         for fill in reversed(raw_fills):  # oldest first
             fid = self._fill_id(fill)
+            if fid is None:
+                # No trade_id: any fallback key risks collapsing distinct
+                # partial fills into one (silent inventory undercount).
+                # Fail closed rather than guess.
+                self.halt_all("fill without trade_id — dedupe unsafe, "
+                              "inventory accounting cannot be trusted")
+                return events
             if fid in self._seen_fill_ids:
                 continue
             ticker = fill.get("ticker", "")
@@ -932,28 +1348,51 @@ class KalshiMMPilot:
                     return events
                 continue  # someone else's market — not ours to account
             self._mark_seen(fid)
+            detect_wall = self._time_fn()
+            detect_mono = self._mono_fn()
             event = self._build_event(fid, fill, info)
             if event is None:
                 continue
             self._last_fill_ts = max(self._last_fill_ts, event.created_ts)
             events.append(event)
-            self._process_fill(event, info)
+            self._process_fill(event, info, detect_wall=detect_wall,
+                               detect_mono=detect_mono)
             if self.halted:
                 break
         if not self.halted:
             self._check_pending_hedges()
+        self._persist_state()
         return events
+
+    FILL_POLL_FAILURE_LIMIT = 3
+
+    def _on_fill_poll_failure(self) -> None:
+        """Fail closed on fill blindness: quoting without fill sight means
+        inventory, caps, and toxicity are all running on stale truth."""
+        self._fill_poll_failures += 1
+        if (self._fill_poll_failures >= self.FILL_POLL_FAILURE_LIMIT
+                and not self._fills_blind):
+            self._fills_blind = True
+            self.pull_all("fill polling blind")
+            self._alert(
+                "MM_PILOT_FILLS_BLIND", "CRITICAL",
+                f"MM pilot fill polling failed "
+                f"{self._fill_poll_failures}x consecutively — quotes pulled, "
+                f"no quoting until polling recovers",
+                {"failures": self._fill_poll_failures})
+            self._write_decision("fill_poll", "*", False, "fills_blind")
 
     def _check_pending_hedges(self) -> None:
         """Cancel-remainder path: a hedge order still resting past the latency
         ceiling means the position was NOT flattened — hedge failure, fail
-        closed (spec section 4)."""
+        closed (spec section 4). Ages on the monotonic clock."""
         import config
-        now = self._time_fn()
+        now_mono = self._mono_fn()
         for order in self.resting_orders():
             if order["purpose"] != "hedge":
                 continue
-            if now - order["placed_at"] <= config.MM_HEDGE_MAX_LATENCY_SECONDS:
+            age = now_mono - order.get("placed_mono", now_mono)
+            if age <= config.MM_HEDGE_MAX_LATENCY_SECONDS:
                 continue
             self._cancel_order(order["order_id"])  # cancel remainder
             ticker = order["ticker"]
@@ -992,9 +1431,15 @@ class KalshiMMPilot:
 
     # -- fill processing / canary (spec sections 4 and 8) ------------------------
 
-    def _process_fill(self, event: FillEvent, order_info: dict) -> None:
+    def _process_fill(self, event: FillEvent, order_info: dict,
+                      detect_wall: float | None = None,
+                      detect_mono: float | None = None) -> None:
         import config
 
+        if detect_wall is None:
+            detect_wall = self._time_fn()
+        if detect_mono is None:
+            detect_mono = self._mono_fn()
         purpose = order_info.get("purpose", "")
         is_hedge = purpose == "hedge"
 
@@ -1058,10 +1503,12 @@ class KalshiMMPilot:
 
         # 4. Hedge decision (skip re-hedging on the hedge's own fill).
         if not is_hedge:
-            self._hedge_on_fill(event)
+            self._hedge_on_fill(event, detect_wall=detect_wall,
+                                detect_mono=detect_mono)
 
         # Graduation check rides on fill processing and the run loop.
         self._maybe_graduate()
+        self._persist_state()
 
     def _log_fill(self, event: FillEvent) -> None:
         if self._db is None:
@@ -1143,9 +1590,22 @@ class KalshiMMPilot:
 
     # -- auto-hedge (spec section 4) -----------------------------------------------
 
-    def _hedge_on_fill(self, event: FillEvent) -> None:
-        """Hedge decision per fill: deadband rebalance or reducing order."""
+    def _hedge_on_fill(self, event: FillEvent, detect_wall: float | None = None,
+                      detect_mono: float | None = None) -> None:
+        """Hedge decision per fill: deadband rebalance or reducing order.
+
+        ``detect_mono`` is the monotonic timestamp captured when the fill
+        was detected (poll_fills); hedge latency is measured against it with
+        ``self._mono_fn()``, never wall-clock deltas — see finding #10
+        (mm_pilot.py hedge-latency monotonic-clock fix). ``detect_wall`` is
+        carried through only for human-readable audit-trail context.
+        """
         import config
+
+        if detect_mono is None:
+            detect_mono = self._mono_fn()
+        if detect_wall is None:
+            detect_wall = self._time_fn()
 
         net_usd = self.inventory.net_usd(event.ticker)
         excess = abs(net_usd) - config.MM_INVENTORY_TARGET_USD
@@ -1172,6 +1632,12 @@ class KalshiMMPilot:
                     size=excess,
                     token_id=event.ticker,
                     reduce_action="sell",
+                    # Hard ceiling from OUR OWN inventory tracker (never
+                    # recomputed from dollars/price inside the hedger) — a
+                    # reduce order must never be sized past the position it
+                    # is reducing, regardless of how far price has moved
+                    # since entry (finding #5).
+                    max_contracts=abs(net_ct),
                 )
             except Exception as exc:
                 success = False
@@ -1181,12 +1647,31 @@ class KalshiMMPilot:
             if success:
                 break
 
-        latency = self._time_fn() - event.created_ts
+        # Latency = (wall-clock staleness of the fill AT THE MOMENT we
+        # detected it) + (monotonic elapsed time from detection to hedge
+        # completion, which may span one or two hedge attempts).
+        #
+        # The first term is unavoidably wall-clock — event.created_ts is a
+        # venue-reported timestamp with no monotonic equivalent on our side
+        # — but it is computed ONCE, right at detection (detect_wall was
+        # captured in poll_fills before any hedge attempt ran). The second
+        # term is what the ORIGINAL bug got wrong: it re-read the wall
+        # clock again AFTER a possibly-slow hedge attempt
+        # (self._time_fn() - event.created_ts, computed post-attempt), so an
+        # NTP step, DST transition, or frozen/mocked clock during that
+        # window could silently defeat or false-trigger the ceiling.
+        # Measuring the processing window on the monotonic clock instead
+        # closes that gap while preserving the original "how stale is this
+        # fill overall" semantics.
+        detection_lag = max(0.0, detect_wall - event.created_ts)
+        reaction_latency = self._mono_fn() - detect_mono
+        latency = detection_lag + reaction_latency
         latency_exceeded = latency > config.MM_HEDGE_MAX_LATENCY_SECONDS
         self._write_decision("hedge", event.ticker, success and not latency_exceeded,
                              "hedged" if success else (error or "hedge_failed"),
                              excess=round(excess, 2),
-                             latency_s=round(latency, 2))
+                             latency_s=round(latency, 2),
+                             detected_at=round(detect_wall, 3))
 
         if latency_exceeded:
             # Canary deviation 4: latency ceiling exceeded even if the hedge
@@ -1255,14 +1740,30 @@ class KalshiMMPilot:
 
         Intended as a daemon-thread target from continuous mode. Every stage
         is exception-guarded; three consecutive loop errors halt the pilot
-        (fail closed) rather than spinning blind.
+        (fail closed) rather than spinning blind. The very first thing this
+        loop does is reconcile against live venue state (finding #4) — no
+        fill polling or quoting happens until that succeeds; a transient
+        venue failure at boot retries on the controls-poll cadence rather
+        than requiring a full process restart.
         """
         import config
 
         last_controls = last_fills = last_refresh = last_selection = 0.0
+        last_reconcile_attempt = self._time_fn()
+        if not self._reconciled:
+            self._reconciled = self.reconcile()
         while not stop_event.is_set():
             now = self._time_fn()
             try:
+                if not self._reconciled:
+                    if now - last_reconcile_attempt >= config.MM_CONTROLS_POLL_SECONDS:
+                        last_reconcile_attempt = now
+                        self._reconciled = self.reconcile()
+                    stop_event.wait(0.5)
+                    continue
+                # Retry any exchange cancels that previously failed — see
+                # _cancel_order / _retry_pending_cancels (finding #2).
+                self._retry_pending_cancels()
                 if now - last_controls >= config.MM_CONTROLS_POLL_SECONDS:
                     last_controls = now
                     self._controls.poll()

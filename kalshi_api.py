@@ -82,6 +82,18 @@ class _RateLimitError(Exception):
     pass
 
 
+class KalshiPortfolioQueryError(Exception):
+    """Raised by portfolio-state reads (fills/positions/orders) when the
+    caller opts into ``raise_on_error=True`` and the request fails.
+
+    A bare ``[]`` on HTTP failure is indistinguishable from "confirmed
+    empty" to any caller that cannot see inside this method — that
+    ambiguity is unsafe for the MM pilot's fill polling and startup
+    reconciliation, which must never mistake "unknown" for "zero".
+    """
+    pass
+
+
 class KalshiClient:
     """Kalshi API client with RSA-PSS API key authentication."""
 
@@ -397,13 +409,70 @@ class KalshiClient:
         balance_cents = data.get("balance", 0)
         return balance_cents / 100.0
 
-    def get_positions(self) -> list[dict]:
-        """Get open positions."""
+    def get_positions(self, raise_on_error: bool = False) -> list[dict]:
+        """Get open positions.
+
+        Args:
+            raise_on_error: When True, an HTTP failure raises
+                ``KalshiPortfolioQueryError`` instead of returning ``[]``.
+                Default False preserves the original silent-empty behavior
+                for existing callers; the MM pilot's startup reconciliation
+                (mm_pilot.py) sets this True — mistaking "request failed"
+                for "confirmed flat" would let it reconcile to zero
+                inventory while a real position is unaccounted for.
+
+        Raises:
+            KalshiPortfolioQueryError: Only when ``raise_on_error`` is True
+                and the request fails.
+        """
         resp = self._request("GET", "/portfolio/positions", params={"limit": 200})
         if not resp or resp.status_code != 200:
+            status = resp.status_code if resp is not None else "no response"
+            logger.warning("Kalshi get_positions failed: %s", status)
+            if raise_on_error:
+                raise KalshiPortfolioQueryError(
+                    f"get_positions fetch failed ({status})")
             return []
         data = resp.json()
         return data.get("market_positions", [])
+
+    def get_open_orders(self, ticker: str | None = None,
+                        limit: int = 200, max_pages: int = 5) -> list[dict]:
+        """Fetch this account's resting (unfilled) orders.
+
+        Used by the MM pilot's startup reconciliation gate
+        (docs/plans/10-mm-pilot-prep.md, restart-persistence fix): a prior
+        process crash can leave live GTC orders resting on Kalshi that a
+        fresh in-memory registry knows nothing about. Unlike
+        ``get_positions``, this always raises on failure — there is no
+        pre-existing caller relying on a silent-empty result, and a caller
+        that needs this list (reconciliation) must never treat "request
+        failed" as "confirmed no resting orders".
+
+        Raises:
+            KalshiPortfolioQueryError: On any page-fetch HTTP failure.
+        """
+        params: dict = {"status": "resting", "limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        orders: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._request("GET", "/portfolio/orders", params=params)
+            if not resp or resp.status_code != 200:
+                status = resp.status_code if resp is not None else "no response"
+                logger.warning("Kalshi get_open_orders failed: %s", status)
+                raise KalshiPortfolioQueryError(
+                    f"get_open_orders page fetch failed ({status})")
+            data = resp.json()
+            page = data.get("orders", [])
+            orders.extend(page)
+            cursor = data.get("cursor")
+            if not cursor or not page:
+                break
+        return orders
 
     def get_settlements(self, limit: int = 200, max_pages: int = 5) -> list[dict]:
         """Fetch account settlement history from /portfolio/settlements.
@@ -535,7 +604,8 @@ class KalshiClient:
         return None
 
     def get_fills(self, limit: int = 200, max_pages: int = 5,
-                  min_ts: int | None = None) -> list[dict]:
+                  min_ts: int | None = None,
+                  raise_on_error: bool = False) -> list[dict]:
         """Fetch this account's executed trade fills from /portfolio/fills.
 
         Fills are the authoritative record of contracts traded (VIP volume),
@@ -547,9 +617,23 @@ class KalshiClient:
             limit: Page size per request.
             max_pages: Maximum pages to walk (cursor pagination).
             min_ts: Optional Unix seconds lower bound; passed as ``min_ts``.
+            raise_on_error: When True, a failed page fetch raises
+                ``KalshiPortfolioQueryError`` instead of returning whatever
+                fills were accumulated so far. A partial/empty list on HTTP
+                failure is indistinguishable from "confirmed no more fills"
+                to a caller that cannot see this method's internals —
+                callers that must never mistake "unknown" for "zero" (e.g.
+                the MM pilot's fill poll, which drives inventory/hedge
+                accounting) set this True. Default False preserves the
+                original silent partial-return behavior for existing
+                callers (e.g. kalshi_vip.py).
 
         Returns:
             A list of fill records, newest first.
+
+        Raises:
+            KalshiPortfolioQueryError: Only when ``raise_on_error`` is True
+                and a page fetch fails.
         """
         fills: list[dict] = []
         cursor = None
@@ -561,8 +645,14 @@ class KalshiClient:
                 params["min_ts"] = min_ts
             resp = self._request("GET", "/portfolio/fills", params=params)
             if not resp or resp.status_code != 200:
-                logger.warning("Kalshi get_fills failed: %s",
-                               resp.status_code if resp is not None else "no response")
+                status = resp.status_code if resp is not None else "no response"
+                logger.warning("Kalshi get_fills failed: %s", status)
+                if raise_on_error:
+                    raise KalshiPortfolioQueryError(
+                        f"get_fills page fetch failed ({status}) after "
+                        f"{len(fills)} fill(s) already accumulated this "
+                        f"call — result would be ambiguous (partial vs. "
+                        f"complete)")
                 break
             data = resp.json()
             page = data.get("fills", [])

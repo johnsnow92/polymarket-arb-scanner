@@ -231,12 +231,16 @@ class TestToxicityGate:
 # ---------------------------------------------------------------------------
 
 class FakeVolTracker:
-    def __init__(self, multiplier):
+    def __init__(self, multiplier, has_samples=True):
         self.multiplier = multiplier
+        self.has_samples = has_samples
 
     def get_spread_multiplier(self, market_key, base_multiplier=1.0,
                               max_multiplier=3.0):
         return self.multiplier
+
+    def has_min_samples(self, market_key):
+        return self.has_samples
 
     def record_price(self, market_key, price):
         pass
@@ -272,6 +276,53 @@ class TestVolatilityGate:
                                       purpose="quote_bid")
         assert pilot.refresh_market(TICKER) == []
         assert oid in client.cancelled
+
+    # -----------------------------------------------------------------
+    # Finding #9: insufficient samples must fail G8, not read as "calm".
+    # get_volatility() returns 0.0 (the calmest possible multiplier) both
+    # when a market is truly calm and when there just isn't enough data
+    # yet — G8 must distinguish "known calm" from "unknown" and fail
+    # closed on the latter.
+    # Fail-before: G8 only checked the multiplier value, so a fresh
+    # market with zero price samples (multiplier reads 1.0 = calmest)
+    # would quote at base spread during warm-up even if the underlying
+    # market were moving violently.
+    # -----------------------------------------------------------------
+
+    def test_insufficient_samples_pulls_quotes_even_at_calmest_reading(
+            self, pilot_env, clock):
+        # multiplier=1.0 (the calmest possible reading) but has_samples=False
+        # — this is exactly what a real VolatilityTracker reports during
+        # warm-up (get_volatility returns 0.0 for lack of data, which
+        # get_spread_multiplier maps to base_multiplier=1.0).
+        fake = FakeVolTracker(1.0, has_samples=False)
+        live_market_maker()._volatility_tracker = fake
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client, vol=fake)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        assert pilot.refresh_market(TICKER) == []
+        assert oid in client.cancelled
+        reasons = [d["reason"] for d in pilot._decisions
+                  if d["gate"] == "G8_volatility_ceiling"]
+        assert "insufficient_samples" in reasons
+
+    def test_sufficient_samples_at_calm_reading_still_quotes(self, pilot_env,
+                                                              clock):
+        # Sanity check the fix isn't overly strict: calm + enough samples
+        # must still quote normally.
+        pilot, _client = self._pilot_with_multiplier(clock, 1.0)
+        assert pilot.refresh_market(TICKER)
+
+    def test_real_tracker_warm_up_blocks_quoting_by_default(self, pilot_env,
+                                                             clock):
+        """End-to-end with the REAL VolatilityTracker (production default
+        min_samples=5, not the test fixture's relaxed min_samples=1) —
+        a single book update is not enough samples to quote."""
+        client = FakeKalshiClient()
+        real_tracker = VolatilityTracker()  # production default min_samples
+        pilot = build_pilot(clock, client=client, vol=real_tracker)
+        assert pilot.refresh_market(TICKER) == []
 
 
 # ---------------------------------------------------------------------------
@@ -329,9 +380,10 @@ class TestConfigInvariants:
 
     def test_pilot_flag_default_is_false(self):
         # Default must stay false — activation is operator-gated (D1/D2).
+        # (CodeRabbit round-3: the previous `or` let this pass without ever
+        # checking cfg.MM_KALSHI_PILOT_ENABLED when the env var was unset.)
         cfg = live_config()
-        assert os.getenv("MM_KALSHI_PILOT_ENABLED") in (None, "", "false") or \
-            cfg.MM_KALSHI_PILOT_ENABLED is False
+        assert cfg.MM_KALSHI_PILOT_ENABLED is False
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +475,89 @@ class TestBookGates:
         placed = pilot.refresh_market(TICKER)
         purposes = {pilot._orders[oid]["purpose"] for oid in placed}
         assert "quote_bid" not in purposes
+
+    # -----------------------------------------------------------------
+    # Finding #6: G11 must fail closed (skip the side) when depth is
+    # completely UNKNOWN (best is None), not just when it's thin. The two
+    # tests above cover "thin but known" (a real tuple with small qty);
+    # this covers "no resting-order data at all for that side" — a book
+    # source that can report top-of-book without necessarily deriving both
+    # sides consistently (e.g. a WS-partial or genuinely one-sided book).
+    # Fail-before: _sized_count only applied the depth cap `if best is not
+    # None`, so a None best fell through to the UNBOUNDED
+    # `int(size_usd / price)` — the opposite of a depth cap.
+    # -----------------------------------------------------------------
+
+    def test_unknown_depth_on_one_side_skips_that_side_not_full_size(
+            self, pilot_env, clock, monkeypatch):
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 50.0)
+        client = FakeKalshiClient(
+            books={TICKER: make_book(yes_qty=500.0, no_qty=500.0)})
+        pilot = build_pilot(clock, client=client)
+        # Seed a normal two-sided book, then simulate the NO side's depth
+        # becoming unavailable independently of price/mid — the cached
+        # book dict is manipulated directly because the only way to reach
+        # this exact state through the public API (an empty no_dollars
+        # array) also zeroes `mid` and gets pulled earlier by G6, which
+        # would prove nothing about G11 specifically. Emptying
+        # client.books (same trick as test_stale_book_pulls_quotes) makes
+        # the next auto-refetch a no-op so the manual seed below survives,
+        # while `_client` stays real so live placement still works.
+        client.books = {}
+        with pilot._lock:
+            pilot._books[TICKER]["no_bid"] = None
+        placed = pilot.refresh_market(TICKER)
+        purposes = {pilot._orders[oid]["purpose"] for oid in placed}
+        # Our ask sizing reads book["no_bid"] as `best` — unknown depth
+        # there must skip the ask side, never fall through to full size.
+        assert "quote_ask" not in purposes
+        # The bid side (yes_bid depth still present) is unaffected.
+        bid_orders = [pilot._orders[oid] for oid in placed
+                      if pilot._orders[oid]["purpose"] == "quote_bid"]
+        assert bid_orders  # still quotes the side with known depth
+        assert bid_orders[0]["count"] <= int(0.25 * 500.0)
+
+    # -----------------------------------------------------------------
+    # Finding #7: book LEVELS staleness must be judged independently from
+    # mid/price staleness. A WS mid tick refreshes `updated_at` far more
+    # often than a REST book fetch refreshes actual resting-order levels;
+    # G11/G12 consume levels and must never treat them as fresh just
+    # because a WS price tick looked fresh.
+    # Fail-before: only one `updated_at` timestamp existed, refreshed by
+    # BOTH update_book (REST, carries levels) and on_ws_price (WS, mid
+    # only) — a live WS feed with a dead REST book poller would read as
+    # "fresh" forever while G11/G12 quietly sized off ancient levels.
+    # -----------------------------------------------------------------
+
+    def test_ws_price_tick_does_not_paper_over_stale_levels(self, pilot_env,
+                                                             clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        # One real REST fetch seeds levels_updated_at at clock[0].
+        pilot.refresh_market(TICKER)
+        # REST book feed dies (mirrors test_stale_book_pulls_quotes), but a
+        # WS price tick keeps arriving and refreshing `updated_at`/mid.
+        client.books = {}
+        clock[0] += 31  # past MM_BOOK_MAX_STALE_SECONDS for LEVELS
+        pilot.on_ws_price(TICKER, 0.50)
+        # G6 (mid staleness) alone would now read "fresh" (WS just ticked);
+        # G6b (levels staleness) must still fail closed and pull.
+        assert pilot.refresh_market(TICKER) == []
+        assert oid in client.cancelled
+        reasons = [d["reason"] for d in pilot._decisions
+                  if d["gate"] == "G6b_book_levels_staleness"]
+        assert "book_levels_stale" in reasons
+
+    def test_rest_fetch_refreshes_both_mid_and_levels(self, pilot_env, clock):
+        """Sanity check: a normal REST-only flow (no WS at all) is
+        unaffected by the new gate — levels_updated_at tracks updated_at."""
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        assert pilot.refresh_market(TICKER)  # quotes normally
+        book = pilot._book(TICKER)
+        assert book["levels_updated_at"] == pytest.approx(book["updated_at"])
 
     def test_deselected_market_gracefully_exits(self, pilot_env, clock):
         client = FakeKalshiClient()

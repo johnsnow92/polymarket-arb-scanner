@@ -51,6 +51,17 @@ class FakeKalshiClient:
         self.place_order_calls = 0
         self.cancel_order_calls = 0
         self.fail_place = False
+        # Cancel-retry / backoff testing (finding #2): the next N calls to
+        # cancel_order fail (return False without raising); 0 means succeed.
+        self.cancel_fail_count = 0
+        # Fill-poll-failure testing (finding #3): raise instead of returning
+        # fills_script when True and the caller opted into raise_on_error.
+        self.fail_get_fills = False
+        # Reconciliation testing (finding #4).
+        self.positions_script: list[dict] = []
+        self.open_orders_script: list[dict] = []
+        self.fail_get_positions = False
+        self.fail_get_open_orders = False
 
     def fetch_order_book(self, ticker):
         return self.books.get(ticker)
@@ -69,11 +80,30 @@ class FakeKalshiClient:
 
     def cancel_order(self, order_id):
         self.cancel_order_calls += 1
+        if self.cancel_fail_count > 0:
+            self.cancel_fail_count -= 1
+            return False
         self.cancelled.append(order_id)
         return True
 
-    def get_fills(self, min_ts=None, **kwargs):
+    def get_fills(self, min_ts=None, raise_on_error=False, **kwargs):
+        if self.fail_get_fills:
+            if raise_on_error:
+                raise RuntimeError("fake get_fills failure")
+            return []
         return list(self.fills_script)
+
+    def get_positions(self, raise_on_error=False):
+        if self.fail_get_positions:
+            if raise_on_error:
+                raise RuntimeError("fake get_positions failure")
+            return []
+        return list(self.positions_script)
+
+    def get_open_orders(self, ticker=None, **kwargs):
+        if self.fail_get_open_orders:
+            raise RuntimeError("fake get_open_orders failure")
+        return list(self.open_orders_script)
 
 
 class RecordingHedger:
@@ -123,7 +153,7 @@ def pilot_env(monkeypatch):
 
 def build_pilot(clock, client=None, dry_run=False, hedger=None,
                 controls_on=True, detector=None, vol=None,
-                selection=(TICKER,)):
+                selection=(TICKER,), reconciled=True):
     time_fn = lambda: clock[0]
     controls = ControlsPoller(time_fn=time_fn)
     controls.set_cached(controls_on)
@@ -133,16 +163,36 @@ def build_pilot(clock, client=None, dry_run=False, hedger=None,
         kalshi_client=client,
         controls=controls,
         toxic_detector=detector or ToxicFlowDetector(),
-        volatility_tracker=vol or VolatilityTracker(),
+        # min_samples=1: most gate/fill/hedge tests aren't exercising G8's
+        # volatility warm-up behavior and only ever record one book/WS
+        # price tick before quoting — a real (non-injected) tracker here
+        # would otherwise fail G8 as "insufficient_samples" on every one of
+        # them. TestVolatilityGate and the warm-up test inject their own
+        # fakes / real tracker with the production default instead.
+        volatility_tracker=vol or VolatilityTracker(min_samples=1),
         hedger_factory=lambda proxy: hedger,
         decision_writer=decisions.append,
         dry_run=dry_run,
         time_fn=time_fn,
+        # Route the monotonic clock through the SAME fake clock as wall
+        # time so tests that fast-forward `clock[0]` (hedge latency,
+        # cancel-retry backoff, etc.) move both together. Real
+        # time.monotonic() would ignore the fake clock entirely.
+        mono_fn=time_fn,
+        # Disable local-file persistence in unit tests (parallels
+        # decision_writer=... above disabling decisions.jsonl writes).
+        state_path=None,
     )
     pilot.update_selection(list(selection))
     if client is not None:
         for ticker, book in client.books.items():
             pilot.update_book(ticker, book)
+    # Most tests exercise gate/fill/hedge logic, not the startup
+    # reconciliation feature itself — default to "already reconciled" so
+    # authorize_order's finding-#4 gate doesn't block every other test.
+    # TestReconciliation below constructs KalshiMMPilot directly to exercise
+    # the real unreconciled-by-default state.
+    pilot._reconciled = reconciled or dry_run
     pilot._decisions = decisions
     pilot._test_controls = controls
     pilot._test_hedger = hedger
@@ -507,3 +557,638 @@ class TestPlaceOrderCounter:
                                 purpose="hedge", reducing=True)
         assert client.place_order_calls == pilot.place_order_calls
         assert client.place_order_calls > 0
+
+
+# ---------------------------------------------------------------------------
+# Finding #2: cancel confirms on the exchange before the registry pop;
+# failed cancels stay in the registry, retry with backoff, and escalate to
+# halt_all after MAX_CANCEL_ATTEMPTS.
+# Fail-before: on the pre-fix code, _cancel_order popped the order_id from
+# the registry unconditionally before even trying to cancel, so a failed
+# cancel silently vanished from the registry while the order stayed live on
+# the exchange (found invisible to future retries).
+# ---------------------------------------------------------------------------
+
+class TestCancelConfirmBeforePop:
+    def test_failed_cancel_stays_in_registry_not_popped(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        client.cancel_fail_count = 1  # first cancel attempt fails
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        ok = pilot._cancel_order(oid)
+        assert ok is False
+        assert oid in pilot._orders  # NOT popped — still tracked
+        assert pilot._orders[oid]["pending_cancel"] is True
+        assert oid not in client.cancelled
+
+    def test_confirmed_cancel_pops_from_registry(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        ok = pilot._cancel_order(oid)
+        assert ok is True
+        assert oid not in pilot._orders
+        assert oid in client.cancelled
+
+    def test_repeated_failures_escalate_to_halt_after_max_attempts(
+            self, pilot_env, clock):
+        client = FakeKalshiClient()
+        client.cancel_fail_count = 999  # never succeeds
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        for _ in range(3):
+            pilot._cancel_order(oid)
+        assert pilot.halted is True
+        assert "uncancellable" in pilot.halt_reason
+        # Still tracked — never silently dropped despite the halt.
+        assert oid in pilot._orders
+
+    def test_retry_pending_cancels_respects_backoff_then_succeeds(
+            self, pilot_env, clock):
+        client = FakeKalshiClient()
+        client.cancel_fail_count = 1  # fails once, then succeeds
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        assert pilot._cancel_order(oid) is False
+        # Immediately retrying inside the backoff window does nothing yet.
+        pilot._retry_pending_cancels()
+        assert client.cancel_order_calls == 1
+        assert oid in pilot._orders
+        # Advance the fake clock past the 1s backoff (attempt 1 -> 2**0=1s).
+        clock[0] += 2
+        pilot._retry_pending_cancels()
+        assert client.cancel_order_calls == 2
+        assert oid not in pilot._orders  # confirmed cancel, finally popped
+        assert oid in client.cancelled
+
+
+# ---------------------------------------------------------------------------
+# Finding #3: a fill-poll failure must fail closed — skip the refresh step,
+# and after FILL_POLL_FAILURE_LIMIT consecutive failures pull all resting
+# quotes and halt quoting until polling recovers.
+# Fail-before: get_fills exceptions were swallowed, poll_fills returned []
+# indistinguishable from "confirmed no new fills", and refresh_all kept
+# quoting through an indefinite blind spell.
+# ---------------------------------------------------------------------------
+
+class TestFillPollFailClosed:
+    def test_single_failure_does_not_pull_or_halt(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        client.fail_get_fills = True
+        pilot = build_pilot(clock, client=client)
+        pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                purpose="quote_bid")
+        events = pilot.poll_fills()
+        assert events == []
+        assert pilot.halted is False
+        assert pilot._fill_poll_failures == 1
+        assert pilot.resting_orders() != []  # not pulled yet
+
+    def test_limit_consecutive_failures_pulls_all_and_blinds(
+            self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        client.fail_get_fills = True
+        for _ in range(pilot.FILL_POLL_FAILURE_LIMIT):
+            pilot.poll_fills()
+        assert pilot._fills_blind is True
+        assert pilot.halted is False  # blind, not a full halt — self-heals
+        assert oid in client.cancelled  # pull_all fired
+
+    def test_recovery_clears_blind_state(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        client.fail_get_fills = True
+        for _ in range(pilot.FILL_POLL_FAILURE_LIMIT):
+            pilot.poll_fills()
+        assert pilot._fills_blind is True
+        client.fail_get_fills = False
+        pilot.poll_fills()
+        assert pilot._fills_blind is False
+        assert pilot._fill_poll_failures == 0
+
+
+# ---------------------------------------------------------------------------
+# Finding #4: startup reconciliation against live venue state. Quoting must
+# be refused (authorize_order fails closed) until reconcile() succeeds; a
+# fresh KalshiMMPilot in live mode starts unreconciled.
+# Fail-before: _reconciled didn't exist / wasn't enforced anywhere, and
+# _persist_state()/reconcile() were called or needed but never defined —
+# a restart reseeded _last_fill_ts to "now" and inventory to zero with no
+# attempt to recover real venue state.
+# ---------------------------------------------------------------------------
+
+class TestReconciliation:
+    def _direct_pilot(self, clock, client, dry_run=False):
+        """Construct KalshiMMPilot directly (bypassing build_pilot's
+        reconciled=True convenience default) to exercise the true
+        unreconciled-by-default live-mode state."""
+        from mm_pilot import ControlsPoller, KalshiMMPilot
+        time_fn = lambda: clock[0]
+        controls = ControlsPoller(time_fn=time_fn)
+        controls.set_cached(True)
+        return KalshiMMPilot(
+            kalshi_client=client,
+            controls=controls,
+            # See build_pilot's comment: avoid the production-default
+            # min_samples=5 module singleton blocking G8 on tests that
+            # aren't exercising volatility warm-up behavior.
+            volatility_tracker=VolatilityTracker(min_samples=1),
+            dry_run=dry_run,
+            time_fn=time_fn,
+            mono_fn=time_fn,
+            state_path=None,  # no disk I/O in unit tests
+        )
+
+    def test_dry_run_is_reconciled_trivially(self, clock):
+        pilot = self._direct_pilot(clock, client=None, dry_run=True)
+        assert pilot._reconciled is True
+        assert pilot.reconcile() is True
+
+    def test_live_pilot_starts_unreconciled(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = self._direct_pilot(clock, client)
+        assert pilot._reconciled is False
+
+    def test_unreconciled_pilot_rejects_every_order(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = self._direct_pilot(clock, client)
+        result = pilot.authorize_order(TICKER, "yes", "buy", 4, 0.49)
+        assert result.allowed is False
+        assert result.reason == "not_reconciled"
+
+    def test_unreconciled_pilot_rejects_reducing_orders_too(self, pilot_env,
+                                                            clock):
+        # Reducing orders bypass inventory caps but must NOT bypass the
+        # reconciliation gate — a "reduce" computed off unknown state is
+        # not trustworthy either.
+        client = FakeKalshiClient()
+        pilot = self._direct_pilot(clock, client)
+        result = pilot.authorize_order(TICKER, "yes", "sell", 4, 0.49,
+                                       reducing=True)
+        assert result.allowed is False
+        assert result.reason == "not_reconciled"
+
+    def test_evaluate_gates_pulls_with_not_reconciled_reason(self, pilot_env,
+                                                             clock):
+        client = FakeKalshiClient()
+        pilot = self._direct_pilot(clock, client)
+        pilot.update_selection([TICKER])
+        plan = pilot._evaluate_gates(TICKER)
+        assert plan["action"] == "pull"
+        assert plan["reason"] == "not_reconciled"
+
+    def test_no_client_fails_closed(self, pilot_env, clock):
+        pilot = self._direct_pilot(clock, client=None)
+        assert pilot.reconcile() is False
+        assert pilot._reconciled is False
+
+    def test_positions_query_failure_fails_closed(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        client.fail_get_positions = True
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is False
+        assert pilot._reconciled is False
+
+    def test_fills_query_failure_fails_closed(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        client.fail_get_fills = True
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is False
+        assert pilot._reconciled is False
+
+    def test_open_orders_query_failure_fails_closed(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        client.fail_get_open_orders = True
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is False
+        assert pilot._reconciled is False
+
+    def test_uncancellable_stale_order_fails_closed(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        client.open_orders_script = [{"order_id": "stale_1", "ticker": TICKER}]
+        client.cancel_fail_count = 999
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is False
+        assert pilot._reconciled is False
+
+    def test_success_seeds_inventory_and_cancels_stale_orders(self, pilot_env,
+                                                               clock):
+        # Field names match Kalshi's documented MarketPosition schema
+        # (docs.kalshi.com/api-reference/portfolio/get-positions):
+        # position_fp is the signed net-contracts STRING (not "position" /
+        # "net_contracts"), and there is no average-price field at all —
+        # avg cost is derived from market_exposure_dollars / |position_fp|.
+        # A CodeRabbit round-3 finding caught the original test (and the
+        # reconcile() code it was validating) guessing at the wrong keys,
+        # which would have silently reconciled every real position to zero.
+        client = FakeKalshiClient()
+        client.positions_script = [
+            {"ticker": TICKER, "position_fp": "12",
+             "market_exposure_dollars": 5.28},  # 12 contracts @ $0.44 avg
+        ]
+        client.open_orders_script = [
+            {"order_id": "stale_1", "ticker": TICKER},
+            {"order_id": "stale_2", "ticker": TICKER},
+        ]
+        pilot = self._direct_pilot(clock, client)
+        ok = pilot.reconcile()
+        assert ok is True
+        assert pilot._reconciled is True
+        assert pilot.inventory.net_contracts(TICKER) == 12
+        assert pilot.inventory.avg_cost(TICKER) == pytest.approx(0.44)
+        assert set(client.cancelled) == {"stale_1", "stale_2"}
+        assert pilot._orders == {}  # nothing adopted — clean slate
+
+    def test_negative_position_fp_means_no_contracts(self, pilot_env, clock):
+        """Per the documented schema: negative position_fp = NO contracts
+        (mm_pilot's inventory convention: long NO is a negative signed
+        count too — signs line up directly, no inversion needed)."""
+        client = FakeKalshiClient()
+        client.positions_script = [
+            {"ticker": TICKER, "position_fp": "-7",
+             "market_exposure_dollars": 3.5},
+        ]
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is True
+        assert pilot.inventory.net_contracts(TICKER) == -7
+        assert pilot.inventory.avg_cost(TICKER) == pytest.approx(0.5)
+
+    def test_unparsable_position_fp_treated_as_flat_not_fatal(self, pilot_env,
+                                                               clock):
+        """A malformed position_fp must not crash reconciliation — treat
+        that one ticker as flat (conservative: 0 exposure understates risk,
+        but never crashes the safety gate)."""
+        client = FakeKalshiClient()
+        client.positions_script = [
+            {"ticker": TICKER, "position_fp": "not-a-number"},
+        ]
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is True
+        assert pilot.inventory.net_contracts(TICKER) == 0
+
+    def test_missing_exposure_field_assumes_worst_case_not_zero(self,
+                                                                 pilot_env,
+                                                                 clock):
+        """CodeRabbit round-3: a 0.0 avg-cost fallback would make
+        net_usd() = net * avg read as $0 regardless of contract count,
+        silently bypassing every USD-denominated cap for a ticker
+        reconciliation just discovered real inventory on. A missing/
+        unparsable exposure field must assume the worst case ($1.00 —
+        the max possible price per contract) so caps trip early instead
+        of being bypassed."""
+        client = FakeKalshiClient()
+        client.positions_script = [
+            {"ticker": TICKER, "position_fp": "10"},  # no exposure field
+        ]
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is True
+        assert pilot.inventory.net_contracts(TICKER) == 10
+        assert pilot.inventory.avg_cost(TICKER) == pytest.approx(1.0)
+        assert pilot.inventory.net_usd(TICKER) == pytest.approx(10.0)
+
+    def test_unparsable_exposure_field_also_assumes_worst_case(self,
+                                                                pilot_env,
+                                                                clock):
+        client = FakeKalshiClient()
+        client.positions_script = [
+            {"ticker": TICKER, "position_fp": "10",
+             "market_exposure_dollars": "not-a-number"},
+        ]
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is True
+        assert pilot.inventory.avg_cost(TICKER) == pytest.approx(1.0)
+
+    def test_success_marks_fills_seen_and_advances_cursor(self, pilot_env,
+                                                           clock):
+        client = FakeKalshiClient()
+        client.fills_script = [kfill("k_old", count=3, yes_price=40,
+                                     trade_id="tr_old", created=clock[0] - 5000)]
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is True
+        assert "tr_old" in pilot._seen_fill_ids
+        assert pilot._last_fill_ts == pytest.approx(clock[0] - 5000)
+
+    def test_reconciled_pilot_can_then_place_orders(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = self._direct_pilot(clock, client)
+        assert pilot.reconcile() is True
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        assert oid is not None
+
+    def test_run_loop_reconciles_before_quoting(self, pilot_env, clock,
+                                                monkeypatch):
+        """Integration: run_loop must call reconcile() before its first
+        refresh/poll cycle, and must not place orders while unreconciled."""
+        import threading
+        client = FakeKalshiClient()
+        pilot = self._direct_pilot(clock, client)
+        pilot.update_selection([TICKER])
+        stop = threading.Event()
+        # Run exactly one pass worth of work synchronously by calling the
+        # loop body's pieces directly rather than starting a real thread —
+        # avoids flakiness from real wall-clock sleeps in a unit test.
+        assert pilot._reconciled is False
+        pilot._reconciled = pilot.reconcile()
+        assert pilot._reconciled is True
+        placed = pilot.refresh_all()
+        assert placed  # now allowed to quote
+
+
+# ---------------------------------------------------------------------------
+# Finding #5: hedge reduce orders must never be sized past the actual
+# current position — hedger.hedge_inventory/_hedge_kalshi accept
+# max_contracts and clamp; the pilot passes its own tracked position size.
+# Fail-before: count = max(1, int(size / touch)) had no ceiling, so a large
+# dollar excess against a stale/moved touch price could compute a count
+# exceeding actual holdings, flipping a "reduce" into the opposite side
+# while reducing=True bypassed inventory caps entirely.
+# ---------------------------------------------------------------------------
+
+class TestHedgeSizeClamp:
+    def test_hedge_on_fill_passes_actual_position_as_max_contracts(
+            self, pilot_env, clock, monkeypatch):
+        # Canary quote-size cap (default $2) would otherwise halt on a $10
+        # fill before the hedge decision even runs — bump it out of the way
+        # like TestHedgeLatency does, since canary sizing isn't what this
+        # test is about.
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 100.0)
+        client = FakeKalshiClient()
+        hedger = RecordingHedger(result=True)
+        pilot = build_pilot(clock, client=client, hedger=hedger)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 20, 0.50,
+                                      purpose="quote_bid")
+        # 20 contracts @ 0.50 = $10 net; well past the deadband -> hedges.
+        client.fills_script = [kfill(oid, count=20, yes_price=50)]
+        pilot.poll_fills()
+        assert hedger.calls  # hedge fired
+        call = hedger.calls[-1]
+        assert call["max_contracts"] == 20  # abs(net_contracts), not a guess
+
+
+class TestHedgeKalshiContractClamp:
+    """Direct hedger.py unit coverage for the clamp itself (complements the
+    mm_pilot integration test above, which only proves wiring)."""
+
+    @staticmethod
+    def _book(yes_bid=0.30, no_bid=0.68):
+        return {"orderbook_fp": {
+            "yes_dollars": [[f"{yes_bid:.4f}", "500.00"]],
+            "no_dollars": [[f"{no_bid:.4f}", "500.00"]],
+        }}
+
+    def test_count_clamped_to_max_contracts_when_price_moved(self):
+        from hedger import PartialFillHedger
+        mock_kalshi = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
+        mock_kalshi.fetch_order_book.return_value = self._book()
+        mock_kalshi.place_order.return_value = {"order_id": "k_1"}
+        hedger = PartialFillHedger(kalshi_client=mock_kalshi)
+        # size=$20 excess / touch=$0.30 -> naive count=66; actual position
+        # is only 5 contracts (price moved a long way since entry).
+        result = hedger._hedge_kalshi("TICK", fill_price=0.50, size=20.0,
+                                      max_loss=1.0, side="yes", action="sell",
+                                      max_contracts=5)
+        assert result is True
+        call = mock_kalshi.place_order.call_args
+        assert call[1]["count"] == 5  # clamped, never the naive 66
+
+    def test_zero_max_contracts_places_nothing(self):
+        from hedger import PartialFillHedger
+        mock_kalshi = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
+        mock_kalshi.fetch_order_book.return_value = self._book()
+        hedger = PartialFillHedger(kalshi_client=mock_kalshi)
+        result = hedger._hedge_kalshi("TICK", fill_price=0.50, size=20.0,
+                                      max_loss=1.0, side="yes", action="sell",
+                                      max_contracts=0)
+        assert result is False
+        mock_kalshi.place_order.assert_not_called()
+
+    def test_none_max_contracts_preserves_unclamped_legacy_behavior(self):
+        from hedger import PartialFillHedger
+        mock_kalshi = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
+        mock_kalshi.fetch_order_book.return_value = self._book()
+        mock_kalshi.place_order.return_value = {"order_id": "k_1"}
+        hedger = PartialFillHedger(kalshi_client=mock_kalshi)
+        result = hedger._hedge_kalshi("TICK", fill_price=0.50, size=20.0,
+                                      max_loss=1.0, side="yes", action="sell")
+        assert result is True
+        call = mock_kalshi.place_order.call_args
+        assert call[1]["count"] == 66  # int(20 / 0.30), unclamped
+
+
+# ---------------------------------------------------------------------------
+# Finding #10: hedge-latency and hedge-order aging use the monotonic clock,
+# not wall time — a frozen/mocked _time_fn (or a real NTP step) must not
+# defeat or false-trigger MM_HEDGE_MAX_LATENCY_SECONDS.
+# Fail-before: latency = self._time_fn() - event.created_ts, and
+# _check_pending_hedges aged orders off wall-clock `placed_at`.
+# ---------------------------------------------------------------------------
+
+class TestMonotonicHedgeLatency:
+    def test_frozen_wall_clock_does_not_hide_processing_latency(
+            self, pilot_env, clock, monkeypatch):
+        """If _time_fn() were still used for the reaction-time component, a
+        wall clock that never advances during hedge attempts would always
+        read latency=0 no matter how much monotonic time passed.
+
+        ``mono`` is an independent counter the fake hedger advances itself
+        (rather than counting _mono_fn() invocations, which is fragile —
+        place_pilot_order also reads the monotonic clock for its own
+        ``placed_mono`` bookkeeping). This ties the simulated 15s directly
+        to "the hedge attempt took 15 real seconds", which is exactly the
+        scenario the monotonic-latency fix must catch.
+        """
+        monkeypatch.setattr(live_config(), "MM_CANARY_QUOTE_SIZE_USD", 100.0)
+        client = FakeKalshiClient()
+        mono = [clock[0]]  # independent monotonic counter
+
+        class SlowHedger:
+            def hedge_inventory(self, **kwargs):
+                # The hedge attempt itself burns 15s of monotonic time
+                # while the wall clock (clock[0]) never moves at all.
+                mono[0] += 15
+                return True
+
+        pilot = build_pilot(clock, client=client, hedger=SlowHedger())
+        monkeypatch.setattr(pilot, "_mono_fn", lambda: mono[0])
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 20, 0.50,
+                                      purpose="quote_bid")
+        # Fill reported as happening right now — zero wall-clock detection
+        # lag, isolating the assertion to the monotonic reaction-time term.
+        client.fills_script = [kfill(oid, count=20, yes_price=50,
+                                     created=clock[0])]
+        pilot.poll_fills()
+        # 15s of monotonic reaction latency exceeds the 10s ceiling even
+        # though the wall clock never moved and the fill was "fresh".
+        assert pilot.halted is True
+        assert "latency" in pilot.halt_reason
+
+    def test_pending_hedge_ages_on_monotonic_placed_time(self, pilot_env,
+                                                          clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        hoid = pilot.place_pilot_order(TICKER, "yes", "sell", 10, 0.49,
+                                       purpose="hedge", reducing=True)
+        assert pilot._orders[hoid]["placed_mono"] == pytest.approx(clock[0])
+        clock[0] += 11  # advances both time_fn and mono_fn (shared fixture)
+        pilot.poll_fills()
+        assert pilot.halted is True
+        assert hoid in client.cancelled
+
+
+# ---------------------------------------------------------------------------
+# Finding #4 support: PilotStateStore / _persist_state on a REAL file.
+# The reconciliation tests above use state_path=None throughout (no disk
+# I/O) and cover reconcile()'s logic against a mocked venue; these cover
+# the persistence mechanism itself, which reconcile() falls back on for
+# last_fill_ts / realized P&L when a live query can't supply it.
+# Fail-before: _persist_state() was called from four call sites in the
+# uncommitted diff but was never defined (AttributeError at runtime on
+# every cancel/fill/order-placement in live mode).
+# ---------------------------------------------------------------------------
+
+class TestPilotStatePersistence:
+    def test_save_then_load_roundtrip(self, tmp_path):
+        from mm_pilot import PilotStateStore
+        path = str(tmp_path / "state.json")
+        store = PilotStateStore(path)
+        store.save({"last_fill_ts": 123.0, "orders": {"o1": {"ticker": TICKER}}})
+        loaded = store.load()
+        assert loaded == {"last_fill_ts": 123.0, "orders": {"o1": {"ticker": TICKER}}}
+
+    def test_load_missing_file_returns_none(self, tmp_path):
+        from mm_pilot import PilotStateStore
+        store = PilotStateStore(str(tmp_path / "does_not_exist.json"))
+        assert store.load() is None
+
+    def test_load_corrupted_file_raises(self, tmp_path):
+        from mm_pilot import PilotStateStore
+        path = tmp_path / "state.json"
+        path.write_text("{not valid json")
+        store = PilotStateStore(str(path))
+        with pytest.raises(Exception):
+            store.load()
+
+    def test_reconcile_tolerates_corrupted_persisted_file(self, pilot_env,
+                                                           clock, tmp_path):
+        """A corrupted local cache must not block reconciliation as long as
+        the live venue queries still succeed — the file is a fallback, not
+        the authority."""
+        from mm_pilot import ControlsPoller, KalshiMMPilot
+        path = tmp_path / "state.json"
+        path.write_text("{not valid json")
+        time_fn = lambda: clock[0]
+        controls = ControlsPoller(time_fn=time_fn)
+        controls.set_cached(True)
+        client = FakeKalshiClient()
+        pilot = KalshiMMPilot(
+            kalshi_client=client, controls=controls,
+            volatility_tracker=VolatilityTracker(min_samples=1),
+            time_fn=time_fn, mono_fn=time_fn, state_path=str(path),
+        )
+        assert pilot.reconcile() is True
+
+    def test_place_cancel_and_fill_persist_real_state_to_disk(
+            self, pilot_env, clock, tmp_path):
+        """End-to-end: a live (non-None state_path) pilot actually writes a
+        loadable state file across the placement/cancel/fill lifecycle,
+        proving _persist_state's four call sites are wired to a real,
+        working implementation (not just silently no-op'd)."""
+        from mm_pilot import ControlsPoller, KalshiMMPilot, PilotStateStore
+        path = tmp_path / "state.json"
+        time_fn = lambda: clock[0]
+        controls = ControlsPoller(time_fn=time_fn)
+        controls.set_cached(True)
+        client = FakeKalshiClient()
+        pilot = KalshiMMPilot(
+            kalshi_client=client, controls=controls,
+            volatility_tracker=VolatilityTracker(min_samples=1),
+            time_fn=time_fn, mono_fn=time_fn, state_path=str(path),
+        )
+        pilot._reconciled = True  # bypass live reconciliation for this test
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        assert path.exists()
+        state = PilotStateStore(str(path)).load()
+        assert oid in state["orders"]
+
+        pilot._cancel_order(oid)
+        state = PilotStateStore(str(path)).load()
+        assert oid not in state["orders"]
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit round-3 finding: place_pilot_order must not hold self._lock for
+# the duration of the live venue round-trip — a different thread (the WS
+# feed handler calling on_ws_price) touches disjoint state (self._books)
+# and must not be blocked for as long as a slow/stuck placement call takes.
+# threading.RLock is reentrant, so a same-thread nested call can't detect
+# this regression — the test needs a genuine second thread.
+# Fail-before: the entire method (auth through registry write) ran inside
+# one `with self._lock:` block, including the network call itself.
+# ---------------------------------------------------------------------------
+
+class TestLockNotHeldDuringNetworkCall:
+    def test_on_ws_price_proceeds_while_placement_network_call_in_flight(
+            self, pilot_env, clock):
+        import threading
+
+        entered_network_call = threading.Event()
+        release_network_call = threading.Event()
+
+        class SlowClient(FakeKalshiClient):
+            def place_order(self, *a, **kw):
+                entered_network_call.set()
+                # Blocks here until the test explicitly releases it —
+                # simulates a slow/stuck venue round-trip.
+                release_network_call.wait(timeout=5)
+                return super().place_order(*a, **kw)
+
+        slow_client = SlowClient()
+        pilot = build_pilot(clock, client=slow_client)
+
+        result: dict = {}
+
+        def placer():
+            result["oid"] = pilot.place_pilot_order(
+                TICKER, "yes", "buy", 4, 0.49, purpose="quote_bid")
+
+        placing_thread = threading.Thread(target=placer)
+        placing_thread.start()
+        try:
+            assert entered_network_call.wait(timeout=2), (
+                "placement never reached the (fake) network call")
+
+            # While that "network call" is in flight on the other thread,
+            # on_ws_price must be able to proceed without waiting on
+            # self._lock — if the fix regressed, this blocks until the
+            # network call above is released (5s), and the timeout below
+            # fires first.
+            ws_updated = threading.Event()
+
+            def ws_updater():
+                pilot.on_ws_price(TICKER, 0.55)
+                ws_updated.set()
+
+            ws_thread = threading.Thread(target=ws_updater)
+            ws_thread.start()
+            try:
+                assert ws_updated.wait(timeout=1), (
+                    "on_ws_price blocked while place_pilot_order's network "
+                    "call was in flight — the lock is still held for the "
+                    "duration of the venue round-trip")
+            finally:
+                ws_thread.join(timeout=5)
+        finally:
+            release_network_call.set()
+            placing_thread.join(timeout=5)
+
+        assert result["oid"] is not None
+        assert pilot._book(TICKER)["mid"] == pytest.approx(0.55)

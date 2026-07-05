@@ -119,7 +119,8 @@ class PartialFillHedger:
             elif platform == "kalshi":
                 return self._hedge_kalshi(token_id, fill_price, size, max_loss,
                                           pf.get("side", "yes"),
-                                          action=pf.get("_reduce_action", "sell"))
+                                          action=pf.get("_reduce_action", "sell"),
+                                          max_contracts=pf.get("_max_contracts"))
             elif platform == "betfair":
                 return self._hedge_betfair(pf, fill_price, size, max_loss)
             elif platform == "smarkets":
@@ -157,7 +158,8 @@ class PartialFillHedger:
         return bool(resp and resp.get("success"))
 
     def _hedge_kalshi(self, ticker: str, fill_price: float, size: float, max_loss: float,
-                      side: str, action: str = "sell") -> bool:
+                      side: str, action: str = "sell",
+                      max_contracts: int | None = None) -> bool:
         """Reduce a Kalshi position at the current touch.
 
         ``action="sell"`` (default, original behavior) sells an over-long
@@ -165,8 +167,25 @@ class PartialFillHedger:
         over-short position at the best ask on ``side`` (plan 10: the
         buy-to-reduce direction — the ask is derived from the opposite side's
         best bid since Kalshi orderbooks are bids-only).
+
+        Args:
+            max_contracts: Hard ceiling on the contract count, independent
+                of the dollars/touch sizing math below. ``size`` is a DOLLAR
+                excess computed against the entry/reference price, while
+                ``touch`` is the CURRENT best bid/ask — if price has moved
+                since entry, ``size / touch`` can compute a count that
+                EXCEEDS actual holdings, turning a reduce into a flip to the
+                opposite side. When provided (the MM pilot always provides
+                its own inventory-tracked position size here), the count is
+                clamped so a reduce/hedge order can never be sized to exceed
+                the position it is reducing. ``max_contracts <= 0`` means
+                there is nothing left to reduce — no order is placed.
         """
         if not self.kalshi_client:
+            return False
+        if max_contracts is not None and max_contracts <= 0:
+            logger.info("Kalshi hedge: max_contracts=%s — nothing to reduce, "
+                       "skipping %s %s on %s", max_contracts, action, side, ticker)
             return False
         book = self.kalshi_client.fetch_order_book(ticker)
         if not book:
@@ -193,6 +212,12 @@ class PartialFillHedger:
         if loss > max_loss:
             return False
         count = max(1, int(size / touch)) if touch > 0 else 1
+        if max_contracts is not None and count > max_contracts:
+            logger.info("Kalshi hedge: clamping reduce count %d -> %d "
+                       "(actual position size) on %s — price moved since "
+                       "entry, dollars/touch sizing overshot", count,
+                       max_contracts, ticker)
+            count = max_contracts
         resp = self.kalshi_client.place_order(ticker=ticker, side=side, action=action,
                                                count=count, price_dollars=touch)
         return resp is not None
@@ -310,6 +335,7 @@ class PartialFillHedger:
         fill_price: float,
         size: float,
         token_id: str = "",
+        max_contracts: int | None = None,
         **identifiers,
     ) -> bool:
         """Hedge an MM inventory imbalance by selling at current best bid.
@@ -326,6 +352,13 @@ class PartialFillHedger:
             fill_price: Price the inventory was acquired at.
             size: Size of the imbalance to hedge in dollars.
             token_id: Polymarket / Gemini token symbol (if applicable).
+            max_contracts: Kalshi only — hard ceiling on the reduce order's
+                contract count, sourced from the caller's own authoritative
+                inventory tracker (not recomputed from dollars/price here).
+                Prevents a reduce order from being sized past the position
+                it is reducing when price has moved since entry (see
+                ``_hedge_kalshi``). ``None`` leaves the count unclamped
+                (non-pilot / non-Kalshi callers).
             **identifiers: Extra platform-specific keys forwarded to ``pf``
                 (``market_id``, ``selection_id``, ``contract_id``,
                 ``market_hash``, ``runner_id``, ``outcome_id``, ``symbol``).
@@ -349,6 +382,7 @@ class PartialFillHedger:
             # Plan 10: "sell" reduces an over-long position at the bid;
             # "buy" reduces an over-short position at the ask (Kalshi only).
             "_reduce_action": identifiers.get("reduce_action", "sell"),
+            "_max_contracts": max_contracts,
         }
         success = self._attempt_hedge(pf)
         logger.info(

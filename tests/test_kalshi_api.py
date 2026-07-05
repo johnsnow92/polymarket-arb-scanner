@@ -330,6 +330,104 @@ class TestKalshiOrders:
         client.session.request.return_value = _mock_response(500)
         assert client.get_positions() == []
 
+    @patch("kalshi_api._rate_limit")
+    def test_get_positions_raises_on_error_when_opted_in(self, mock_rl, client):
+        """Finding #4 support: raise_on_error=True must not silently return
+        [] on failure — a bare [] is indistinguishable from confirmed-flat
+        to the MM pilot's startup reconciliation gate."""
+        from kalshi_api import KalshiPortfolioQueryError
+        client.session.request.return_value = _mock_response(500)
+        with pytest.raises(KalshiPortfolioQueryError):
+            client.get_positions(raise_on_error=True)
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_positions_success_with_raise_on_error_true(self, mock_rl, client):
+        """raise_on_error=True must not change the success path."""
+        positions = [{"ticker": "T1", "position": 10}]
+        client.session.request.return_value = _mock_response(200, {"market_positions": positions})
+        assert client.get_positions(raise_on_error=True) == positions
+
+
+# ---------------------------------------------------------------------------
+# Finding #3 / #4: get_fills / get_open_orders raise_on_error contract.
+# Fail-before: get_fills had no raise_on_error parameter at all (mm_pilot's
+# poll_fills / reconcile calling it with raise_on_error=True would hit a
+# TypeError), and a page-fetch failure was always silently swallowed into
+# whatever fills had been accumulated so far — ambiguous partial vs. empty.
+# get_open_orders did not exist at all.
+# ---------------------------------------------------------------------------
+
+class TestKalshiPortfolioQueryRaiseOnError:
+    @patch("kalshi_api._rate_limit")
+    def test_get_fills_default_preserves_silent_partial_return(self, mock_rl, client):
+        """Default raise_on_error=False must be byte-for-byte the original
+        behavior for existing callers (kalshi_vip.py) — partial results on
+        a mid-pagination failure, no exception."""
+        page1 = _mock_response(200, {"fills": [{"trade_id": "t1"}], "cursor": "abc"})
+        page2 = _mock_response(500)
+        client.session.request.side_effect = [page1, page2]
+        result = client.get_fills()
+        assert result == [{"trade_id": "t1"}]
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_fills_raises_on_first_page_failure_when_opted_in(self, mock_rl, client):
+        from kalshi_api import KalshiPortfolioQueryError
+        client.session.request.return_value = _mock_response(500)
+        with pytest.raises(KalshiPortfolioQueryError):
+            client.get_fills(raise_on_error=True)
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_fills_raises_on_later_page_failure_when_opted_in(self, mock_rl, client):
+        """A failure on page 2+ must ALSO raise, not return the page-1
+        partial result as if it were the complete/confirmed list."""
+        from kalshi_api import KalshiPortfolioQueryError
+        page1 = _mock_response(200, {"fills": [{"trade_id": "t1"}], "cursor": "abc"})
+        page2 = _mock_response(500)
+        client.session.request.side_effect = [page1, page2]
+        with pytest.raises(KalshiPortfolioQueryError):
+            client.get_fills(raise_on_error=True)
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_fills_success_with_raise_on_error_true(self, mock_rl, client):
+        client.session.request.return_value = _mock_response(
+            200, {"fills": [{"trade_id": "t1"}], "cursor": ""})
+        result = client.get_fills(raise_on_error=True)
+        assert result == [{"trade_id": "t1"}]
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_open_orders_single_page(self, mock_rl, client):
+        client.session.request.return_value = _mock_response(
+            200, {"orders": [{"order_id": "o1"}, {"order_id": "o2"}], "cursor": ""})
+        result = client.get_open_orders()
+        assert len(result) == 2
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_open_orders_pagination(self, mock_rl, client):
+        page1 = _mock_response(200, {"orders": [{"order_id": "o1"}], "cursor": "xyz"})
+        page2 = _mock_response(200, {"orders": [{"order_id": "o2"}], "cursor": ""})
+        client.session.request.side_effect = [page1, page2]
+        result = client.get_open_orders()
+        assert len(result) == 2
+        assert client.session.request.call_count == 2
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_open_orders_always_raises_on_failure(self, mock_rl, client):
+        """Unlike get_fills/get_positions, get_open_orders has no
+        pre-existing caller relying on silent-empty — it always raises."""
+        from kalshi_api import KalshiPortfolioQueryError
+        client.session.request.return_value = _mock_response(500)
+        with pytest.raises(KalshiPortfolioQueryError):
+            client.get_open_orders()
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_open_orders_filters_by_ticker_param(self, mock_rl, client):
+        client.session.request.return_value = _mock_response(
+            200, {"orders": [{"order_id": "o1"}], "cursor": ""})
+        client.get_open_orders(ticker="KXTEST-26DEC31")
+        params = client.session.request.call_args[1]["params"]
+        assert params["ticker"] == "KXTEST-26DEC31"
+        assert params["status"] == "resting"
+
 
 # ---------------------------------------------------------------------------
 # TestKalshiFetchData

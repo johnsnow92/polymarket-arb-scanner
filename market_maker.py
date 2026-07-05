@@ -1138,6 +1138,21 @@ class VolatilityTracker:
             variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
             return variance ** 0.5
 
+    def has_min_samples(self, market_key: str) -> bool:
+        """True once enough price samples exist for a trustworthy reading.
+
+        ``get_volatility`` returns 0.0 (interpreted by callers as "calm")
+        both when a market is genuinely calm AND when there simply isn't
+        enough data yet (fewer than ``min_samples`` observations) — those
+        are not the same thing. A safety gate that treats "unknown" as
+        "calmest possible" during warm-up would let a fast-moving market
+        quote at the base spread before there is any data to judge it by.
+        Callers that must fail closed on "unknown" (e.g. the MM pilot's G8
+        volatility ceiling) check this before trusting the multiplier.
+        """
+        with self._lock:
+            return len(self._prices.get(market_key, [])) >= self.min_samples
+
     def get_spread_multiplier(
         self,
         market_key: str,
