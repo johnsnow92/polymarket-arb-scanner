@@ -219,6 +219,26 @@ class KalshiClient:
             return []
         return resp.json().get("markets", [])
 
+    def fetch_market(self, ticker: str) -> dict | None:
+        """Fetch a single market's current state from GET /markets/{ticker}.
+
+        Additive, read-only lookup (any status — open, closed, settled) used
+        by the earnings-mention OOS logger to resolve a tracked market's
+        final status/result after close (see
+        docs/plans/08-earnings-mention-oos.md). Unlike get_settlements(),
+        which hits the account-scoped /portfolio/settlements and only covers
+        markets this account actually traded, this works for any ticker.
+
+        Returns:
+            The market dict (includes 'status' and, once resolved, 'result')
+            or None on failure/not-found.
+        """
+        resp = self._request("GET", f"/markets/{ticker}")
+        if resp is not None and resp.status_code == 200:
+            data = resp.json()
+            return data.get("market", data)
+        return None
+
     def fetch_order_book(self, ticker: str) -> dict | None:
         """Fetch order book for a given market ticker."""
         resp = self._request("GET", f"/markets/{ticker}/orderbook")

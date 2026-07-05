@@ -402,6 +402,39 @@ class TestKalshiFetchData:
         assert client.fetch_markets_for_event("EVT1") == []
 
     @patch("kalshi_api._rate_limit")
+    def test_fetch_market_success(self, mock_rl, client):
+        """Returns the unwrapped market dict on 200."""
+        client.session.request.return_value = _mock_response(
+            200, {"market": {"ticker": "TICK", "status": "settled", "result": "yes"}}
+        )
+        result = client.fetch_market("TICK")
+        assert result == {"ticker": "TICK", "status": "settled", "result": "yes"}
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_market_requests_correct_path(self, mock_rl, client):
+        """Calls GET /markets/{ticker} (not the account-scoped settlements endpoint)."""
+        client.session.request.return_value = _mock_response(200, {"market": {}})
+        client.fetch_market("KXEARNINGSMENTIONBA-26JUL01")
+        call_args = client.session.request.call_args
+        assert call_args[0][0] == "GET"
+        assert call_args[0][1] == KALSHI_BASE_URL + KALSHI_API_PATH + "/markets/KXEARNINGSMENTIONBA-26JUL01"
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_market_returns_none_on_error(self, mock_rl, client):
+        """Returns None on non-200 (e.g. 404 for an unknown ticker)."""
+        client.session.request.return_value = _mock_response(404)
+        assert client.fetch_market("NOPE") is None
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_market_handles_unwrapped_response(self, mock_rl, client):
+        """Some responses may not nest under 'market' — falls back to the raw dict."""
+        client.session.request.return_value = _mock_response(
+            200, {"ticker": "TICK", "status": "active"}
+        )
+        result = client.fetch_market("TICK")
+        assert result == {"ticker": "TICK", "status": "active"}
+
+    @patch("kalshi_api._rate_limit")
     def test_fetch_order_book_success(self, mock_rl, client):
         """Returns parsed order-book JSON on 200."""
         book = {"orderbook": {"yes": [[55, 100]], "no": [[45, 200]]}}
