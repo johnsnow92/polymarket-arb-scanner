@@ -462,6 +462,28 @@ class KalshiClient:
             cursor = data.get("cursor")
             if not cursor or not page:
                 break
+        else:
+            # Codex round-3 finding: the for-loop exhausted every
+            # max_pages iteration without ever hitting a `break` above —
+            # meaning every page fetch SUCCEEDED and the cursor was STILL
+            # non-empty after the very last one. More data genuinely
+            # exists beyond max_pages*limit; we only stopped because of
+            # our own bound. This is NOT "confirmed complete" (empty
+            # cursor) — silently returning `positions` here would let a
+            # caller (reconcile()) mistake an incomplete fetch for a full
+            # one and mark itself successfully reconciled anyway.
+            if cursor:
+                logger.warning(
+                    "Kalshi get_positions exhausted max_pages=%d while "
+                    "more data was still available (cursor non-empty) — "
+                    "%d position(s) accumulated is a PARTIAL result",
+                    max_pages, len(positions))
+                if raise_on_error:
+                    raise KalshiPortfolioQueryError(
+                        f"get_positions exhausted max_pages={max_pages} "
+                        f"while the cursor still had more data — "
+                        f"{len(positions)} position(s) accumulated is an "
+                        f"incomplete result")
         return positions
 
     def get_open_orders(self, ticker: str | None = None,
@@ -500,6 +522,19 @@ class KalshiClient:
             cursor = data.get("cursor")
             if not cursor or not page:
                 break
+        else:
+            # Codex round-3 finding: exhausted max_pages while every page
+            # fetch succeeded and the cursor was STILL non-empty — more
+            # resting orders genuinely exist beyond max_pages*limit. This
+            # method's whole contract is "never silently return zero/
+            # partial on failure"; a partial result from hitting our own
+            # page bound is exactly as unsafe as an HTTP failure would be.
+            if cursor:
+                raise KalshiPortfolioQueryError(
+                    f"get_open_orders exhausted max_pages={max_pages} "
+                    f"while the cursor still had more data — "
+                    f"{len(orders)} order(s) accumulated is an incomplete "
+                    f"result")
         return orders
 
     def get_settlements(self, limit: int = 200, max_pages: int = 5) -> list[dict]:
@@ -688,6 +723,26 @@ class KalshiClient:
             cursor = data.get("cursor")
             if not cursor or not page:
                 break
+        else:
+            # Codex round-3 finding: exhausted max_pages while every page
+            # fetch succeeded and the cursor was STILL non-empty — more
+            # fills genuinely exist beyond max_pages*limit for this
+            # min_ts window. Silently returning a partial list here is
+            # exactly the "unknown looks like zero/some" ambiguity
+            # raise_on_error exists to close for the HTTP-failure case;
+            # hitting our own page bound must be treated identically.
+            if cursor:
+                logger.warning(
+                    "Kalshi get_fills exhausted max_pages=%d while more "
+                    "fills were still available (cursor non-empty) — %d "
+                    "fill(s) accumulated is a PARTIAL result", max_pages,
+                    len(fills))
+                if raise_on_error:
+                    raise KalshiPortfolioQueryError(
+                        f"get_fills exhausted max_pages={max_pages} "
+                        f"while the cursor still had more data — "
+                        f"{len(fills)} fill(s) accumulated is an "
+                        f"incomplete result")
         return fills
 
     def get_order_status(self, order_id: str) -> dict | None:

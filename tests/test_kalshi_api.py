@@ -400,7 +400,7 @@ class TestKalshiOrders:
     @patch("kalshi_api._rate_limit")
     def test_get_positions_stops_at_max_pages(self, mock_rl, client):
         """Pagination is bounded — an endlessly-cursoring response can't
-        spin forever."""
+        spin forever. Default raise_on_error=False keeps this silent."""
         page = _mock_response(200, {
             "market_positions": [{"ticker": "T1", "position_fp": "1"}],
             "cursor": "always-more",
@@ -409,6 +409,44 @@ class TestKalshiOrders:
         result = client.get_positions(max_pages=3)
         assert client.session.request.call_count == 3
         assert len(result) == 3
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_positions_raises_when_max_pages_exhausted_with_live_cursor(
+            self, mock_rl, client):
+        """Codex round-3 finding: every page fetch here SUCCEEDS (unlike
+        the earlier failure-mid-pagination tests) but the cursor is STILL
+        non-empty after the last one allowed by max_pages — more positions
+        genuinely exist beyond what was fetched. This must be exactly as
+        ambiguous to a raise_on_error=True caller as an HTTP failure would
+        be, not silently returned as if it were a confirmed-complete
+        result."""
+        from kalshi_api import KalshiPortfolioQueryError
+        page = _mock_response(200, {
+            "market_positions": [{"ticker": "T1", "position_fp": "1"}],
+            "cursor": "always-more",  # never terminates on its own
+        })
+        client.session.request.return_value = page
+        with pytest.raises(KalshiPortfolioQueryError):
+            client.get_positions(max_pages=3, raise_on_error=True)
+        assert client.session.request.call_count == 3
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_positions_max_pages_with_cursor_finally_empty_does_not_raise(
+            self, mock_rl, client):
+        """Sanity check: if the LAST page (at exactly max_pages) happens to
+        have an empty cursor, that's genuine completion, not exhaustion —
+        must not raise even with raise_on_error=True."""
+        page1 = _mock_response(200, {
+            "market_positions": [{"ticker": "T1", "position_fp": "1"}],
+            "cursor": "more",
+        })
+        page2 = _mock_response(200, {
+            "market_positions": [{"ticker": "T2", "position_fp": "1"}],
+            "cursor": "",  # done, right at the max_pages boundary
+        })
+        client.session.request.side_effect = [page1, page2]
+        result = client.get_positions(max_pages=2, raise_on_error=True)
+        assert [p["ticker"] for p in result] == ["T1", "T2"]
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +496,37 @@ class TestKalshiPortfolioQueryRaiseOnError:
         assert result == [{"trade_id": "t1"}]
 
     @patch("kalshi_api._rate_limit")
+    def test_get_fills_raises_when_max_pages_exhausted_with_live_cursor(
+            self, mock_rl, client):
+        """Codex round-3 finding: every page fetch succeeds but the cursor
+        is STILL non-empty after the last page allowed by max_pages — more
+        fills genuinely exist for this min_ts window beyond what was
+        fetched. Must raise under raise_on_error=True exactly like an HTTP
+        failure would, not silently return a partial fill list that looks
+        confirmed-complete."""
+        from kalshi_api import KalshiPortfolioQueryError
+        page = _mock_response(200, {
+            "fills": [{"trade_id": "t1"}], "cursor": "always-more",
+        })
+        client.session.request.return_value = page
+        with pytest.raises(KalshiPortfolioQueryError):
+            client.get_fills(max_pages=3, raise_on_error=True)
+        assert client.session.request.call_count == 3
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_fills_max_pages_exhausted_without_raise_on_error_is_silent(
+            self, mock_rl, client):
+        """Default raise_on_error=False preserves the original
+        silent-partial-return behavior even for the max-pages-exhausted
+        case — only opting in changes anything."""
+        page = _mock_response(200, {
+            "fills": [{"trade_id": "t1"}], "cursor": "always-more",
+        })
+        client.session.request.return_value = page
+        result = client.get_fills(max_pages=3)
+        assert len(result) == 3
+
+    @patch("kalshi_api._rate_limit")
     def test_get_open_orders_single_page(self, mock_rl, client):
         client.session.request.return_value = _mock_response(
             200, {"orders": [{"order_id": "o1"}, {"order_id": "o2"}], "cursor": ""})
@@ -490,6 +559,23 @@ class TestKalshiPortfolioQueryRaiseOnError:
         params = client.session.request.call_args[1]["params"]
         assert params["ticker"] == "KXTEST-26DEC31"
         assert params["status"] == "resting"
+
+    @patch("kalshi_api._rate_limit")
+    def test_get_open_orders_raises_when_max_pages_exhausted_with_live_cursor(
+            self, mock_rl, client):
+        """Codex round-3 finding: every page fetch succeeds but the cursor
+        is STILL non-empty after the last page allowed by max_pages — more
+        resting orders genuinely exist beyond what was fetched.
+        get_open_orders always raises on ambiguity (no raise_on_error
+        flag) — this case must be no exception."""
+        from kalshi_api import KalshiPortfolioQueryError
+        page = _mock_response(200, {
+            "orders": [{"order_id": "o1"}], "cursor": "always-more",
+        })
+        client.session.request.return_value = page
+        with pytest.raises(KalshiPortfolioQueryError):
+            client.get_open_orders(max_pages=3)
+        assert client.session.request.call_count == 3
 
 
 # ---------------------------------------------------------------------------
