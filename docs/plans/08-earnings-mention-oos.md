@@ -15,49 +15,57 @@ At T-24h, company-KPI / earnings-mention YES contracts priced 11–50c settle sy
 - Venue: Kalshi only (CFTC, MI-eligible, non-sports). On-allowlist.
 - Deterministic; no LLM. (v2 priors are an *offline* pre-compute, never in a hot path.)
 
-## 3. Data (v1 — Kalshi only, all already wired)
-Exact methods in `kalshi_api.py` (verified 2026-06-25):
-- **Identify markets:** `fetch_all_events(with_nested_markets=True)` → events carry nested `markets`. Filter by the mention/KPI family via `classify_market()` (config `SERIES_PREFIXES` + `TITLE_PATTERNS`; calibrate against the in-sample pilot market list in command-center `05-opportunity-sweep-round2/`).
-- **Snapshot at T-24h→T-6h:** for each tracked open market inside `[close−24h, close−6h]`, record YES bid/ask/mid via `get_market_price(market)` (returns `(yes_price, no_price)` in $0–1; note it reads the **ask** — also pull `fetch_order_book(ticker)` for mid + depth/volume to support the ≤10%-volume rule later). Persist: `{ticker, snapshot_ts, hours_to_close, yes_price, no_price, volume, series}`.
-- **Realized settlement — IMPORTANT:** `get_settlements()` hits `/portfolio/settlements` and is **ACCOUNT-scoped** (only markets we traded) → **NOT usable for OOS** over markets we don't trade. v1 adds a small **additive** `fetch_market(ticker)` (`GET /markets/{ticker}`, any status) to read `status` + `result` ("yes"/"no") for tracked tickers after close. Additive, low merge-conflict risk.
-- **Join:** `richness_i = snapshot_yes_price_i − outcome_i`, `outcome_i ∈ {0,1}` (1.0 if `result=="yes"`).
+## 3. Data (as shipped — redesigned 2026-07-05, see §3a)
+Exact methods in `kalshi_api.py`:
+- **Identify markets:** `fetch_settled_markets(min_close_ts)` — `GET /markets?status=settled&min_close_ts=...`, cursor-paginated (raises `PaginationIncompleteError` rather than returning a silently-partial page set). Filter to the mention family via `classify_market()` — **series-ticker prefix only** (`SERIES_PREFIXES = ("KXEARNINGSMENTION",)`; a title/text-pattern classifier was tried and removed — see §3a).
+- **T-24h price reconstruction:** `earnings_mention.price_at_t24h(client, market)` reads `fetch_candlesticks(series_ticker, ticker, start_ts, end_ts)` (`GET /series/{s}/markets/{t}/candlesticks`) over the `[close−26h, close−23h]` window (hourly candles) and takes the last candle in it. Price fields are `*_dollars` strings, not cents. Returns `None` (permanent — no data ever existed in the window) or raises `CandleFetchError` (transient — the request itself failed); these are NOT the same thing and are handled differently by the runner (§3a).
+- **Realized settlement:** the `result` field ("yes"/"no") comes for free on each row from `fetch_settled_markets` — no separate per-market fetch needed. (`fetch_market(ticker)`, `GET /markets/{ticker}`, still exists as a general-purpose single-market lookup but is not on this pipeline's hot path.)
+- **Join:** `richness_i = t24h_price_i − outcome_i`, `outcome_i ∈ {0,1}` (1.0 if `result=="yes"`).
+
+### 3a. Redesign note (2026-07-05, post-build adversarial review)
+Two build-time designs were tried and superseded before landing on the above, both caught by adversarial review before merge:
+1. **Live-snapshot window (v1, reverted).** Originally: watch markets while they sit inside their own open `[close−24h, close−6h]` window, resolve later via a "pending" state machine. This cannot reliably catch a market whose entire lifetime falls between two weekly cron runs — a real coverage gap, not a timing nuance. Replaced with the settled-market candle-reconstruction method above (same method the in-sample pilot itself used — see `T1-pm-dispersion-novelty.md` §a, "T-24h/T-6h candle reconstruction"). There is no "pending" state as a result: state is a time watermark + a set of already-processed tickers + the accumulated resolved history.
+2. **Loose title-pattern classifier (reverted).** `classify_market()` originally OR'd a text regex (`\bmention(s|ed)?\b`, `\bsay\b`, ...) against ANY settled market's title. That let unrelated markets like "Will Trump say recession?" pass and contaminate the sample. `SERIES_PREFIXES` is now the sole classifier, populated with the one prefix directly confirmed against both `T1-pm-dispersion-novelty.md` and the in-sample pilot's actual market list: `KXEARNINGSMENTION`. The broader KPI-bracket family this doc also mentions (e.g. `KXTESLAPROD`) is deliberately NOT covered yet — enumerating it correctly needs the full in-sample pilot market list, which this pipeline does not read from; a wrong/incomplete guess risks the same contamination this fix closes. Extending `SERIES_PREFIXES` is a follow-up once that list is available to whatever maintains this file.
+
+Fail-closed handling, at two levels: a per-ticker transient failure (`CandleFetchError`) is retried next cycle without advancing the watermark past it; a whole-cycle discovery failure (`PaginationIncompleteError`) aborts the cycle entirely (no state change, no alert) rather than computing a verdict from a silently-partial market list.
 
 ## 4. OOS statistical method
-- Filter to the **11–50c YES band** at the T-24h(±window) snapshot.
+- Filter to the **11–50c YES band** at the reconstructed T-24h price.
 - `richness_i = yes_price_i − outcome_i` (positive mean ⇒ YES overpriced ⇒ fade works).
 - `mean_richness` (pts), `n`, `z = mean / (std/√n)`. Bucket by category/series for the **category-conditional** read (R2-1: the edge reversed in some categories — only deploy where it tests rich).
-- Rolling OOS accumulation across weekly runs → persist to Supabase (`engine='arbgrid'`, `lane='earnings_mention'`, `tax_bucket` per the 3-bucket ruleset).
+- Rolling OOS accumulation across weekly runs → v1 persists locally (JSON state file, `actions/cache` across scheduled runs — see the runner's module docstring for why this was kept over adding a Supabase table / a git-committed state blob). Migrating to Supabase (`engine='arbgrid'`, `lane='earnings_mention'`, `tax_bucket` per the 3-bucket ruleset) remains a clean follow-up once that table exists (§7 step 6).
 - **Verdict toward 8/3:** PURSUE if `gap ≥ 9pts AND z ≥ 2 AND n ≥ 100`; KILL if `gap < 4.5pts`; else CONTINUE.
 
-## 5. Module design
-`earnings_mention.py` — pure functions + a thin `EarningsMentionLogger`:
-- `classify_market(market) -> bool` — series/title match (conservative, false-negative-biased).
-- `in_snapshot_window(market, now) -> bool` — within [close−24h, close−6h].
-- `snapshot_open_markets(client, now) -> list[Snapshot]`.
-- `resolve_settlements(client, pending) -> list[Resolved]` — uses `fetch_market`.
+## 5. Module design (as shipped)
+`earnings_mention.py` — pure functions plus one client-calling function (`price_at_t24h`), duck-typed against a client exposing only `fetch_candlesticks`:
+- `classify_market(market) -> bool` — series-ticker prefix match (`SERIES_PREFIXES`); see §3a for why this is prefix-only, not text-pattern.
+- `has_valid_result(market) -> bool` — does this settled market carry a definitive yes/no result (excludes voided/undecided).
+- `price_at_t24h(client, market) -> float | None` — candlestick reconstruction; raises `CandleFetchError` on a transient fetch failure, returns `None` (no raise) when the request succeeded but no usable candle exists.
+- `build_resolved(market, yes_price_t24h) -> Resolved`.
 - `compute_oos_stats(resolved) -> OosStats` — band filter, mean richness, z, by-category.
 - `verdict(stats) -> "pursue"|"kill"|"continue"` — pre-registered thresholds.
 - Pure/deterministic; no order surface; structurally cannot place a trade.
 
-`scripts/run_earnings_mention_oos.py` — weekly entry: load prior snapshots (Supabase/local), snapshot new, resolve matured, compute, persist, Telegram-ticket the running verdict. `requests`-only; secrets Infisical-injected; Telegram failures never log the tokenized URL (match `run_edgar_scan.py`/`run_pnl_digest.py`).
+`scripts/run_earnings_mention_oos.py` — weekly entry, owns all stateful orchestration: load state (`{watermark_ts, seen, resolved, last_verdict, first_seen_ts}`) → `client.fetch_settled_markets(watermark)` → classify → resolve via `price_at_t24h` (fail-closed per §3a) → accumulate → compute → persist → Telegram-ticket the running verdict. `requests`-only; secrets Infisical-injected; Telegram failures never log the tokenized URL (fixed at the source in the shared `notifier.py`, since the bug predated and was not specific to this runner).
 
-`.github/workflows/earnings-mention-oos.yml` — weekly cron + `workflow_dispatch` always_alert; env-routed; lean install. Matches the existing detection-cron pattern.
+`.github/workflows/earnings-mention-oos.yml` — weekly cron + `workflow_dispatch` always_alert; env-routed; lean install; also uploads the state file as a 90-day build artifact (human-recoverable backup alongside the `actions/cache` restore path).
 
-## 6. Tests (`tests/test_earnings_mention.py` — mocked, verifiable with NO live keys)
-- `classify_market`: mention/KPI fixtures vs unrelated (BTC price, election) → True/False.
-- `in_snapshot_window`: boundaries at T-24h, T-6h, outside.
-- `snapshot_open_markets`: mocked `KalshiClient.fetch_all_events` (nested markets) → only in-window mention markets snapshotted.
-- `resolve_settlements`: mocked `fetch_market` returns settled `result` → correct join/outcome.
+## 6. Tests (mocked, verifiable with NO live keys)
+`tests/test_earnings_mention.py`:
+- `classify_market`: confirmed `KXEARNINGSMENTION*` fixtures vs unrelated markets (including title-only false positives like "Will Trump say recession?" — a regression test for the reverted text-pattern classifier) → True/False.
+- `price_at_t24h`: correct candle window/series-ticker derivation; last-candle-in-window selection; `*_dollars` field extraction incl. bid/ask-midpoint fallback; raises `CandleFetchError` on a `None` (failed) fetch vs. returns `None` (no raise) on a genuinely empty candle list.
 - `compute_oos_stats`: fixed fixture → **exact** mean richness + z (deterministic); band filter excludes <11c/>50c.
 - `verdict`: pursue/kill/continue at thresholds (incl. n<100 → continue).
 - Determinism: same input → same output; no network in unit tests.
+
+`tests/test_run_earnings_mention_oos.py`: state roundtrip, the state-anomaly guard, and the full discover→reconstruct→accumulate→verdict wiring in `run_cycle`, including per-ticker fail-closed retry (transient vs. permanent) and whole-cycle abort on `PaginationIncompleteError`.
 
 ## 7. Build sequence
 1. **Sync first** — local checkout is on stale `fix/layer4-continuous-wiring` (12 behind origin/master); branch `feat/earnings-mention-oos` **off origin/master** (which has edgar/fallen-angel/pnl/lip merged).
 2. Add additive `fetch_market(ticker)` to `kalshi_api.py` + unit test.
 3. Build `earnings_mention.py` + mocked tests → `pytest` green.
 4. Add run script + workflow.
-5. Codex adversarial review (no self-review).
+5. Codex adversarial review (no self-review) — ran 3 rounds: round 1 caught the live-snapshot-window coverage gap, the missing-exception-handling and silent-partial-pagination bugs, and the loose title-pattern classifier (all fixed, §3a); round 2 confirmed those fixes and found no new issues on this branch.
 6. **[OP]** add Supabase + Telegram secrets → activate weekly cron → accumulate OOS to 8/3.
 
 ## 8. v2 (after keys — sharpens, not required for 8/3)
