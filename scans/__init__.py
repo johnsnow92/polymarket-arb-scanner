@@ -39,6 +39,7 @@ from scans.expert_divergence import scan_expert_divergence
 from scans.insider_pattern import scan_insider_pattern, get_order_flow_tracker
 from scans.cross_category import scan_cross_category, get_signal_fetcher
 from scans.helpers import _extract_token_ids, _fetch_clob_for_market, _parallel_fetch_kalshi, capital_efficiency_score
+from scans.x402_seerium import scan_x402_seerium
 
 __all__ = [
     "scan_binary_internal",
@@ -98,4 +99,5 @@ __all__ = [
     "get_order_flow_tracker",
     "scan_cross_category",
     "get_signal_fetcher",
+    "scan_x402_seerium",
 ]

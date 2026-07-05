@@ -100,7 +100,7 @@ Force multipliers that increase returns from all other layers.
 | 17 | Kelly criterion sizing | BUILT | `position_sizer.py` | Strategy-aware fractions by layer |
 | 18 | Platform fund rebalancing | **PARTIAL** ✱ | `treasury.py`, `gemini_api.withdraw_usdc`, `db.transfers`, `dashboard.py:POST /api/rebalance/execute`, weekly digest via `notifier.py` | **PR #10** — Gemini ↔ Polymarket programmatic auto-transfer via USDC on Polygon. Six other platforms (Kalshi, Betfair, Smarkets, SX Bet, Matchbook, IBKR) remain on the manual-digest path because their public APIs expose no withdraw / deposit / transfer endpoints. This is a by-design ceiling, not a gap. Default off (`AUTO_REBALANCE_ENABLED=false`). |
 | 19 | Latency optimization | **BUILT** ✱ | `continuous.py:_execution_priority()` + `asyncio.PriorityQueue` | Pre-existing infrastructure misclassified by earlier v2 drafts. WS-triggered high-priority execution at `continuous.py:909`; priority scoring at `continuous.py:523`. |
-| 20 | Backtesting-driven tuning | PARTIAL | `backtest.py` + `snapshot.py` + `scripts/tune.py` | Tuning loop **implemented + tested** (Sprint 6, in-flight as of 2026-05-31): `scripts/tune.py` runs `backtest._suggest_strategy_thresholds()` / `build_recommendations()` over rolling windows and emits per-strategy `MIN_NET_ROI` / `FUZZY_MATCH_THRESHOLD` recommendations; `config.load/apply_backtest_recommendations()` consumes them behind `BACKTEST_TUNING_ENABLED`. **Remaining gap (why still PARTIAL):** applied only on manual invocation — not auto-wired into `continuous.py` startup, and no alert fires when recommendations change. |
+| 20 | Backtesting-driven tuning | **BUILT** ✱ | `backtest.py` + `snapshot.py` + `scripts/tune.py` | Tuning loop **implemented + tested** (Sprint 6, in-flight as of 2026-05-31): `scripts/tune.py` runs `backtest._suggest_strategy_thresholds()` / `build_recommendations()` over rolling windows and emits per-strategy `MIN_NET_ROI` / `FUZZY_MATCH_THRESHOLD` recommendations; `config.load/apply_backtest_recommendations()` consumes them behind `BACKTEST_TUNING_ENABLED`. **Closed by PR #48 (2026-06-13):** auto-applied at startup (`config.py:1332`, re-checked at `continuous.py:982`) behind `BACKTEST_TUNING_ENABLED` + a 72h recommendation-age gate, and a `BACKTEST_TUNING_APPLIED` alert fires when overrides change (`continuous.py:1000`). |
 
 ✱ Status changed (or correctly classified) after PR #10 review.
 
@@ -110,8 +110,8 @@ Force multipliers that increase returns from all other layers.
 
 | Status | Count | Strategies |
 |--------|-------|------------|
-| BUILT | 26 | 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 21, 22, 23, 24, 25, 26, 27, 28, 29 |
-| PARTIAL | 3 | 6, 18, 20 |
+| BUILT | 27 | 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29 |
+| PARTIAL | 2 | 6, 18 |
 | STUB | 0 | — |
 | NOT BUILT | 0 | — |
 | **Total** | **29** | |
@@ -123,6 +123,8 @@ Net change vs prior v2: +4 BUILT (#9, #11, #19 corrected, plus #18 lifted from N
 **2026-05-20 audit update:** +4 additional BUILT (#26, #27, #28, #29 — each has a first-class Stage 2 refiner with substantial test coverage; the earlier "dead refiner" / "TODO marker" notes were stale by the time of this audit). −3 PARTIAL (#26, #27, #28 promoted). −1 STUB (#29 promoted).
 
 **2026-05-31 content audit:** counts unchanged (26 BUILT / 3 PARTIAL / 0 STUB). #20 note refreshed to reflect the in-flight tuning-loop implementation (still PARTIAL — manual-apply only). Open follow-up: this 29-strategy taxonomy does **not** 1:1 map the **33 `--mode` scan values** in `cli.py` (excluding `all`). The surplus modes (`negrisk-no`, `nway`, `rewards`, `imbalance`, `news-snipe`, `correlated`, `time-decay`, `logical-arb`, `whale-copy`, `lead-lag-mm`, `toxic-flow`, `vol-mm`) are runnable scans that map onto the layer strategies above (or are execution variants of them) but are not separately enumerated here. A 1:1 mode→strategy reconciliation table is a tracked TODO; until then, treat `cli.py` `--mode` choices as the source of truth for *runnable scans* and this table as the source of truth for the *risk-layer taxonomy*.
+
+**2026-06-13 reconciliation:** #20 promoted **PARTIAL → BUILT** (PR #48 closed the startup-auto-apply + change-alert gaps). New roll-up: **27 BUILT / 2 PARTIAL (#6, #18) / 0 STUB**. The mode→strategy reconciliation TODO above is now closed by [`MODE-STRATEGY-MAP.md`](MODE-STRATEGY-MAP.md) — which counts **34** runnable modes (not 33) and flags a new, still-unmapped 34th mode `seerium` (the `scans/x402_seerium.py` x402 scan).
 
 ---
 
@@ -144,8 +146,7 @@ Grouped by remediation type. **Groups A, B, and C are now empty** after the 2026
 - ~~Hardcoded password in `run_dashboard.py`~~ — resolved (no default; `DASHBOARD_PASS` must come from env). PR #18 additionally added a `DASHBOARD_HOST` env var with loopback default and a `validate_config()` gate that raises `ConfigError` on non-loopback host + empty password.
 - No dedicated test files for `position_sizer.py`, `signal_aggregator.py`, `price_tracker.py`, `manifold_api.py`. Note: `market_maker.py` has direct coverage via `tests/test_hedger_inventory.py` and `tests/test_cross_mm.py` from PR #10; `dashboard_ui.py` covered by `tests/test_dashboard_ui.py` from PR #28.
 
-**Group F — #20 backtesting tuning loop (only original-framework gap left)**
-- `backtest.py` and `snapshot.py` exist; no automated tuning loop consumes them.
+~~**Group F — #20 backtesting tuning loop**~~ — **resolved** by PR #48 (2026-06-13). `scripts/tune.py` produces recommendations; `config.apply_backtest_recommendations()` auto-applies at startup behind `BACKTEST_TUNING_ENABLED` + a 72h age gate; `continuous.py` fires `BACKTEST_TUNING_APPLIED` on change. #20 is now BUILT. **No open Known Gaps from the original framework remain.**
 
 ---
 

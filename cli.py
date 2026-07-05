@@ -52,6 +52,7 @@ from scans import (
     _fetch_kalshi_data,
     capital_efficiency_score,
     scan_spread_polymarket,
+    scan_x402_seerium,
     scan_betfair_backall,
     scan_betfair_backlay,
     scan_smarkets_backall,
@@ -519,6 +520,16 @@ def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=No
             logger.info("Found %d fee-promo opportunities.", len(promo_opps))
         except Exception as exc:
             logger.warning("Fee-promo scan failed: %s", exc)
+
+    # x402 Seerium scan: 783 Polymarket snapshots via $0.001 micropayment.
+    if args.mode == "seerium":
+        logger.info("--- Seerium x402 Polymarket scan ($0.001 USDC) ---")
+        try:
+            seerium_opps = scan_x402_seerium(min_profit=min_profit)
+            all_opportunities.extend(seerium_opps)
+            logger.info("Found %d Seerium opportunities.", len(seerium_opps))
+        except Exception as exc:
+            logger.warning("Seerium x402 scan failed: %s", exc)
 
     # Strategy #11: paired bid/ask quotes across two platforms.
     if args.mode == "cross-mm":
@@ -1126,7 +1137,8 @@ def main():
                  "imbalance", "news-snipe", "correlated", "time-decay",
                  "logical-arb", "whale-copy",
                  "fee-promo", "cross-mm",
-                 "lead-lag-mm", "toxic-flow", "vol-mm"],
+                 "lead-lag-mm", "toxic-flow", "vol-mm",
+                 "seerium"],
         default="all",
         help="Scan mode: all, binary, negrisk, negrisk-no, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm",
     )

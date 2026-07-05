@@ -1,0 +1,358 @@
+"""Tests for broker/validator.py — every rulebook rule: one passing + one
+failing (fail-closed) test. DoD items 2, 3, 4, 6."""
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from broker.queue import HALT_SCOPE_ALL, HALT_SCOPE_CAPITAL, Intent, IntentQueue
+from broker.validator import BrokerValidator
+from broker_helpers import GATE_CONFIG, healthy_sources, make_policy
+
+
+def flip_enable(lane="kalshi-lip", venue="kalshi", key="f1"):
+    return Intent("flip_lane", {"lane": lane, "venue": venue, "action": "enable"}, key)
+
+
+def flip_disable(key="f2"):
+    return Intent("flip_lane", {"lane": "kalshi-lip", "venue": "kalshi",
+                                "action": "disable"}, key)
+
+
+def move(amount=100.0, key="m1", **extra):
+    payload = {"amount_usd": amount, "from_venue": "kalshi", "to_venue": "polymarket"}
+    payload.update(extra)
+    return Intent("move_capital", payload, key)
+
+
+def make_validator(policy=None, sources=None, queue=None):
+    queue = queue or IntentQueue(":memory:")
+    return BrokerValidator(policy or make_policy(), sources or healthy_sources(), queue)
+
+
+# ---------------------------------------------------------------------------
+# Caps (T1 principal + realized P&L; $300/market; book depth)
+# ---------------------------------------------------------------------------
+
+class TestCaps:
+    def test_pass_within_all_caps(self):
+        v = make_validator()
+        assert v._check_caps(move(100.0)).ok
+
+    def test_fail_zero_amount(self):
+        assert not make_validator()._check_caps(move(0.0)).ok
+
+    def test_fail_new_principal_operator_gated(self):
+        result = make_validator()._check_caps(move(100.0, source="principal"))
+        assert not result.ok
+        assert "operator-gated" in result.reason
+
+    def test_fail_portfolio_over_ceiling(self):
+        # ceiling = 8000 + 200 realized; portfolio 9000 breaches it
+        v = make_validator(sources=healthy_sources(portfolio_value_usd=lambda: 9000.0))
+        result = v._check_caps(move(100.0))
+        assert not result.ok
+        assert "ceiling" in result.reason
+
+    def test_negative_pnl_shrinks_ceiling(self):
+        # ceiling = 8000 - 7950 = 50; portfolio 40 is fine but amount 100 is not
+        v = make_validator(sources=healthy_sources(
+            realized_pnl_usd=lambda: -7950.0, portfolio_value_usd=lambda: 40.0))
+        assert not v._check_caps(move(100.0)).ok
+
+    def test_pass_market_scoped_within_cap_and_depth(self):
+        v = make_validator()
+        assert v._check_caps(move(200.0, market="BTC-DEC", book_depth_usd=500.0)).ok
+
+    def test_fail_per_market_cap(self):
+        v = make_validator()
+        result = v._check_caps(move(400.0, market="BTC-DEC", book_depth_usd=5000.0))
+        assert not result.ok
+        assert "per-market cap" in result.reason
+
+    def test_fail_market_without_depth(self):
+        result = make_validator()._check_caps(move(100.0, market="BTC-DEC"))
+        assert not result.ok
+        assert "book_depth" in result.reason
+
+    def test_fail_amount_over_depth(self):
+        v = make_validator()
+        assert not v._check_caps(move(200.0, market="BTC-DEC", book_depth_usd=150.0)).ok
+
+    def test_fail_closed_on_nan_portfolio(self):
+        # NaN > ceiling is always False — must not pass the cap check.
+        v = make_validator(sources=healthy_sources(
+            portfolio_value_usd=lambda: float("nan")))
+        results = v.validate(move())
+        caps = next(r for r in results if r.name == "caps")
+        assert not caps.ok
+        assert "non-finite" in caps.reason
+
+    def test_fail_closed_when_portfolio_source_raises(self):
+        def boom():
+            raise ConnectionError("venue API down")
+        v = make_validator(sources=healthy_sources(portfolio_value_usd=boom))
+        results = v.validate(move())
+        caps = next(r for r in results if r.name == "caps")
+        assert not caps.ok
+        assert "fail-closed" in caps.reason
+
+
+# ---------------------------------------------------------------------------
+# Allowlist (sportsbooks never)
+# ---------------------------------------------------------------------------
+
+class TestAllowlist:
+    def test_pass_allowlisted_venue(self):
+        assert make_validator()._check_allowlist(flip_enable()).ok
+
+    def test_fail_unlisted_venue(self):
+        result = make_validator()._check_allowlist(flip_enable(venue="hyperliquid"))
+        assert not result.ok
+        assert "not on venue allowlist" in result.reason
+
+    def test_fail_sportsbook_always(self):
+        # Even if someone puts a sportsbook ON the allowlist, it still fails.
+        policy = make_policy(venue_allowlist=["kalshi", "draftkings"])
+        result = make_validator(policy=policy)._check_allowlist(
+            flip_enable(venue="draftkings"))
+        assert not result.ok
+        assert "never permitted" in result.reason
+
+    def test_fail_no_venue_named(self):
+        intent = Intent("rotate_secret", {"secret_name": "X"}, "r1")
+        assert not make_validator()._check_allowlist(intent).ok
+
+    def test_move_checks_both_venues(self):
+        v = make_validator()
+        bad = Intent("move_capital", {"amount_usd": 10.0, "from_venue": "kalshi",
+                                      "to_venue": "bovada"}, "m9")
+        assert not v._check_allowlist(bad).ok
+
+
+# ---------------------------------------------------------------------------
+# Gate-config hash (DoD item 4 — simulated merged threshold edit)
+# ---------------------------------------------------------------------------
+
+class TestGateHashes:
+    def test_pass_when_live_matches_registered(self):
+        assert make_validator()._check_gate_hashes(flip_enable()).ok
+
+    def test_fail_on_merged_threshold_edit(self):
+        edited = dict(GATE_CONFIG, min_net_roi=0.001)  # loosened via a merge
+        v = make_validator(sources=healthy_sources(gate_config=lambda name: edited))
+        result = v._check_gate_hashes(flip_enable())
+        assert not result.ok
+        assert "hash mismatch" in result.reason
+
+    def test_fail_closed_when_gate_unreadable(self):
+        def boom(name):
+            raise KeyError(name)
+        v = make_validator(sources=healthy_sources(gate_config=boom))
+        results = v.validate(flip_enable())
+        gate = next(r for r in results if r.name == "gate_hashes")
+        assert not gate.ok
+        assert "fail-closed" in gate.reason
+
+
+# ---------------------------------------------------------------------------
+# Kill-state
+# ---------------------------------------------------------------------------
+
+class TestKillState:
+    def test_pass_when_clear(self):
+        assert make_validator()._check_kill_state(flip_enable()).ok
+
+    def test_fail_global_kill(self):
+        policy = make_policy(kill_state={"global": True, "lanes": {}})
+        assert not make_validator(policy=policy)._check_kill_state(flip_enable()).ok
+
+    def test_fail_any_lane_halted(self):
+        policy = make_policy(kill_state={"global": False,
+                                         "lanes": {"perp-carry": True}})
+        result = make_validator(policy=policy)._check_kill_state(move())
+        assert not result.ok
+        assert "perp-carry" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Live reconciliation (DoD item 3 — break halts ALL capital moves)
+# ---------------------------------------------------------------------------
+
+class TestReconciliation:
+    def test_pass_within_tolerance(self):
+        queue = IntentQueue(":memory:")
+        v = make_validator(queue=queue)
+        assert v._check_reconciliation(move()).ok
+        assert queue.halt_active(HALT_SCOPE_CAPITAL) is False
+
+    def test_break_fails_and_halts_all_capital_moves(self):
+        queue = IntentQueue(":memory:")
+        v = make_validator(
+            queue=queue,
+            sources=healthy_sources(
+                venue_balances=lambda: {"kalshi": 2500.0, "polymarket": 2000.0}),
+        )
+        result = v._check_reconciliation(move())
+        assert not result.ok
+        assert "reconciliation break" in result.reason
+        assert queue.halt_active(HALT_SCOPE_CAPITAL) is True
+
+    def test_fail_closed_on_nan_balance_without_halt(self):
+        # A NaN balance is unverifiable → fail closed; only a CONFIRMED break
+        # records the capital-moves halt.
+        queue = IntentQueue(":memory:")
+        v = make_validator(queue=queue, sources=healthy_sources(
+            venue_balances=lambda: {"kalshi": float("nan"), "polymarket": 2000.0}))
+        results = v.validate(move())
+        recon = next(r for r in results if r.name == "reconciliation")
+        assert not recon.ok
+        assert "non-finite" in recon.reason
+        assert queue.halt_active(HALT_SCOPE_CAPITAL) is False
+
+    def test_fail_closed_when_venue_balances_unreadable(self):
+        def boom():
+            raise TimeoutError("venue API timeout")
+        v = make_validator(sources=healthy_sources(venue_balances=boom))
+        results = v.validate(move())
+        recon = next(r for r in results if r.name == "reconciliation")
+        assert not recon.ok
+        assert "fail-closed" in recon.reason
+
+
+# ---------------------------------------------------------------------------
+# Capital-moves halt gate
+# ---------------------------------------------------------------------------
+
+class TestCapitalHalt:
+    def test_pass_when_no_halt(self):
+        assert make_validator()._check_capital_halt(move()).ok
+
+    def test_fail_when_capital_halted(self):
+        queue = IntentQueue(":memory:")
+        queue.record_halt(HALT_SCOPE_CAPITAL, "earlier recon break")
+        assert not make_validator(queue=queue)._check_capital_halt(move()).ok
+
+    def test_fail_when_all_scope_halted(self):
+        queue = IntentQueue(":memory:")
+        queue.record_halt(HALT_SCOPE_ALL, "operator stop")
+        assert not make_validator(queue=queue)._check_capital_halt(move()).ok
+
+
+# ---------------------------------------------------------------------------
+# Freshness
+# ---------------------------------------------------------------------------
+
+class TestFreshness:
+    def test_pass_when_fresh(self):
+        assert make_validator()._check_freshness(flip_enable()).ok
+
+    def test_fail_stale_input(self):
+        v = make_validator(sources=healthy_sources(
+            input_ages_seconds=lambda: {"prices": 9999.0}))
+        result = v._check_freshness(flip_enable())
+        assert not result.ok
+        assert "stale" in result.reason
+
+    def test_fail_dead_heartbeat(self):
+        v = make_validator(sources=healthy_sources(
+            heartbeat_ages_seconds=lambda: {"ws_feed": 100000.0}))
+        assert not v._check_freshness(flip_enable()).ok
+
+    def test_fail_closed_when_nothing_reported(self):
+        v = make_validator(sources=healthy_sources(input_ages_seconds=lambda: {}))
+        result = v._check_freshness(flip_enable())
+        assert not result.ok
+        assert "cannot verify" in result.reason
+
+    def test_fail_closed_on_nan_age(self):
+        # NaN > ttl is always False — must not pass as "fresh".
+        v = make_validator(sources=healthy_sources(
+            input_ages_seconds=lambda: {"prices": float("nan")}))
+        result = v._check_freshness(flip_enable())
+        assert not result.ok
+        assert "non-finite" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Cooldown
+# ---------------------------------------------------------------------------
+
+class TestCooldown:
+    def test_pass_outside_window(self):
+        assert make_validator()._check_cooldown(flip_enable()).ok
+
+    def test_fail_within_window(self):
+        v = make_validator(sources=healthy_sources(
+            seconds_since_last_flip=lambda: 60.0))
+        result = v._check_cooldown(flip_enable())
+        assert not result.ok
+        assert "cooldown" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Kill-switch dry-run (DoD item 6 — BEFORE the first order)
+# ---------------------------------------------------------------------------
+
+class TestKillSwitchDryRun:
+    def test_pass_when_dry_run_halts(self):
+        assert make_validator()._check_kill_switch_dry_run(flip_enable()).ok
+
+    def test_fail_when_dry_run_fails(self):
+        v = make_validator(sources=healthy_sources(kill_switch_dry_run=lambda: False))
+        result = v._check_kill_switch_dry_run(flip_enable())
+        assert not result.ok
+        assert "no order may be placed" in result.reason
+
+    def test_dry_run_runs_for_enable_not_disable(self):
+        v = make_validator()
+        enable_names = [r.name for r in v.validate(flip_enable())]
+        disable_names = [r.name for r in v.validate(flip_disable())]
+        assert "kill_switch_dry_run" in enable_names
+        assert "kill_switch_dry_run" not in disable_names
+
+
+# ---------------------------------------------------------------------------
+# Micro-entry
+# ---------------------------------------------------------------------------
+
+class TestMicroEntry:
+    def test_pass_valid_config(self):
+        assert make_validator()._check_micro_entry(flip_enable()).ok
+
+    def test_fail_invalid_config(self):
+        policy = make_policy()
+        policy.micro_entry["max_first_order_usd"] = 0
+        assert not make_validator(policy=policy)._check_micro_entry(flip_enable()).ok
+
+
+# ---------------------------------------------------------------------------
+# validate() composition
+# ---------------------------------------------------------------------------
+
+class TestValidateComposition:
+    def test_all_pass_for_healthy_flip(self):
+        v = make_validator()
+        results = v.validate(flip_enable())
+        assert v.passed(results)
+
+    def test_move_runs_capital_rules_flip_does_not(self):
+        v = make_validator()
+        move_names = {r.name for r in v.validate(move())}
+        flip_names = {r.name for r in v.validate(flip_enable())}
+        assert {"caps", "reconciliation", "capital_halt"} <= move_names
+        assert not {"caps", "reconciliation"} & flip_names
+
+    def test_failures_reported_together(self):
+        v = make_validator(sources=healthy_sources(
+            kill_switch_dry_run=lambda: False,
+            seconds_since_last_flip=lambda: 1.0,
+        ))
+        results = v.validate(flip_enable())
+        assert not v.passed(results)
+        failures = v.failures(results)
+        assert "cooldown" in failures and "kill_switch_dry_run" in failures

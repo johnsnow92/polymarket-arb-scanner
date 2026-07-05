@@ -4,6 +4,8 @@ Python CLI that scans for arbitrage and trading opportunities across prediction 
 
 > Renamed from `polymarket-arb-scanner` on 2026-05-09. The new name reflects the actual scope — a grid of platforms × layers × strategies, not a Polymarket-only scanner. Local clones may keep the old directory name without any functional impact.
 
+> **Portfolio context.** arbgrid is **Lane A (prediction markets)** of the *Financial Markets — Algorithmic Capture* command center (`~/Financial Markets with AI/`), which owns portfolio-level strategy, capital, tax, secrets, and cross-engine P&L across all lanes (this engine + quant-engine + edge-radar). **Capital/tax/risk/secrets policy lives there, not here** — this repo owns detection and execution code only. Engine-scoped strategy economics: [`docs/STRATEGY-FINANCIAL-FORECAST.md`](docs/STRATEGY-FINANCIAL-FORECAST.md); mode↔strategy bridge: [`docs/MODE-STRATEGY-MAP.md`](docs/MODE-STRATEGY-MAP.md).
+
 ## What It Does
 
 `arbgrid` watches 8 trading venues for mispricings, low-risk edges, and market-making opportunities, then executes against them subject to risk limits. It supports:
