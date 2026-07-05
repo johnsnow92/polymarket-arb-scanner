@@ -301,6 +301,31 @@ class ArbitrageExecutor:
                 self._log_skipped(opportunity, "whale_position_limit")
                 return False
 
+        # 0e. Plan 10 / MM pilot single-choke-point guard. The legacy
+        # KalshiRewards path (this method's opp_type == "KalshiRewards"
+        # branch below, and _build_legs -> _execute_single_leg's kalshi arm)
+        # calls kalshi_client.place_order directly and is pre-existing on
+        # master — it does NOT run through KalshiMMPilot.authorize_order's
+        # kill switch, caps, or gates. That is fine when nothing else is
+        # quoting Kalshi, but once the MM pilot owns Kalshi quoting
+        # (MM_KALSHI_PILOT_ENABLED), two independent systems placing orders
+        # on the same venue at once is exactly the failure mode the pilot's
+        # single-choke-point design exists to prevent. Fail closed: disable
+        # this path entirely while the pilot is enabled, regardless of
+        # DRY_RUN/REWARDS_ENABLED. When the flag is false, behavior here is
+        # unchanged from master.
+        if opp_type == "KalshiRewards":
+            from config import MM_KALSHI_PILOT_ENABLED
+            if MM_KALSHI_PILOT_ENABLED:
+                logger.warning(
+                    "[MM_PILOT] Legacy KalshiRewards execution path disabled "
+                    "while MM_KALSHI_PILOT_ENABLED=true — %s skipped (the "
+                    "pilot owns Kalshi quoting; see "
+                    "docs/plans/10-mm-pilot-prep.md)", market,
+                )
+                self._log_skipped(opportunity, "mm_pilot_owns_kalshi")
+                return False
+
         prefix = "[DRY RUN] " if self.dry_run else ""
 
         logger.info(f"{prefix}--- Evaluating: {market} ({opp_type}) ---")

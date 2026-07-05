@@ -2625,3 +2625,73 @@ class TestDerivePositionPlatform:
     def test_empty_legs_returns_unknown(self):
         from executor import _derive_position_platform
         assert _derive_position_platform([]) == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Finding #1: the legacy KalshiRewards execution path (opp_type ==
+# "KalshiRewards" -> _build_legs -> _execute_single_leg's kalshi arm,
+# calling kalshi_client.place_order directly) must be disabled while the MM
+# pilot owns Kalshi quoting (MM_KALSHI_PILOT_ENABLED) — two independent
+# systems placing orders on the same venue at once defeats the pilot's
+# single-choke-point safety design. When the flag is false, this path is
+# unchanged from master.
+# Fail-before: opp_type == "KalshiRewards" ran straight through execute()'s
+# full pipeline into kalshi_client.place_order with no awareness of the
+# pilot at all, regardless of MM_KALSHI_PILOT_ENABLED.
+# ---------------------------------------------------------------------------
+
+class TestMmPilotBlocksLegacyKalshiRewards:
+    def _opportunity(self):
+        return {
+            "type": "KalshiRewards",
+            "market": "KXTEST-26DEC31",
+            "market_ticker": "KXTEST-26DEC31",
+            "optimal_bid": 0.45,
+            "optimal_ask": 0.55,
+            "size": 5.0,
+        }
+
+    def test_blocked_when_pilot_enabled(self, executor, db, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", True)
+        result = executor.execute(self._opportunity())
+        assert result is False
+        executor.kalshi_client.place_order.assert_not_called()
+        opps = db.get_recent_opportunities()
+        assert opps[-1]["action"] == "skipped:mm_pilot_owns_kalshi"
+
+    def test_unaffected_when_pilot_disabled(self, executor, db, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", False)
+        # Needed only because this test now runs deep enough into the
+        # pipeline (risk_manager.check's Kalshi balance comparison) to
+        # touch it — unrelated to the guard under test.
+        executor.kalshi_client.get_balance.return_value = 100.0
+        executor.execute(self._opportunity())
+        opps = db.get_recent_opportunities()
+        # Whatever happens to this opportunity downstream (revalidation,
+        # risk gate, leg building) is out of scope here — the only thing
+        # under test is that the NEW guard did not fire when disabled.
+        assert opps[-1]["action"] != "skipped:mm_pilot_owns_kalshi"
+
+    def test_other_opp_types_unaffected_by_the_flag(self, executor, db,
+                                                     monkeypatch):
+        """The guard is scoped to opp_type == "KalshiRewards" only — it must
+        not touch any other strategy's execution path."""
+        import config
+        monkeypatch.setattr(config, "MM_KALSHI_PILOT_ENABLED", True)
+        executor.pm_trader.get_balance.return_value = 100.0
+        opp = {
+            "type": "Binary",
+            "market": "Test Market",
+            "prices": "Y=0.400 N=0.450",
+            "total_cost": "$0.8500",
+            "net_profit": 0.138,
+            "net_roi": "16.2%",
+            "_clob_depth": 100.0,
+            "_token_ids": ["tok_yes", "tok_no"],
+        }
+        result = executor.execute(opp)
+        assert result is True
+        opps = db.get_recent_opportunities()
+        assert opps[-1]["action"] != "skipped:mm_pilot_owns_kalshi"
