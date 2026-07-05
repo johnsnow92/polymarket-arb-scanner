@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from earnings_mention import OosStats
+from kalshi_api import PaginationIncompleteError
 from scripts.run_earnings_mention_oos import (
     _check_state_anomaly,
     _format_failure_notice,
@@ -31,14 +32,24 @@ from scripts.run_earnings_mention_oos import (
 
 # --------------------------------------------------------------------------- #
 # Fake client — a settled-markets list + a per-ticker candlestick table.
+#
+# fetch_candlesticks contract (matches kalshi_api.KalshiClient after the
+# CodeRabbit/Codex fixes): a ticker mapped to None simulates a TRANSIENT
+# request failure (price_at_t24h raises CandleFetchError); a ticker mapped
+# to [] (or simply absent from the table) simulates a successful request
+# that found no candles in the window -- PERMANENT, price_at_t24h returns
+# None without raising. These are NOT interchangeable.
 # --------------------------------------------------------------------------- #
 class FakeClient:
-    def __init__(self, settled=None, candles=None):
+    def __init__(self, settled=None, candles=None, raise_pagination_error=False):
         self._settled = settled if settled is not None else []
         self._candles = candles or {}
         self.candlestick_tickers: list[str] = []
+        self._raise_pagination_error = raise_pagination_error
 
     def fetch_settled_markets(self, min_close_ts, *a, **k):
+        if self._raise_pagination_error:
+            raise PaginationIncompleteError("simulated incomplete pagination")
         return self._settled
 
     def fetch_candlesticks(self, series_ticker, ticker, start_ts, end_ts, period_interval=60):
@@ -51,7 +62,7 @@ def _candle(close_dollars: str) -> dict:
 
 
 def _market(ticker: str, close: str, result: str = "yes", title: str = "Will Foo mention Bar?",
-            series_ticker: str = "S", **extra) -> dict:
+            series_ticker: str = "KXEARNINGSMENTIONBA", **extra) -> dict:
     m = {"ticker": ticker, "title": title, "close_time": close, "result": result, "series_ticker": series_ticker}
     m.update(extra)
     return m
@@ -127,15 +138,23 @@ class TestCheckStateAnomaly:
         state = {"first_seen_ts": NOW.isoformat(), "resolved": []}
         assert _check_state_anomaly(state, NOW + timedelta(days=3)) is None
 
+    def test_no_anomaly_within_a_generous_zero_settlement_gap(self):
+        """A 20-day gap with zero settlements is plausible on its own
+        (mention-market settlements are lumpy, tied to quarterly earnings)
+        -- must not fire below the 30-day threshold."""
+        state = {"first_seen_ts": (NOW - timedelta(days=20)).isoformat(), "resolved": []}
+        assert _check_state_anomaly(state, NOW) is None
+
     def test_no_anomaly_when_resolved_present_even_if_old(self):
-        state = {"first_seen_ts": (NOW - timedelta(days=30)).isoformat(), "resolved": [{"ticker": "X"}]}
+        state = {"first_seen_ts": (NOW - timedelta(days=45)).isoformat(), "resolved": [{"ticker": "X"}]}
         assert _check_state_anomaly(state, NOW) is None
 
     def test_anomaly_when_old_and_empty(self):
-        state = {"first_seen_ts": (NOW - timedelta(days=30)).isoformat(), "resolved": []}
+        state = {"first_seen_ts": (NOW - timedelta(days=45)).isoformat(), "resolved": []}
         msg = _check_state_anomaly(state, NOW)
         assert msg is not None
         assert "eviction" in msg or "reset" in msg
+        assert "MAY be" in msg  # softened language -- acknowledges the genuine-gap possibility
 
     def test_no_anomaly_with_unparseable_first_seen(self):
         assert _check_state_anomaly({"first_seen_ts": "not-a-date", "resolved": []}, NOW) is None
@@ -167,7 +186,7 @@ class TestRunCycle:
         assert result["watermark_ts"] == CLOSE_TS + 1
 
     def test_non_mention_market_advances_watermark_but_is_not_tracked_seen(self):
-        market = _market("BTC1", CLOSE_ISO, result="yes", title="Will BTC hit 100k?")
+        market = _market("BTC1", CLOSE_ISO, result="yes", title="Will BTC hit 100k?", series_ticker="KXBTC")
         client = FakeClient(settled=[market])
         state = {**_fresh_state(), "watermark_ts": 0}
         result = run_cycle(client, NOW, state)
@@ -194,9 +213,12 @@ class TestRunCycle:
         assert client.candlestick_tickers == []  # never even attempted
         assert result["watermark_ts"] == 0  # unchanged -- the only candidate was already seen
 
-    def test_candlestick_failure_is_not_marked_seen_and_rolls_back_watermark(self):
+    def test_candlestick_request_failure_is_not_marked_seen_and_rolls_back_watermark(self):
+        """candles={"M1": None} simulates a TRANSIENT request failure
+        (price_at_t24h raises CandleFetchError) -- must be retried, not
+        excluded."""
         market = _market("M1", CLOSE_ISO, result="yes")
-        client = FakeClient(settled=[market], candles={})  # no candles -> price_at_t24h -> None
+        client = FakeClient(settled=[market], candles={"M1": None})
         state = {**_fresh_state(), "watermark_ts": 0}
         result = run_cycle(client, NOW, state)
         assert result["resolved"] == []
@@ -204,9 +226,25 @@ class TestRunCycle:
         assert result["_failed_tickers"] == ["M1"]
         assert result["watermark_ts"] == CLOSE_TS - 1  # rolled back so it's retried next cycle
 
+    def test_no_candle_data_is_permanent_not_a_retryable_failure(self):
+        """candles={} (or the ticker simply absent) simulates a SUCCESSFUL
+        request that genuinely found zero candles in the window -- e.g. the
+        market's whole lifetime was shorter than the T-24h lookback. This
+        is PERMANENT: must be marked seen and excluded, NOT added to
+        _failed_tickers (which would retry forever for data that will never
+        exist), and must NOT roll back the watermark."""
+        market = _market("M1", CLOSE_ISO, result="yes")
+        client = FakeClient(settled=[market], candles={})
+        state = {**_fresh_state(), "watermark_ts": 0}
+        result = run_cycle(client, NOW, state)
+        assert result["resolved"] == []
+        assert result["seen"] == ["M1"]          # excluded for good
+        assert result["_failed_tickers"] == []   # NOT a retryable failure
+        assert result["watermark_ts"] == CLOSE_TS + 1  # advances normally, no rollback
+
     def test_failed_ticker_is_retried_and_succeeds_next_cycle(self):
         market = _market("M1", CLOSE_ISO, result="yes")
-        client1 = FakeClient(settled=[market], candles={})  # fails this cycle
+        client1 = FakeClient(settled=[market], candles={"M1": None})  # transient failure this cycle
         result1 = run_cycle(client1, NOW, {**_fresh_state(), "watermark_ts": 0})
         assert result1["_failed_tickers"] == ["M1"]
         state1 = _persistable(result1)
@@ -217,6 +255,16 @@ class TestRunCycle:
         assert [r["ticker"] for r in result2["resolved"]] == ["M1"]
         assert result2["_new_resolved"] == 1
         assert result2["_failed_tickers"] == []
+
+    def test_pagination_incomplete_error_propagates_uncaught(self):
+        """run_cycle does not swallow a discovery-level pagination failure
+        -- the caller (main()) is responsible for the whole-cycle,
+        cron-safe abort. Silently continuing past an incomplete settled-
+        markets fetch risks a biased verdict or a watermark advanced past
+        markets never actually seen."""
+        client = FakeClient(raise_pagination_error=True)
+        with pytest.raises(PaginationIncompleteError):
+            run_cycle(client, NOW, _fresh_state())
 
     def test_resolved_history_accumulates_across_cycles(self):
         market1 = _market("M1", CLOSE_ISO, result="yes")

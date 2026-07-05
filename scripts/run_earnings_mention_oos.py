@@ -21,10 +21,23 @@ reconstructs each one's T-24h price after the fact via candlesticks
 state is just a time watermark + a set of already-processed tickers + the
 accumulated resolved history.
 
-Fail-closed on partial failures: if fetch_settled_markets returns a market
-whose candlestick fetch fails this cycle, it is neither marked seen nor
-counted, and the watermark never advances past it — it's retried next
-cycle. Any such failure this cycle suppresses the normal verdict alert (a
+Fail-closed on partial failures, at two levels:
+  - Per-ticker: a market whose candlestick fetch itself FAILS (network/HTTP
+    error — earnings_mention.CandleFetchError) is neither marked seen nor
+    counted, and the watermark rolls back so it's retried next cycle. This
+    is distinct from a market that has NO usable candle because it
+    genuinely never traded in the T-24h window (e.g. its whole lifetime was
+    shorter than the lookback) — earnings_mention.price_at_t24h returns
+    None for that, a PERMANENT condition, so it's marked seen and excluded
+    immediately rather than retried forever (both cases used to look
+    identical — "returns None either way" — which permanently stuck a
+    market that could never resolve in the retry queue).
+  - Whole-cycle: kalshi_api.fetch_settled_markets raises
+    PaginationIncompleteError rather than returning a silently-partial
+    list if a page fails or the page budget is exhausted with more data
+    available. main() treats that as a total cycle failure: no state
+    change, no alert, try again next scheduled run.
+Any per-ticker failure this cycle suppresses the normal verdict alert (a
 partial-cycle verdict could be biased if the failures aren't random) in
 favor of a distinct failure notice; state changes are still saved so
 progress from tickers that DID resolve cleanly this cycle isn't lost.
@@ -69,6 +82,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from earnings_mention import (  # noqa: E402
+    CandleFetchError,
     OosStats,
     Resolved,
     _close_time,
@@ -79,7 +93,7 @@ from earnings_mention import (  # noqa: E402
     price_at_t24h,
     verdict,
 )
-from kalshi_api import KalshiClient  # noqa: E402
+from kalshi_api import KalshiClient, PaginationIncompleteError  # noqa: E402
 from notifier import WebhookNotifier  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -87,8 +101,13 @@ logger = logging.getLogger(__name__)
 
 # A loaded state older than this with zero resolved records is suspicious
 # enough to log/alert loudly rather than silently proceed (see
-# _check_state_anomaly).
-ANOMALY_MIN_AGE_DAYS = 14.0
+# _check_state_anomaly). 30d (not a shorter window) because mention-market
+# settlements are lumpy -- tied to each company's quarterly earnings call --
+# so a multi-week gap with genuinely zero settlements is plausible on its
+# own and shouldn't page anyone; this can't fully tell the two apart (see
+# _check_state_anomaly's docstring), so it trades some detection latency
+# for fewer false alarms.
+ANOMALY_MIN_AGE_DAYS = 30.0
 
 
 def _empty_state() -> dict:
@@ -175,11 +194,20 @@ def save_state(path: Path | None, state: dict) -> None:
 def _check_state_anomaly(state: dict, now: datetime, min_age_days: float = ANOMALY_MIN_AGE_DAYS) -> str | None:
     """Best-effort check: does the freshly-loaded state look like it silently
     reset (e.g. an actions/cache eviction) rather than being a genuine first
-    run? Self-referential: if the ENTIRE cache is wiped, first_seen_ts is
-    wiped along with it, so this specific case can't be detected here — this
-    is a floor on visibility, not a guarantee. See the module docstring for
-    the reasoning on why a second, independently-durable store (e.g.
-    committing state to git) was not added on top of this.
+    run?
+
+    Two acknowledged, undetectable-from-here limitations (documented rather
+    than "fixed" — neither has a clean fix without a second, independently
+    durable signal this pipeline doesn't have, see the module docstring):
+      - Self-referential: if the ENTIRE cache is wiped, first_seen_ts is
+        wiped along with it, so a total wipe can't be detected here.
+      - Ambiguous with a genuine zero-settlement period: mention-market
+        settlements are lumpy (quarterly per company), so an old
+        first_seen_ts with zero resolved records could mean either "cache
+        reset" or "nothing has settled yet, and that's normal." This
+        function cannot tell those apart; it only knows the gap has gone on
+        long enough (ANOMALY_MIN_AGE_DAYS) to be worth a human glance at the
+        run history either way.
     """
     first_seen = state.get("first_seen_ts")
     if not first_seen:
@@ -191,7 +219,10 @@ def _check_state_anomaly(state: dict, now: datetime, min_age_days: float = ANOMA
     if age_days >= min_age_days and not state.get("resolved"):
         return (
             f"state has first_seen_ts={first_seen} ({age_days:.1f}d ago) but 0 "
-            "resolved records loaded -- possible actions/cache eviction or reset."
+            "resolved records loaded. This MAY be a genuine zero-settlement "
+            "gap (mention-market settlements are lumpy, tied to quarterly "
+            "earnings) rather than a cache reset -- but it's gone on long "
+            "enough to be worth a human glance at the run history."
         )
     return None
 
@@ -247,11 +278,26 @@ def run_cycle(client, now: datetime, state: dict) -> dict:
             newly_seen.add(ticker)  # voided/undecided -- will never resolve differently
             continue
 
-        price = price_at_t24h(client, market)
-        if price is None:
+        try:
+            price = price_at_t24h(client, market)
+        except CandleFetchError as exc:
+            # Transient: the candlestick request itself failed. Not seen,
+            # not counted -- retried next cycle via the watermark rollback
+            # below.
+            logger.debug("Candlestick fetch failed for %s: %s", ticker, exc)
             failed_tickers.append(ticker)
             if close_ts is not None:
                 min_failed_close_ts = close_ts if min_failed_close_ts is None else min(min_failed_close_ts, close_ts)
+            continue
+
+        if price is None:
+            # Permanent: the request succeeded but there is definitively no
+            # usable candle (e.g. the market's whole lifetime was shorter
+            # than the T-24h lookback window). Mark seen so it's excluded
+            # for good -- retrying can never produce different data, and
+            # treating this the same as a transient failure would
+            # permanently jam the watermark on an unfixable ticker.
+            newly_seen.add(ticker)
             continue
 
         newly_resolved.append(build_resolved(market, price))
@@ -367,7 +413,17 @@ def main() -> None:
         if token and chat_id:
             WebhookNotifier("telegram").notify_text(f"⚠️ Earnings-Mention OOS Logger anomaly: {anomaly}")
 
-    result = run_cycle(client, now, state)
+    try:
+        result = run_cycle(client, now, state)
+    except PaginationIncompleteError as exc:
+        # The discovery step itself couldn't retrieve a complete result set
+        # this cycle (a page failed, or the page budget ran out with more
+        # data available). Treating a partial list as complete risks a
+        # biased verdict or a watermark advanced past markets never
+        # actually seen -- so this is a whole-cycle abort, not a per-ticker
+        # retry: no state change, no alert, try again next scheduled run.
+        logger.error("OOS cycle aborted: settled-markets discovery incomplete: %s. Cron-safe exit, no state change.", exc)
+        return
 
     stats: OosStats = result.pop("_stats")
     prev_verdict: str = result.pop("_prev_verdict")

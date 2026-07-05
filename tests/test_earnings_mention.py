@@ -52,17 +52,30 @@ def _market(ticker="M1", title="Will Apple mention AI?", close=CLOSE, result="ye
 
 
 # --------------------------------------------------------------------------- #
-# classify_market (unchanged by the redesign)
+# classify_market — series-ticker prefix ONLY, not a title/text pattern.
+#
+# An earlier version OR'd a loose title regex (\bsay\b, \bmention(s|ed)?\b,
+# ...) into the classifier. That let ANY settled market whose title happened
+# to contain a common English word pass as a "mention market" -- e.g. "Will
+# Trump say recession?" -- contaminating the exact statistic the OOS logger
+# exists to compute. classify_market is now series-ticker-only: precise by
+# construction (Kalshi's own naming), not prose.
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("title,expected", [
-    ("Will Apple mention 'AI' on its earnings call?", True),
-    ("How many times will Tesla say 'robotaxi'?", True),
-    ("Will NVIDIA mentions exceed 5?", True),
-    ("Will BTC be above $100k at year end?", False),
-    ("Will the Fed cut rates in July?", False),
+@pytest.mark.parametrize("market,expected", [
+    # Confirmed KXEARNINGSMENTION* markets (T1-pm-dispersion-novelty.md;
+    # t1-kalshi-company-pilot.json's earnings_mention_series list).
+    ({"ticker": "KXEARNINGSMENTIONBA-26Q2", "series_ticker": "KXEARNINGSMENTIONBA"}, True),
+    ({"ticker": "KXEARNINGSMENTIONTSLA-26Q3-YES", "event_ticker": "KXEARNINGSMENTIONTSLA-26Q3"}, True),
+    ({"ticker": "KXEARNINGSMENTIONNVDA-26Q1-YES"}, True),  # falls back to the bare ticker prefix
+    ({"ticker": "kxearningsmentionmeta-26q2"}, True),      # case-insensitive
+    # Unrelated markets that an earlier loose title regex would have caught.
+    ({"ticker": "KXTRUMPSAY-26JUL", "title": "Will Trump say recession?"}, False),
+    ({"ticker": "KXWCMENTION-26JUL", "title": "Will a contestant mention the show's name?"}, False),
+    ({"ticker": "KXBTC-26FEB07-T101999", "title": "Will BTC be above $100k at year end?"}, False),
+    ({"ticker": "KXFED-26JUL", "title": "Will the Fed cut rates in July?"}, False),
 ])
-def test_classify_market(title, expected):
-    assert em.classify_market({"title": title, "ticker": "X"}) is expected
+def test_classify_market(market, expected):
+    assert em.classify_market(market) is expected
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +188,10 @@ def test_price_at_t24h_none_when_no_series_derivable():
 
 
 def test_price_at_t24h_none_when_no_candles_in_window():
+    """Ticker absent from the fake's table simulates a SUCCESSFUL fetch that
+    genuinely found zero candles (e.g. the market didn't exist yet at
+    T-24h) -- permanent, not a failure: price_at_t24h returns None, it does
+    NOT raise."""
     market = _market(series_ticker="S")
     assert em.price_at_t24h(FakeClient(candles={}), market) is None
 
@@ -183,6 +200,18 @@ def test_price_at_t24h_none_when_candle_unusable():
     market = _market(series_ticker="S")
     client = FakeClient(candles={"M1": [{}]})  # candle with no usable price fields
     assert em.price_at_t24h(client, market) is None
+
+
+def test_price_at_t24h_raises_on_fetch_failure():
+    """A None return from fetch_candlesticks means the REQUEST itself failed
+    (network/HTTP error) -- transient. This must be distinguishable from a
+    genuinely-empty candle list (permanent: no data ever existed for this
+    window) so the caller can retry the former and permanently exclude the
+    latter instead of retrying it forever."""
+    market = _market(series_ticker="S")
+    client = FakeClient(candles={"M1": None})
+    with pytest.raises(em.CandleFetchError):
+        em.price_at_t24h(client, market)
 
 
 # --------------------------------------------------------------------------- #

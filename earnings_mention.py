@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import logging
 import math
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from statistics import fmean, stdev
@@ -59,23 +58,43 @@ CANDLE_WINDOW_START_H = 26.0   # window opens at close-26h
 CANDLE_WINDOW_END_H = 23.0     # window closes at close-23h
 CANDLE_PERIOD_MIN = 60         # hourly candles
 
-# Conservative (false-negative-biased) classifier defaults. Calibrate
-# SERIES_PREFIXES against the in-sample pilot market list before relying on it.
-SERIES_PREFIXES: tuple[str, ...] = ()
-TITLE_PATTERNS: tuple[str, ...] = (
-    r"\bmention(s|ed)?\b",
-    r"\bsay\b",
-    r"\bsaid\b",
-    r"how many times",
-    r"number of times",
-    r"\bon (the|its) .*earnings call\b",
-)
-_TITLE_RE = re.compile("|".join(TITLE_PATTERNS), re.IGNORECASE)
+# Series-ticker prefixes for the company-KPI / earnings-mention family this
+# pilot targets. KXEARNINGSMENTION confirmed directly against both the T1
+# brief ("145 earnings-call mention series: KXEARNINGSMENTION{TSLA,NVDA,
+# META,COST,PLTR,...}") and the in-sample pilot's actual market list
+# (t1-kalshi-company-pilot.json's earnings_mention_series: KXEARNINGSMENTIONLOW,
+# KXEARNINGSMENTIONBA, KXEARNINGSMENTIONKKR, KXEARNINGSMENTIONDPZ, ...).
+#
+# The broader KPI-bracket family the spec also mentions (e.g. KXTESLAPROD)
+# is deliberately NOT included: enumerating it correctly needs the full
+# in-sample pilot market list (1,144 markets swept), which lives in the
+# command-center repo this pipeline does not read from, and a wrong or
+# incomplete guess risks exactly the contamination this scoping exists to
+# prevent. A narrower, verified-clean sample beats a broader, possibly-wrong
+# one for a statistic that IS the 8/3 decision input. Extending
+# SERIES_PREFIXES to the KPI-bracket family is a follow-up once that list is
+# available to whatever process maintains this file.
+SERIES_PREFIXES: tuple[str, ...] = ("KXEARNINGSMENTION",)
 
 
 class _MarketClient(Protocol):
     def fetch_candlesticks(self, series_ticker: str, ticker: str, start_ts: int, end_ts: int,
-                           *a, **k) -> list[dict]: ...
+                           *a, **k) -> list[dict] | None: ...
+
+
+class CandleFetchError(Exception):
+    """Raised by price_at_t24h when the candlestick request itself failed
+    (network/HTTP error, signaled by fetch_candlesticks returning None) —
+    a TRANSIENT condition the caller should retry.
+
+    Distinct from a plain ``None`` return from price_at_t24h, which means
+    the request succeeded (or wasn't attempted because close_time/ticker/
+    series couldn't be determined) but there is definitively no usable
+    price — e.g. a market whose entire lifetime was shorter than the T-24h
+    lookback window. That is a PERMANENT condition: retrying can never
+    produce different data, so the caller should mark the ticker
+    seen/excluded rather than retry it forever.
+    """
 
 
 @dataclass(frozen=True)
@@ -122,19 +141,17 @@ def _series_of(market: dict) -> str:
 def classify_market(market: dict) -> bool:
     """True if *market* belongs to the company-KPI / earnings-mention family.
 
-    Conservative by design: a false negative (skipping a real mention market)
-    only costs sample, while a false positive pollutes the OOS estimate.
+    Matches ONLY the confirmed series-ticker prefix(es) in SERIES_PREFIXES —
+    NOT a title/text pattern. An earlier version also OR'd in a loose title
+    regex (bare words like "say"/"mention" matched against ANY market's
+    title), which let unrelated markets like "Will Trump say recession?"
+    pass and contaminate the OOS sample — a false positive here directly
+    corrupts the statistic this whole pipeline exists to compute, which is
+    worse than a false negative (that only costs sample size). Series-ticker
+    matching is precise by construction: it's Kalshi's own naming, not prose.
     """
     series = _series_of(market)
-    if SERIES_PREFIXES and series.upper().startswith(
-        tuple(p.upper() for p in SERIES_PREFIXES)
-    ):
-        return True
-    text = " ".join(
-        str(market.get(k, ""))
-        for k in ("title", "subtitle", "yes_sub_title", "yes_subtitle")
-    )
-    return bool(_TITLE_RE.search(text))
+    return series.upper().startswith(tuple(p.upper() for p in SERIES_PREFIXES))
 
 
 def _close_time(market: dict) -> datetime | None:
@@ -211,20 +228,33 @@ def price_at_t24h(client: _MarketClient, market: dict) -> float | None:
     Samples the [close-26h, close-23h] window at hourly resolution and reads
     the last candle in it (closest to T-24h) — the same method the in-sample
     pilot used, so this needs nothing to have happened while the market was
-    still open. Returns None if close_time/ticker/series can't be determined,
-    the fetch fails, or the window has no candles (e.g. a market with zero
-    trading activity around T-24h).
+    still open.
+
+    Raises:
+        CandleFetchError: if fetch_candlesticks signals the request itself
+            failed (returns None) — transient, caller should retry.
+
+    Returns:
+        The reconstructed YES price, or None if the request succeeded (or
+        wasn't attempted because close_time/ticker/series couldn't be
+        determined) but there is definitively no usable price — e.g. a
+        market whose entire lifetime was shorter than the T-24h lookback
+        window (a genuinely empty candle list from a successful request) or
+        an unusable candle. This is PERMANENT: retrying will never produce
+        different data, unlike a CandleFetchError.
     """
     close = _close_time(market)
     ticker = str(market.get("ticker", ""))
     series = _series_ticker_for_candles(market)
     if close is None or not ticker or not series:
-        return None
+        return None  # permanent -- can never be fetched without these fields
     start_ts = int((close - timedelta(hours=CANDLE_WINDOW_START_H)).timestamp())
     end_ts = int((close - timedelta(hours=CANDLE_WINDOW_END_H)).timestamp())
     candles = client.fetch_candlesticks(series, ticker, start_ts, end_ts, CANDLE_PERIOD_MIN)
+    if candles is None:
+        raise CandleFetchError(f"candlestick fetch failed for {ticker}")
     if not candles:
-        return None
+        return None  # permanent -- request succeeded, genuinely no data in window
     return _candle_yes_price(candles[-1])
 
 
