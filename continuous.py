@@ -917,9 +917,28 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
     shutdown_event = asyncio.Event()
 
+    # Plan 10 / Codex round-2 finding #3: declared here (not later, where
+    # the MM pilot setup block used to create them) so the signal handler
+    # below can reference _mm_pilot_stop unconditionally and safely —
+    # these three names always exist in this scope regardless of whether
+    # MM_KALSHI_PILOT_ENABLED ever turns them into a running pilot.
+    _mm_pilot = None
+    _mm_pilot_thread = None
+    _mm_pilot_stop = threading.Event()
+
     def _signal_handler(sig, frame):
         logger.info("Shutting down gracefully...")
         shutdown_event.set()
+        # Signal the MM pilot to stop IMMEDIATELY, not only via the
+        # end-of-cycle cleanup path (further down this function, which
+        # only runs after the CURRENT scan cycle finishes). A long
+        # synchronous scan cycle, or a hard kill before cleanup completes,
+        # could otherwise leave live GTC orders resting on Kalshi with
+        # nothing cancelling them for however long that cycle takes. The
+        # pilot's own run_loop polls this event every ~0.5s and cancels
+        # all resting orders via stop() as soon as it notices — idempotent
+        # and safe to set here even when the pilot was never enabled.
+        _mm_pilot_stop.set()
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -975,9 +994,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     # Independently gated from the legacy MM_ENABLED path above. The pilot
     # runs its own thread so the 2s fill poll / 10s quote refresh cadences
     # are not tied to the scan interval. Fails closed at every gate.
-    _mm_pilot = None
-    _mm_pilot_thread = None
-    _mm_pilot_stop = threading.Event()
+    # _mm_pilot / _mm_pilot_thread / _mm_pilot_stop are declared earlier in
+    # this function (with the signal handler) — not re-declared here.
     if config.MM_KALSHI_PILOT_ENABLED:
         try:
             from mm_pilot import ControlsPoller, KalshiMMPilot
@@ -1035,6 +1053,17 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             _mm_pilot_stop.set()
             if _mm_pilot_thread is not None:
                 _mm_pilot_thread.join(timeout=15)
+                # Mirror the end-of-run cleanup path's force-stop symmetry
+                # (CodeRabbit round-2): a thread that started enough to
+                # place live orders but didn't unwind within the join
+                # timeout must still have those orders cancelled directly,
+                # and the stuck thread logged rather than silently dropped
+                # by clearing _mm_pilot/_mm_pilot_thread below.
+                if _mm_pilot_thread.is_alive() and _mm_pilot is not None:
+                    logger.warning(
+                        "MM pilot startup-failure thread did not stop in "
+                        "15s; forcing order cancel directly.")
+                    _mm_pilot.stop()
             _mm_pilot = None
             _mm_pilot_thread = None
 
