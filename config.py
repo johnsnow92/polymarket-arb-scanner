@@ -133,6 +133,21 @@ KELLY_MAX_FRACTION = _env_float("KELLY_MAX_FRACTION", "0.25")
 DRY_RUN = _env_bool("DRY_RUN", "true")
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "semi-auto")
 
+# Canary / paper gates (used by scripts/canary_trade.py and optional CLI)
+# CANARY_MODE=paper  → scan real matched pairs, build legs, log only (no orders)
+# CANARY_MODE=live   → place real orders with hard size/count caps below
+CANARY_MODE = os.getenv("CANARY_MODE", "").strip().lower()  # "", "paper", "live"
+CANARY_MAX_TRADE_SIZE = _env_float("CANARY_MAX_TRADE_SIZE", "1.0")
+CANARY_MAX_TRADES = _env_int("CANARY_MAX_TRADES", "1")
+CANARY_MIN_NET_ROI = _env_float("CANARY_MIN_NET_ROI", "0.01")  # 1%
+CANARY_PLATFORMS = frozenset(
+    p.strip().lower()
+    for p in os.getenv("CANARY_PLATFORMS", "polymarket,kalshi").split(",")
+    if p.strip()
+)
+# Live canary requires explicit acknowledgement to prevent accidental live runs.
+CANARY_LIVE_ACK = os.getenv("CANARY_LIVE_ACK", "").strip()
+
 # Platform execution whitelist — only these platforms can place live orders.
 # Comma-separated list of platform names. Platforms not listed here will still
 # be scanned for price data but will never execute trades.
@@ -1042,6 +1057,8 @@ _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _VALID_EXECUTION_MODES = {"semi-auto", "full-auto"}
 _VALID_FEE_MODELS = {"expected_value", "worst_case"}
 _VALID_GEMINI_ORDER_TYPES = {"ioc", "gtc"}
+_VALID_CANARY_MODES = {"", "paper", "live"}
+_CANARY_LIVE_ACK_TOKEN = "I_ACCEPT_LIVE_CANARY"
 
 
 def validate_config() -> list[str]:
@@ -1300,6 +1317,29 @@ def validate_config() -> list[str]:
         warnings.append(
             "EXECUTION_MODE=full-auto but DRY_RUN=true — "
             "no trades will be executed"
+        )
+
+    if CANARY_MODE and CANARY_MODE not in _VALID_CANARY_MODES:
+        raise ConfigError(
+            f"CANARY_MODE={CANARY_MODE!r} is not valid "
+            f"(expected one of {{'paper', 'live'}} or empty)"
+        )
+
+    if CANARY_MODE == "live" and CANARY_LIVE_ACK != _CANARY_LIVE_ACK_TOKEN:
+        raise ConfigError(
+            "CANARY_MODE=live requires "
+            f"CANARY_LIVE_ACK={_CANARY_LIVE_ACK_TOKEN!r} "
+            "(refusing accidental live canary)"
+        )
+
+    if CANARY_MODE == "live" and CANARY_MAX_TRADE_SIZE > 5.0:
+        raise ConfigError(
+            f"CANARY_MAX_TRADE_SIZE={CANARY_MAX_TRADE_SIZE} exceeds hard cap $5.00"
+        )
+
+    if CANARY_MODE == "live" and CANARY_MAX_TRADES > 3:
+        raise ConfigError(
+            f"CANARY_MAX_TRADES={CANARY_MAX_TRADES} exceeds hard cap 3"
         )
 
     # --- Startup summary for Phase 8 strategies ---

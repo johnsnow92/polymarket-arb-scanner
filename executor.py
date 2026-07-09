@@ -86,6 +86,28 @@ def _make_idempotency_key(market_id: str, side: str, price: float, extra: str = 
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def _dollar_size_to_contracts(size_dollars: float, price: float) -> int:
+    """Convert a dollar budget into whole contracts/shares at ``price``.
+
+    Executor ``size`` is always dollars of notional. Polymarket and Kalshi
+    both settle 1 contract/share → $1 payout, so quantity = floor(dollars / price).
+    Returns 0 when the budget cannot buy a single contract (caller should skip).
+    """
+    if price <= 0 or size_dollars <= 0:
+        return 0
+    return int(size_dollars / price)
+
+
+def _use_gtc_for_leg(leg_index: int = 0) -> bool:
+    """Whether this leg should rest as GTC based on ORDER_TIME_IN_FORCE."""
+    tif = (ORDER_TIME_IN_FORCE or "fok").lower()
+    if tif == "gtc":
+        return True
+    if tif == "gtc_first_leg" and leg_index == 0:
+        return True
+    return False
+
+
 def _derive_position_platform(legs: list[dict]) -> str:
     """Pick the platform label for a settled position from its legs.
 
@@ -204,6 +226,8 @@ class ArbitrageExecutor:
         self.sizing_aggressiveness = sizing_aggressiveness
         self.concurrent_execution = concurrent_execution
         self.position_sizer = position_sizer
+        # Canary session counters (hard caps when CANARY_MODE is set)
+        self._canary_trades_done = 0
         # Balance cache: avoids redundant API calls within a scan cycle
         self._balance_cache: dict = {}
         self._balance_cache_ts: float = 0.0
@@ -301,7 +325,27 @@ class ArbitrageExecutor:
                 self._log_skipped(opportunity, "whale_position_limit")
                 return False
 
-        prefix = "[DRY RUN] " if self.dry_run else ""
+        # Canary hard caps — apply before sizing so live canary cannot overrun.
+        try:
+            from config import (
+                CANARY_MODE, CANARY_MAX_TRADE_SIZE, CANARY_MAX_TRADES, CANARY_PLATFORMS,
+            )
+        except ImportError:
+            CANARY_MODE = ""
+            CANARY_MAX_TRADE_SIZE = self.max_trade_size
+            CANARY_MAX_TRADES = 0
+            CANARY_PLATFORMS = frozenset()
+        if CANARY_MODE:
+            if self._canary_trades_done >= CANARY_MAX_TRADES:
+                logger.info(
+                    "[CANARY] Max trades reached (%d/%d) — skipping: %s",
+                    self._canary_trades_done, CANARY_MAX_TRADES, market,
+                )
+                self._log_skipped(opportunity, "canary_max_trades")
+                return False
+            self.max_trade_size = min(self.max_trade_size, CANARY_MAX_TRADE_SIZE)
+
+        prefix = "[DRY RUN] " if self.dry_run else ("[CANARY] " if CANARY_MODE else "")
 
         logger.info(f"{prefix}--- Evaluating: {market} ({opp_type}) ---")
 
@@ -388,9 +432,22 @@ class ArbitrageExecutor:
                 self._log_skipped(opportunity, "user_declined")
                 return False
 
+        # 6b. Canary platform filter — only trade whitelisted venues
+        if CANARY_MODE and CANARY_PLATFORMS:
+            bad = {leg.get("platform") for leg in legs} - CANARY_PLATFORMS
+            if bad:
+                logger.info(
+                    "[CANARY] Skipping opp with non-canary platforms %s: %s",
+                    sorted(bad), market,
+                )
+                self._log_skipped(opportunity, "canary_platform_filter")
+                return False
+
         # 7. Execute or dry-run log
         if self.dry_run:
             result = self._dry_run_log(opportunity, legs, size)
+            if result and CANARY_MODE:
+                self._canary_trades_done += 1
             if _metrics and result:
                 _metrics.inc("trades_executed", {"strategy": opp_type, "status": "dry_run"})
             return result
@@ -400,6 +457,8 @@ class ArbitrageExecutor:
                 result = self._execute_legs_concurrent(opportunity, legs, size)
             else:
                 result = self._execute_legs(opportunity, legs, size)
+            if result and CANARY_MODE:
+                self._canary_trades_done += 1
             if _metrics:
                 latency = time.time() - _exec_start
                 _metrics.observe("execution_latency_seconds", {"strategy": opp_type}, latency)
@@ -2155,13 +2214,16 @@ class ArbitrageExecutor:
         # HARDEN-05: Attach a per-leg idempotency key before returning.
         # Keys are stable within a 60-second minute bucket so that retries
         # within the same minute are identifiable as duplicates by the platform.
+        # Also stamp _leg_index so gtc_first_leg TIF routing works.
         market_id = opportunity.get("market", "")
-        for leg in legs:
+        for idx, leg in enumerate(legs):
+            leg["_leg_index"] = idx
             side = leg.get("side", leg.get("token", leg.get("outcome", "")))
             leg["_idempotency_key"] = _make_idempotency_key(
                 market_id=market_id,
                 side=str(side),
                 price=float(leg.get("price", 0)),
+                extra=str(idx),
             )
 
         return legs
@@ -2555,7 +2617,7 @@ class ArbitrageExecutor:
         for leg in legs:
             price = leg.get("price", 0)
             if price > 0:
-                count = int(size / price)
+                count = _dollar_size_to_contracts(size, price)
                 plat = leg["platform"]
                 cost_per_platform[plat] = cost_per_platform.get(plat, 0) + count * price
         for plat, cost in cost_per_platform.items():
@@ -2581,21 +2643,14 @@ class ArbitrageExecutor:
                     idx, leg = futures[future]
                     try:
                         success, order_id, fill_price = future.result()
-                        trade_id = leg["_trade_id"]
+                        self._finalize_leg_trade(leg, success, order_id, fill_price)
+                        results[idx] = success
                         if success:
-                            slippage = fill_price - leg.get("price", 0) if fill_price else 0
-                            self.db.update_trade_status(trade_id, "filled", fill_price,
-                                                        slippage=slippage)
-                            leg["_fill_price"] = fill_price
-                            results[idx] = True
                             logger.info(f"Leg {idx+1} FILLED: {leg['platform']} order={order_id}")
                         else:
-                            self.db.update_trade_status(trade_id, "failed")
-                            results[idx] = False
                             logger.error(f"Leg {idx+1} FAILED: {leg['platform']}")
                     except Exception as e:
-                        trade_id = leg["_trade_id"]
-                        self.db.update_trade_status(trade_id, "failed")
+                        self._finalize_leg_trade(leg, False, leg.get("_order_id"), None)
                         results[idx] = False
                         logger.error(f"Leg {idx+1} ERROR: {e}")
         else:
@@ -2603,17 +2658,11 @@ class ArbitrageExecutor:
             for i, leg in enumerate(legs):
                 try:
                     success, order_id, fill_price = self._execute_single_leg(leg, size, opportunity)
-                    trade_id = leg["_trade_id"]
+                    self._finalize_leg_trade(leg, success, order_id, fill_price)
+                    results[i] = success
                     if success:
-                        slippage = fill_price - leg.get("price", 0) if fill_price else 0
-                        self.db.update_trade_status(trade_id, "filled", fill_price,
-                                                    slippage=slippage)
-                        leg["_fill_price"] = fill_price
-                        results[i] = True
                         logger.info(f"Leg {i+1} FILLED: {leg['platform']} order={order_id}")
                     else:
-                        self.db.update_trade_status(trade_id, "failed")
-                        results[i] = False
                         logger.error(f"Leg {i+1} FAILED: {leg['platform']}")
                         # Abort remaining legs — no point continuing
                         for j in range(i + 1, len(legs)):
@@ -2621,8 +2670,7 @@ class ArbitrageExecutor:
                         logger.warning("Aborting remaining legs after leg %d failure.", i + 1)
                         break
                 except Exception as e:
-                    trade_id = leg["_trade_id"]
-                    self.db.update_trade_status(trade_id, "failed")
+                    self._finalize_leg_trade(leg, False, leg.get("_order_id"), None)
                     results[i] = False
                     logger.error(f"Leg {i+1} ERROR: {e}")
                     for j in range(i + 1, len(legs)):
@@ -2696,13 +2744,17 @@ class ArbitrageExecutor:
                         # Use actual fill price from the executor; fall back to limit
                         # only if poller couldn't return one (should not happen post-fix).
                         fill_price = leg.get("_fill_price") or leg.get("price", 0)
+                        # Hedge the filled contract/share quantity, not the dollar budget.
+                        fill_qty = leg.get("_fill_qty") or _dollar_size_to_contracts(
+                            size, fill_price or leg.get("price", 0),
+                        )
                         hedger.queue_hedge(
                             trade_id=leg.get("_trade_id"),
                             platform=leg["platform"],
                             token_id=leg.get("_token_id", leg.get("_ticker", "")),
                             side=leg.get("side", ""),
                             fill_price=fill_price,
-                            size=size,
+                            size=float(fill_qty),
                             opportunity_id=opp_id,
                             market_id=leg.get("_market_id"),
                             selection_id=leg.get("_selection_id"),
@@ -2715,7 +2767,7 @@ class ArbitrageExecutor:
                         # Attempt immediate hedge
                         hedger.process_pending_hedges()
             else:
-                    # Legacy fallback: cancel + orphan
+                # Legacy fallback: cancel + orphan
                 for i, leg in enumerate(legs):
                     if results.get(i) and leg.get("_order_id"):
                         cancel_ok = self._cancel_leg(leg)
@@ -2794,24 +2846,18 @@ class ArbitrageExecutor:
                 idx, leg = futures[future]
                 try:
                     success, order_id, fill_price = future.result()
-                    trade_id = leg["_trade_id"]
+                    self._finalize_leg_trade(leg, success, order_id, fill_price)
+                    results[idx] = success
                     if success:
-                        slippage = fill_price - leg.get("price", 0) if fill_price else 0
-                        self.db.update_trade_status(
-                            trade_id, "filled", fill_price, slippage=slippage)
-                        results[idx] = True
                         logger.info(
                             "Concurrent leg %d FILLED: %s order=%s",
                             idx + 1, leg["platform"], order_id,
                         )
                     else:
-                        self.db.update_trade_status(trade_id, "failed")
-                        results[idx] = False
                         logger.error(
                             "Concurrent leg %d FAILED: %s", idx + 1, leg["platform"])
                 except Exception as e:
-                    trade_id = leg["_trade_id"]
-                    self.db.update_trade_status(trade_id, "failed")
+                    self._finalize_leg_trade(leg, False, leg.get("_order_id"), None)
                     results[idx] = False
                     logger.error("Concurrent leg %d ERROR: %s", idx + 1, e)
 
@@ -2845,13 +2891,16 @@ class ArbitrageExecutor:
                 for i, leg in enumerate(legs):
                     if results.get(i):
                         fill_price = leg.get("_fill_price") or leg.get("price", 0)
+                        fill_qty = leg.get("_fill_qty") or _dollar_size_to_contracts(
+                            size, fill_price or leg.get("price", 0),
+                        )
                         hedger.queue_hedge(
                             trade_id=leg.get("_trade_id"),
                             platform=leg["platform"],
                             token_id=leg.get("_token_id", leg.get("_ticker", "")),
                             side=leg.get("side", ""),
                             fill_price=fill_price,
-                            size=size,
+                            size=float(fill_qty),
                             opportunity_id=opp_id,
                             market_id=leg.get("_market_id"),
                             selection_id=leg.get("_selection_id"),
@@ -2865,6 +2914,61 @@ class ArbitrageExecutor:
             self._notify_trade(opportunity, legs, size, success=False)
 
         return all_filled
+
+    def _persist_order_id(self, leg: dict, order_id: str | None) -> None:
+        """Write exchange order_id to SQLite as soon as the venue accepts it.
+
+        Must happen before fill polling so crash recovery can reconcile.
+        """
+        trade_id = leg.get("_trade_id")
+        if not trade_id or not order_id:
+            return
+        try:
+            self.db.update_trade_status(
+                trade_id,
+                "pending",
+                order_id=order_id,
+                client_order_id=leg.get("_idempotency_key"),
+            )
+            leg["_order_id"] = order_id
+        except Exception as e:
+            logger.warning(
+                "Failed to persist order_id=%s for trade #%s: %s",
+                order_id, trade_id, e,
+            )
+
+    def _finalize_leg_trade(
+        self,
+        leg: dict,
+        success: bool,
+        order_id: str | None,
+        fill_price: float | None,
+    ) -> None:
+        """Update trade row after a leg attempt completes."""
+        trade_id = leg.get("_trade_id")
+        if not trade_id:
+            return
+        fill_qty = leg.get("_fill_qty")
+        if success:
+            slippage = (fill_price - leg.get("price", 0)) if fill_price is not None else None
+            self.db.update_trade_status(
+                trade_id,
+                "filled",
+                fill_price=fill_price,
+                slippage=slippage,
+                order_id=order_id,
+                fill_qty=float(fill_qty) if fill_qty is not None else None,
+                client_order_id=leg.get("_idempotency_key"),
+            )
+            if fill_price is not None:
+                leg["_fill_price"] = fill_price
+        else:
+            self.db.update_trade_status(
+                trade_id,
+                "failed",
+                order_id=order_id,
+                client_order_id=leg.get("_idempotency_key"),
+            )
 
     def _execute_single_leg(
         self, leg: dict, size: float, opportunity: dict
@@ -2901,23 +3005,32 @@ class ArbitrageExecutor:
             side = leg.get("side", "BUY")
             neg_risk = "NegRisk" in opportunity.get("type", "")
 
-            # Maker routing (per D-05): use GTC limit orders when ORDER_TIME_IN_FORCE != "FOK"
-            use_gtc = ORDER_TIME_IN_FORCE not in ("FOK", "fill_or_kill")
+            # size is dollars; Polymarket place_order expects share count
+            share_count = _dollar_size_to_contracts(size, price)
+            if share_count < 1:
+                logger.warning(
+                    "Polymarket order size $%.2f @ $%.3f buys 0 shares. Skipping.",
+                    size, price,
+                )
+                return False, None, None
+            leg["_qty"] = share_count
+
+            # Maker routing (per D-05): GTC when configured; default fok is lowercase
+            use_gtc = _use_gtc_for_leg(leg.get("_leg_index", 0))
             resp = self.pm_trader.place_order(
                 token_id=token_id,
                 side=side,
                 price=price,
-                size=size,
+                size=float(share_count),
                 neg_risk=neg_risk,
                 order_type="GTC" if use_gtc else "FOK",
             )
             if resp and resp.get("success"):
                 order_id = resp.get("orderID", resp.get("order_id", ""))
-                leg["_order_id"] = order_id
-                if use_gtc:
-                    # Poll for fill; cancel and skip on timeout (no taker fallback per D-05)
-                    fill_price = self._confirm_fill_pm(order_id, price)
-                    if fill_price is None:
+                self._persist_order_id(leg, order_id)
+                fill_price = self._confirm_fill_pm(order_id, price)
+                if fill_price is None:
+                    if use_gtc:
                         logger.info(
                             "Polymarket GTC order %s timed out after %.1fs, "
                             "cancelling — no taker fallback per D-05",
@@ -2930,15 +3043,15 @@ class ArbitrageExecutor:
                                 "Failed to cancel Polymarket GTC order %s: %s",
                                 order_id, cancel_err,
                             )
-                        return False, order_id, None
-                    return True, order_id, fill_price
-                else:
-                    # FOK: poll for fill confirmation
-                    fill_price = self._confirm_fill_pm(order_id, price)
-                    if fill_price is None:
-                        logger.warning("Polymarket FOK order %s not filled (cancel/expire/timeout)", order_id)
-                        return False, order_id, None
-                    return True, order_id, fill_price
+                    else:
+                        logger.warning(
+                            "Polymarket FOK order %s not filled (cancel/expire/timeout)",
+                            order_id,
+                        )
+                    return False, order_id, None
+                leg["_fill_price"] = fill_price
+                leg["_fill_qty"] = share_count
+                return True, order_id, fill_price
             return False, None, None
 
         elif platform == "kalshi":
@@ -2948,16 +3061,18 @@ class ArbitrageExecutor:
             side = leg.get("side", "yes")
             action = leg.get("action", "buy")
             # Convert dollar size to contracts (1 contract = $1 payout)
-            count = max(1, int(size / price)) if price > 0 else 1
+            count = _dollar_size_to_contracts(size, price)
+            if count < 1:
+                logger.warning(
+                    "Kalshi order size $%.2f @ $%.3f buys 0 contracts. Skipping.",
+                    size, price,
+                )
+                return False, None, None
+            leg["_qty"] = count
 
             # Determine time-in-force based on config and leg position
-            leg_index = leg.get("_leg_index", 0)
-            if ORDER_TIME_IN_FORCE == "gtc":
-                tif = "gtc"
-            elif ORDER_TIME_IN_FORCE == "gtc_first_leg" and leg_index == 0:
-                tif = "gtc"
-            else:
-                tif = "fill_or_kill"
+            use_gtc = _use_gtc_for_leg(leg.get("_leg_index", 0))
+            tif = "good_till_canceled" if use_gtc else "fill_or_kill"
 
             resp = self.kalshi_client.place_order(
                 ticker=ticker,
@@ -2966,11 +3081,12 @@ class ArbitrageExecutor:
                 count=count,
                 price_dollars=price,
                 time_in_force=tif,
+                client_order_id=leg.get("_idempotency_key"),
             )
             if resp:
                 order = resp.get("order", resp)
                 order_id = order.get("order_id", "")
-                leg["_order_id"] = order_id
+                self._persist_order_id(leg, order_id)
                 status = order.get("status", "")
                 if status == "executed":
                     # FOK filled instantly — extract avg_price directly
@@ -2979,12 +3095,19 @@ class ArbitrageExecutor:
                         fill_price = float(avg_price) / 100.0
                     else:
                         fill_price = price
+                    # Prefer fill_count from V2 when present
+                    try:
+                        filled = int(float(order.get("fill_count", count)))
+                    except (TypeError, ValueError):
+                        filled = count
+                    leg["_fill_price"] = fill_price
+                    leg["_fill_qty"] = filled
                     return True, order_id, fill_price
                 elif status == "resting":
                     # GTC order resting — wait up to GTC_ORDER_TIMEOUT then cancel
-                    timeout = GTC_ORDER_TIMEOUT if tif == "gtc" else FILL_POLL_TIMEOUT
+                    timeout = GTC_ORDER_TIMEOUT if use_gtc else FILL_POLL_TIMEOUT
                     fill_price = self._confirm_fill_kalshi(order_id, price)
-                    if fill_price is None and tif == "gtc":
+                    if fill_price is None and use_gtc:
                         # Cancel unfilled GTC order
                         logger.warning("Kalshi GTC order timed out (%.0fs), cancelling: %s",
                                        timeout, order_id)
@@ -2997,6 +3120,8 @@ class ArbitrageExecutor:
                     if fill_price is None:
                         logger.warning("Kalshi FOK order %s rested then failed (cancel/expire/timeout)", order_id)
                         return False, order_id, None
+                    leg["_fill_price"] = fill_price
+                    leg["_fill_qty"] = count
                     return True, order_id, fill_price
                 logger.warning("Kalshi order not filled: status=%s ticker=%s resp=%s",
                                status, ticker, str(resp)[:300])
@@ -3030,7 +3155,7 @@ class ArbitrageExecutor:
                 results = resp.get("instructionReports", [])
                 if results:
                     bet_id = results[0].get("betId", "")
-                    leg["_order_id"] = bet_id
+                    self._persist_order_id(leg, bet_id)
                     fill_price = self._confirm_fill_betfair(bet_id, price)
                     if fill_price is None:
                         logger.warning("Betfair bet %s not filled (cancel/expire/timeout)", bet_id)
@@ -3053,7 +3178,7 @@ class ArbitrageExecutor:
             )
             if resp and not resp.get("error"):
                 order_id = str(resp.get("id", resp.get("order_id", "")))
-                leg["_order_id"] = order_id
+                self._persist_order_id(leg, order_id)
                 fill_price = self._confirm_fill_smarkets(order_id, price)
                 if fill_price is None:
                     logger.warning("Smarkets order %s not filled (cancel/expire/timeout)", order_id)
@@ -3078,7 +3203,7 @@ class ArbitrageExecutor:
             )
             if resp and not resp.get("error"):
                 order_id = str(resp.get("orderHash", resp.get("id", "")))
-                leg["_order_id"] = order_id
+                self._persist_order_id(leg, order_id)
                 fill_price = self._confirm_fill_sxbet(order_id, price)
                 if fill_price is None:
                     logger.warning("SX Bet order %s not filled (cancel/expire/timeout)", order_id)
@@ -3104,7 +3229,7 @@ class ArbitrageExecutor:
             )
             if resp and not resp.get("error"):
                 order_id = str(resp.get("id", resp.get("offer-id", "")))
-                leg["_order_id"] = order_id
+                self._persist_order_id(leg, order_id)
                 fill_price = self._confirm_fill_matchbook(order_id, price)
                 if fill_price is None:
                     logger.warning("Matchbook order %s not filled (cancel/expire/timeout)", order_id)
@@ -3130,7 +3255,7 @@ class ArbitrageExecutor:
             )
             if resp and not resp.get("error"):
                 order_id = str(resp.get("orderId", resp.get("order_id", "")))
-                leg["_order_id"] = order_id
+                self._persist_order_id(leg, order_id)
                 fill_price = self._confirm_fill_gemini(order_id, price)
                 if fill_price is None:
                     logger.warning("Gemini order %s not filled (cancel/expire/timeout)", order_id)
@@ -3152,7 +3277,7 @@ class ArbitrageExecutor:
             )
             if resp and not resp.get("error"):
                 order_id = str(resp.get("orderId", resp.get("order_id", "")))
-                leg["_order_id"] = order_id
+                self._persist_order_id(leg, order_id)
                 fill_price = self._confirm_fill_ibkr(order_id, price)
                 if fill_price is None:
                     logger.warning("IBKR order %s not filled (cancel/expire/timeout)", order_id)
@@ -3214,10 +3339,16 @@ class ArbitrageExecutor:
         for _ in range(max_polls):
             status = self.pm_trader.get_order_status(order_id)
             if status:
-                order_status = status.get("status", "")
-                if order_status == "matched":
+                # CLOB returns uppercase statuses (LIVE / MATCHED / CANCELED).
+                order_status = str(status.get("status", "")).lower()
+                size_matched = status.get("size_matched")
+                try:
+                    matched_qty = float(size_matched) if size_matched not in (None, "") else 0.0
+                except (TypeError, ValueError):
+                    matched_qty = 0.0
+                if order_status in ("matched", "filled") or matched_qty > 0:
                     return float(status.get("price", expected_price))
-                elif order_status in ("canceled", "expired"):
+                elif order_status in ("canceled", "cancelled", "expired"):
                     return None
             time.sleep(FILL_POLL_INTERVAL)
         logger.warning("Fill poll timeout for Polymarket order %s after %.1fs — status uncertain",

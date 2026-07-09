@@ -5,6 +5,7 @@ __pycache__/
 *.pem
 nul
 trades.db
+canary_trades.db
 snapshots.db
 data/discovery/pmarb.db
 decisions.jsonl

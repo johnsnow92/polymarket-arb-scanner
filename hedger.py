@@ -135,7 +135,10 @@ class PartialFillHedger:
         return False
 
     def _hedge_polymarket(self, token_id: str, fill_price: float, size: float, max_loss: float) -> bool:
-        """Sell a Polymarket position at current bid."""
+        """Sell a Polymarket position at current bid.
+
+        ``size`` is the filled share quantity (not dollars).
+        """
         if not self.pm_trader:
             return False
         from polymarket_api import fetch_order_book, get_best_bid_ask
@@ -151,11 +154,20 @@ class PartialFillHedger:
             logger.info("Polymarket hedge: bid $%.3f too far from fill $%.3f (loss $%.3f > max $%.3f)",
                         bid, fill_price, loss, max_loss)
             return False
-        resp = self.pm_trader.place_order(token_id=token_id, side="SELL", price=bid, size=size)
+        if size <= 0:
+            return False
+        resp = self.pm_trader.place_order(
+            token_id=token_id, side="SELL", price=bid, size=float(size),
+            order_type="FOK",
+        )
         return bool(resp and resp.get("success"))
 
     def _hedge_kalshi(self, ticker: str, fill_price: float, size: float, max_loss: float, side: str) -> bool:
-        """Sell a Kalshi position at current bid."""
+        """Sell a Kalshi position at current bid.
+
+        ``size`` is the filled contract quantity (not dollars). Do not
+        recompute count from bid — that over/under-hedges when the book moves.
+        """
         if not self.kalshi_client:
             return False
         book = self.kalshi_client.fetch_order_book(ticker)
@@ -175,11 +187,13 @@ class PartialFillHedger:
         loss = fill_price - bid
         if loss > max_loss:
             return False
-        count = max(1, int(size / bid)) if bid > 0 else 1
-        resp = self.kalshi_client.place_order(ticker=ticker, side=side, action="sell",
-                                               count=count, price_dollars=bid)
+        # ``size`` is filled contract count from the executor (not dollars).
+        count = max(1, int(size))
+        resp = self.kalshi_client.place_order(
+            ticker=ticker, side=side, action="sell",
+            count=count, price_dollars=bid, time_in_force="fill_or_kill",
+        )
         return resp is not None
-
     def _hedge_betfair(self, pf: dict, fill_price: float, size: float, max_loss: float) -> bool:
         """Hedge a Betfair position with an opposing bet."""
         if not self.betfair_client or not self.betfair_client.authenticated:

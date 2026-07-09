@@ -264,14 +264,14 @@ class TestHedgerPartialFills:
                 pf = {
                     "id": 1, "platform": "polymarket",
                     "token_id": "token_yes_123", "fill_price": 0.40,
-                    "size": 2.5, "side": "YES", "hedge_attempts": 0,
+                    "size": 5.0, "side": "YES", "hedge_attempts": 0,
                 }
                 result = hedger._attempt_hedge(pf)
                 assert result is True
                 mock_pm.place_order.assert_called_once()
                 call_args = mock_pm.place_order.call_args
                 assert call_args[1]["side"] == "SELL"
-                assert call_args[1]["size"] == 2.5
+                assert call_args[1]["size"] == 5.0  # filled share qty, not dollars
 
     def test_kalshi_partial_fill_hedge(self, PartialFillHedger, db):
         """Kalshi: 50% fill on YES, 100% on NO → hedge sells YES."""
@@ -285,13 +285,14 @@ class TestHedgerPartialFills:
         pf = {
             "id": 2, "platform": "kalshi",
             "token_id": "TICKER-ABC", "fill_price": 0.40,
-            "size": 2.5, "side": "yes", "hedge_attempts": 0,
+            "size": 5.0, "side": "yes", "hedge_attempts": 0,
         }
         result = hedger._attempt_hedge(pf)
         assert result is True
         mock_kalshi.place_order.assert_called_once()
         call_args = mock_kalshi.place_order.call_args
         assert call_args[1]["side"] == "yes"
+        assert call_args[1]["count"] == 5  # filled contracts, not size/bid
 
     def test_betfair_partial_fill_hedge(self, PartialFillHedger, db):
         """Betfair: 50% BACK filled, 100% LAY → hedge LAYs the position."""

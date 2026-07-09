@@ -20,13 +20,13 @@ sys.path.insert(0, str(sys.path[0]).rsplit(
 # Mock external dependencies before importing executor
 sys.modules["ib_insync"] = MagicMock()
 py_clob_mock = MagicMock()
-sys.modules["py_clob_client"] = py_clob_mock
-sys.modules["py_clob_client.client"] = MagicMock()
-sys.modules["py_clob_client.clob_types"] = MagicMock()
-sys.modules["py_clob_client.order_builder"] = MagicMock()
-py_clob_mock.client = sys.modules["py_clob_client.client"]
-py_clob_mock.clob_types = sys.modules["py_clob_client.clob_types"]
-py_clob_mock.order_builder = sys.modules["py_clob_client.order_builder"]
+sys.modules["py_clob_client_v2"] = py_clob_mock
+sys.modules["py_clob_client_v2.client"] = MagicMock()
+sys.modules["py_clob_client_v2.clob_types"] = MagicMock()
+sys.modules["py_clob_client_v2.http_helpers"] = MagicMock()
+sys.modules["py_clob_client_v2.http_helpers.helpers"] = MagicMock()
+py_clob_mock.client = sys.modules["py_clob_client_v2.client"]
+py_clob_mock.clob_types = sys.modules["py_clob_client_v2.clob_types"]
 
 
 class TestImbalanceStrategy(unittest.TestCase):

@@ -5,6 +5,8 @@ import logging
 import os
 import threading
 import time
+
+import httpx
 import requests
 from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -14,13 +16,16 @@ from rate_limiter import PlatformCircuitBreaker
 
 logger = logging.getLogger(__name__)
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import (
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import (
     AssetType,
     BalanceAllowanceParams,
     OrderArgs,
+    OrderPayload,
+    OrderType,
     PartialCreateOrderOptions,
 )
+import py_clob_client_v2.http_helpers.helpers as _clob_http
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE = "https://clob.polymarket.com"
@@ -29,13 +34,22 @@ CLOB_BASE = "https://clob.polymarket.com"
 _last_request_time = 0
 _rate_lock = threading.Lock()
 
-# Proxy support
+# Proxy support — Gamma REST (requests) + authenticated CLOB writes (httpx in py-clob-client-v2)
 _session = requests.Session()
 _proxy_url = os.getenv("POLYMARKET_PROXY_URL")
 if _proxy_url:
     _session.proxies = {"http": _proxy_url, "https": _proxy_url}
+    # py-clob-client-v2 uses a module-level httpx client that otherwise bypasses
+    # POLYMARKET_PROXY_URL (critical for US/MI geoblock on CLOB writes).
+    _clob_http._http_client = httpx.Client(http2=True, proxy=_proxy_url)
 _session.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=10))
 
+_ORDER_TYPE_MAP = {
+    "GTC": OrderType.GTC,
+    "FOK": OrderType.FOK,
+    "FAK": OrderType.FAK,
+    "GTD": OrderType.GTD,
+}
 
 class _RateLimitError(Exception):
     """Raised on HTTP 429 to trigger retry."""
@@ -271,7 +285,7 @@ def get_negrisk_events(events: list[dict]) -> list[dict]:
 
 
 class PolymarketTrader:
-    """CLOB trading client for Polymarket using py-clob-client."""
+    """CLOB trading client for Polymarket using py-clob-client-v2."""
 
     def __init__(self, private_key: str, chain_id: int = 137,
                  funder: str | None = None, signature_type: int = 0):
@@ -280,11 +294,11 @@ class PolymarketTrader:
         Args:
             private_key: Ethereum private key for signing orders.
             chain_id: Polygon chain ID (default 137 mainnet).
-            funder: Proxy/funder wallet address that holds the USDC funds.
-                Required for email/Magic wallets where the signing key
-                differs from the funded address.
-            signature_type: 0 = EOA (MetaMask/hardware), 1 = email/Magic
-                wallet, 2 = browser proxy wallet.
+            funder: Proxy/funder/deposit wallet that holds collateral.
+                Required when the signing key differs from the funded address
+                (Magic, browser proxy, or deposit-wallet flow).
+            signature_type: 0 = EOA, 1 = email/Magic, 2 = browser proxy,
+                3 = deposit wallet (POLYMARKET_SIGNATURE_TYPE=3).
         """
         kwargs: dict = dict(
             host=CLOB_BASE,
@@ -293,20 +307,21 @@ class PolymarketTrader:
         )
         if funder:
             kwargs["funder"] = funder
+        # Always pass explicit signature_type when non-default so type 3 is not dropped.
         if signature_type:
             kwargs["signature_type"] = signature_type
         self.client = ClobClient(**kwargs)
         # Derive or create L2 API creds for authenticated trading endpoints
-        self.client.set_api_creds(self.client.create_or_derive_api_creds())
+        self.client.set_api_creds(self.client.create_or_derive_api_key())
 
     def get_balance(self) -> float | None:
-        """Get USDC balance available for trading."""
+        """Get collateral balance available for trading (USDC / pUSD, 6 decimals)."""
         try:
             resp = self.client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
             if resp and "balance" in resp:
-                return float(resp["balance"]) / 1e6  # USDC has 6 decimals
+                return float(resp["balance"]) / 1e6
             return None
         except Exception as e:
             logger.error("Polymarket get_balance failed: %s", e)
@@ -320,6 +335,7 @@ class PolymarketTrader:
         size: float,
         neg_risk: bool = False,
         tick_size: str = "0.01",
+        order_type: str = "GTC",
     ) -> dict | None:
         """Place an order on the Polymarket CLOB.
 
@@ -327,25 +343,29 @@ class PolymarketTrader:
             token_id: The CLOB token ID (YES or NO token)
             side: "BUY" or "SELL"
             price: Price per share (0.01-0.99)
-            size: Number of shares
+            size: Number of shares (not dollars)
             neg_risk: Whether this is a negRisk market
             tick_size: Market tick size ("0.1", "0.01", "0.001", "0.0001")
+            order_type: "GTC", "FOK", "FAK", or "GTD" (default GTC)
 
         Returns:
             Order response dict or None on failure.
         """
         try:
+            ot = _ORDER_TYPE_MAP.get(str(order_type).upper(), OrderType.GTC)
             order_args = OrderArgs(
                 token_id=token_id,
                 price=price,
                 size=size,
-                side=side,
+                side=side.upper(),
             )
             options = PartialCreateOrderOptions(
                 tick_size=tick_size,
                 neg_risk=neg_risk,
             )
-            resp = self.client.create_and_post_order(order_args, options)
+            resp = self.client.create_and_post_order(
+                order_args, options, order_type=ot,
+            )
             if resp and resp.get("success"):
                 return resp
             if resp:
@@ -358,8 +378,15 @@ class PolymarketTrader:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order."""
         try:
-            resp = self.client.cancel(order_id)
-            return bool(resp and resp.get("canceled"))
+            resp = self.client.cancel_order(OrderPayload(orderID=order_id))
+            if resp is None:
+                return False
+            if isinstance(resp, dict):
+                canceled = resp.get("canceled") or resp.get("cancelled") or []
+                if isinstance(canceled, list):
+                    return order_id in canceled or bool(canceled)
+                return bool(canceled)
+            return True
         except Exception as e:
             logger.warning("Polymarket cancel_order failed for %s: %s", order_id, e)
             return False
@@ -381,7 +408,7 @@ class PolymarketTrader:
     def get_orders(self) -> list[dict]:
         """Get open orders."""
         try:
-            resp = self.client.get_orders()
+            resp = self.client.get_open_orders()
             if isinstance(resp, list):
                 return resp
             return resp.get("orders", []) if resp else []
