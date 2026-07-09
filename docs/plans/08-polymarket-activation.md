@@ -46,6 +46,11 @@ greenfield migration.
    pUSD collateral in `get_balance()`), `requirements.txt` (`py-clob-client-v2==1.0.2`),
    sizing helpers in `executor.py` (`_dollar_size_to_contracts`, zero-share skip guards),
    order-id persistence to SQLite at venue-accept time, matching test updates.
+   **Crash/retry semantics at the venue-accept boundary:** py-clob-client-v2 exposes no
+   client-order-id/idempotency hook, so the executor must carry app-side dedupe — persist an
+   idempotency key before submission, reconcile open orders against persisted keys on restart
+   (extend `recovery.py`), and never blind-resubmit. A failure-injection test (crash between
+   venue accept and `_persist_order_id`) is part of Phase A acceptance.
 3. **Review flag:** this touches order-placement paths → money-authority merge (operator 1-tap
    after CodeRabbit + Codex both clean).
 4. Acceptance: full suite green ×2 fixed-seed; V1 client fully removed (V1 endpoints are dead);
@@ -95,6 +100,8 @@ the $2–3K funding step are [OP] via the policy broker.
   re-reviewed as if new (no assumed prior review).
 - **Geoblock/proxy:** CLOB writes from MI depend on the httpx proxy injection; a silent bypass
   would send unproxied signed requests — add a startup assertion when `POLYMARKET_PROXY_URL` is
-  set that the module-level client actually carries the proxy.
+  set that inspects the actual CLOB write client (`py_clob_client_v2.http_helpers.helpers`
+  module-level httpx client) and verifies its configured proxy matches, not merely that the env
+  var is present.
 - **Fee drift:** category rates verified 2026-06-10; re-verify against docs.polymarket.com before
   the live flip and record the check date in `fees.py`.
