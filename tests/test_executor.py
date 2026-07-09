@@ -2031,6 +2031,43 @@ class TestPlatformWhitelist:
         assert success is True
         assert order_id == "ord1"
 
+    def test_persist_order_id_before_fill_poll(self, executor):
+        """Order ID must be written to DB before fill confirmation completes."""
+        leg = {
+            "platform": "polymarket",
+            "side": "BUY",
+            "price": 0.50,
+            "_token_id": "tok123",
+            "_trade_id": 42,
+            "_idempotency_key": "idem-xyz",
+        }
+        opp = {"type": "Binary"}
+        executor.pm_trader.place_order.return_value = {
+            "success": True, "orderID": "ord-persist-1",
+        }
+        call_order: list[str] = []
+        update_mock = MagicMock()
+
+        def _track_update(*a, **kw):
+            call_order.append("update")
+            update_mock(*a, **kw)
+
+        def _track_confirm(*a, **kw):
+            call_order.append("confirm")
+            return 0.50
+
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS", frozenset(["polymarket", "kalshi"])), \
+             patch.object(executor.db, "update_trade_status", side_effect=_track_update), \
+             patch.object(executor, "_confirm_fill_pm", side_effect=_track_confirm):
+            success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
+        assert success is True
+        assert order_id == "ord-persist-1"
+        assert "update" in call_order and "confirm" in call_order
+        assert call_order.index("update") < call_order.index("confirm")
+        # First update must carry the order_id while still pending
+        first_kw = update_mock.call_args_list[0].kwargs
+        assert first_kw.get("order_id") == "ord-persist-1"
+
     def test_cross_all_legs_rejected_when_platform_not_whitelisted(self, executor):
         """Cross-all with a non-whitelisted platform returns empty legs."""
         opp = {
@@ -2317,13 +2354,13 @@ class TestMakerRouting:
              mpatch.object(executor, "_confirm_fill_pm", return_value=0.45):
             executor.dry_run = False
             success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
-        # Verify place_order was called with order_type="GTC"
+        # Verify place_order was called with order_type="GTC" and share qty
         assert executor.pm_trader.place_order.called
         call_kwargs = executor.pm_trader.place_order.call_args
-        order_type = (call_kwargs.kwargs or {}).get("order_type") or (
-            call_kwargs.args[4] if len(call_kwargs.args) > 4 else None
-        )
-        # The important assertion: it was called (GTC routing invoked), and fill succeeded
+        order_type = (call_kwargs.kwargs or {}).get("order_type")
+        assert order_type == "GTC"
+        # $5 @ $0.45 → floor(5/0.45) = 11 shares (not dollar size)
+        assert call_kwargs.kwargs.get("size") == 11.0
         assert success is True
         assert order_id == "order_gtc_123"
 

@@ -140,6 +140,35 @@ class TradeDB:
         except sqlite3.OperationalError:
             logger.debug("Migration: reward_yield_usdc column already exists")
 
+        # Older DBs may predate order_id on the base CREATE TABLE — ensure it exists.
+        try:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN order_id TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            logger.debug("Migration: order_id column already exists on trades")
+
+        # Filled contract/share quantity (distinct from dollar ``size``).
+        try:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN fill_qty REAL")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            logger.debug("Migration: fill_qty column already exists on trades")
+
+        # Client/idempotency key (Kalshi client_order_id, etc.)
+        try:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN client_order_id TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            logger.debug("Migration: client_order_id column already exists on trades")
+
+        try:
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_order_id ON trades(order_id)"
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            logger.debug("Migration: idx_trades_order_id already exists")
+
         # Safe migration: add market_ticker to positions. Settlement checks
         # query the platform API by ticker (e.g. KXEPLSPREAD-...), but
         # market_identifier holds the human title (e.g. "Chelsea: Spreads").
@@ -228,9 +257,21 @@ class TradeDB:
             self.conn.commit()
             return cur.lastrowid
 
-    def update_trade_status(self, trade_id: int, status: str, fill_price: float | None = None,
-                            slippage: float | None = None):
-        """Update the status of a trade leg, optionally with fill price and slippage."""
+    def update_trade_status(
+        self,
+        trade_id: int,
+        status: str,
+        fill_price: float | None = None,
+        slippage: float | None = None,
+        order_id: str | None = None,
+        fill_qty: float | None = None,
+        client_order_id: str | None = None,
+    ):
+        """Update the status of a trade leg, optionally with fill/order fields.
+
+        ``order_id`` should be written as soon as the exchange accepts the
+        order (before fill confirmation) so crash recovery can reconcile.
+        """
         with self._lock:
             if fill_price is not None:
                 self.conn.execute(
@@ -246,6 +287,21 @@ class TradeDB:
                 self.conn.execute(
                     "UPDATE trades SET slippage = ? WHERE id = ?",
                     (slippage, trade_id),
+                )
+            if order_id is not None:
+                self.conn.execute(
+                    "UPDATE trades SET order_id = ? WHERE id = ?",
+                    (order_id, trade_id),
+                )
+            if fill_qty is not None:
+                self.conn.execute(
+                    "UPDATE trades SET fill_qty = ? WHERE id = ?",
+                    (fill_qty, trade_id),
+                )
+            if client_order_id is not None:
+                self.conn.execute(
+                    "UPDATE trades SET client_order_id = ? WHERE id = ?",
+                    (client_order_id, trade_id),
                 )
             self.conn.commit()
 

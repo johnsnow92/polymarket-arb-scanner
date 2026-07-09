@@ -343,7 +343,7 @@ Keep using `polymarket_api.py` / `py-clob-client` for execution paths — the CL
 
 The `web3-polymarket` agent skill (`~/.claude/skills/web3-polymarket/`) carries the full integration reference: L1/L2 auth, order types (GTC/GTD/FOK/FAK), tick-size/neg-risk semantics, WebSocket channels, CTF split/merge/redeem, and gasless relayer patterns. Load its reference files when working on `polymarket_api.py`, `ws_feeds.py`, or CTF-related execution.
 
-**Geoblock caveat**: `polymarket clob geoblock` reports this machine's residential IP (US/MI) as blocked for trading endpoints — local order placement via CLI will fail. Read-only commands (markets, books, prices, data) work fine. Production execution runs from Railway (see `POLYMARKET_PROXY_URL` in config). Never store a private key in `~/.config/polymarket/config.json` (plaintext) — the CLI also reads `POLYMARKET_PRIVATE_KEY`, which this project already manages via Infisical.
+**Geoblock caveat**: `polymarket clob geoblock` reports this machine's residential IP (US/MI) as blocked for trading endpoints — local order placement via CLI will fail. Read-only commands (markets, books, prices, data) work fine. Production execution runs from Railway (see `POLYMARKET_PROXY_URL` in config). Never store a private key in `~/.config/polymarket/config.json` (plaintext) — the CLI also reads `POLYMARKET_PRIVATE_KEY`, which this project already manages via Infisical. Run CLI commands via `infisical run --env dev -- polymarket -o json <command>` so the key is injected as an env var for that process only; `~/.config/polymarket/config.json` should only ever hold non-secret fields (`chain_id`, `signature_type`).
 
 ## Agent Team Notes
 
