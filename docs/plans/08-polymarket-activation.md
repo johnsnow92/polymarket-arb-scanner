@@ -189,9 +189,10 @@ opportunity dicts from any caller. The repo's existing tested, TTL-enforced fail
   re-reviewed as if new, and the rejected content in Phase A item 1 checked for explicitly.
   The snapshot branch is local-only; losing this machine loses it.
 - **Geoblock/proxy:** CLOB writes from MI depend on the httpx proxy injection; a silent bypass
-  would send unproxied signed requests — add a startup assertion when `POLYMARKET_PROXY_URL` is
-  set that inspects the actual CLOB write client (`py_clob_client_v2.http_helpers.helpers`
-  module-level httpx client) and verifies its configured proxy matches, not merely that the env
-  var is present.
+  would send unproxied signed requests. The check must **fail closed on absence**: whenever the
+  Polymarket write path is constructible (live gate on), require a non-empty
+  `POLYMARKET_PROXY_URL` AND a startup assertion that inspects the actual CLOB write client
+  (`py_clob_client_v2.http_helpers.helpers` module-level httpx client) and verifies its
+  configured proxy matches — a missing env var must abort startup, not skip the check.
 - **Fee drift:** category rates verified 2026-06-10; re-verify against docs.polymarket.com before
   any live consideration and record the check date in `fees.py`.
