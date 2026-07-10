@@ -125,8 +125,10 @@ greenfield migration. The WIP is treated as untrusted input (see §6).
    price covers the full quantity; PARTIAL (with the covered quantity) if a GTC order is covered
    in part; UNFILLED if executable depth at or better than the limit is zero (any order type) or
    a FOK is not fully coverable; UNFILLED and excluded from all gate counts when the snapshot is
-   missing or stale (**stale = snapshot timestamp older than 60s at decision time**, matching the
-   price-cache TTL). No queue-position or maker-fill modeling — resting-fill assumptions are out
+   missing or stale (**stale = snapshot age at decision time exceeding the same runtime
+   price-cache eviction setting the live path uses (`PRICE_CACHE_EVICTION_AGE`, default 60s)** —
+   the classifier must read that setting, not hard-code a value, so the shadow and live freshness
+   definitions cannot drift). No queue-position or maker-fill modeling — resting-fill assumptions are out
    of scope for shadow gating. Unit tests cover each classification branch, including
    zero-depth-GTC, exact-boundary staleness, and FOK partial-coverage.
 3. Divergence logging: for each shadow fill, record book price at decision time vs T+5s re-fetch;
