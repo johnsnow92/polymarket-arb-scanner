@@ -22,13 +22,34 @@ if "tenacity" not in sys.modules:
     _tenacity_mock.retry_if_exception_type = lambda *a, **kw: None
     sys.modules["tenacity"] = _tenacity_mock
 
-# Mock py_clob_client since it may not be installed
-for mod in ["py_clob_client", "py_clob_client.client", "py_clob_client.clob_types"]:
+# Mock py_clob_client_v2 since CI may not have the SDK installed
+for mod in [
+    "py_clob_client_v2",
+    "py_clob_client_v2.client",
+    "py_clob_client_v2.clob_types",
+    "py_clob_client_v2.http_helpers",
+    "py_clob_client_v2.http_helpers.helpers",
+]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 
+# Provide OrderType / OrderArgs / etc. as simple stand-ins for trader tests
+_clob_types = sys.modules["py_clob_client_v2.clob_types"]
+if not hasattr(_clob_types, "OrderType") or isinstance(getattr(_clob_types, "OrderType", None), MagicMock):
+    class _OrderType:
+        GTC = "GTC"
+        FOK = "FOK"
+        FAK = "FAK"
+        GTD = "GTD"
+    _clob_types.OrderType = _OrderType
+    _clob_types.OrderArgs = MagicMock
+    _clob_types.OrderPayload = MagicMock
+    _clob_types.PartialCreateOrderOptions = MagicMock
+    _clob_types.AssetType = MagicMock()
+    _clob_types.BalanceAllowanceParams = MagicMock
+
 import polymarket_api
-from polymarket_api import _rate_limit, _rate_lock
+from polymarket_api import _rate_limit, _rate_lock, PolymarketTrader
 from config import PM_RATE_LIMIT as MIN_REQUEST_INTERVAL
 
 
@@ -261,3 +282,56 @@ class TestRateLimitMultiThread:
         # At minimum, num_threads-1 calls would have to wait (one might have
         # arrived after enough simulated clock advancement to skip).
         assert len(sleep_calls) >= num_threads - 1
+
+
+# ---------------------------------------------------------------------------
+# PolymarketTrader write-path adapter
+# ---------------------------------------------------------------------------
+
+
+class TestPolymarketTraderPlaceOrder:
+    """Adapter-boundary tests for PolymarketTrader.place_order."""
+
+    def test_place_order_forwards_order_type(self):
+        """Executor-supplied order_type must reach create_and_post_order."""
+        mock_client = MagicMock()
+        mock_client.create_and_post_order.return_value = {
+            "success": True, "orderID": "oid-1",
+        }
+        trader = PolymarketTrader.__new__(PolymarketTrader)
+        trader.client = mock_client
+
+        resp = trader.place_order(
+            token_id="tok",
+            side="BUY",
+            price=0.45,
+            size=10.0,
+            order_type="FOK",
+        )
+        assert resp["success"] is True
+        assert mock_client.create_and_post_order.called
+        kwargs = mock_client.create_and_post_order.call_args
+        # order_type is the 3rd positional or keyword
+        ot = kwargs.kwargs.get("order_type") if kwargs.kwargs else None
+        if ot is None and len(kwargs.args) >= 3:
+            ot = kwargs.args[2]
+        # Compare against the module's own map — the concrete OrderType binding
+        # depends on whether the real SDK or the stub was imported first.
+        assert ot == polymarket_api._ORDER_TYPE_MAP["FOK"]
+
+    def test_place_order_accepts_signature_compatible_kwargs(self):
+        """place_order must accept the kwargs executor passes (no TypeError)."""
+        mock_client = MagicMock()
+        mock_client.create_and_post_order.return_value = {"success": True, "orderID": "x"}
+        trader = PolymarketTrader.__new__(PolymarketTrader)
+        trader.client = mock_client
+        # This is the exact call shape from executor._execute_single_leg
+        resp = trader.place_order(
+            token_id="tok",
+            side="BUY",
+            price=0.45,
+            size=5.0,
+            neg_risk=False,
+            order_type="GTC",
+        )
+        assert resp is not None
