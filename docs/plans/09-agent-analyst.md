@@ -1,7 +1,6 @@
 # Plan 09 — Agent-Analyst Long-Tail Pricing (dual-venue, paper-first)
 
-**Status:** SPEC — build authorized for PAPER MODE only. **This plan authorizes no live order and
-no capital.** Live execution requires: policy broker merged (PR #78) and passing, the ≥300
+**Status:** SPEC — build authorized for PAPER MODE only. **This plan authorizes no live orders and no capital.** Live execution requires: policy broker merged (PR #78) and passing, the ≥300
 settled-market Brier calibration gate below, and an operator go decision through the broker.
 **Authority:** Warroom W1 (two-tier execution) + W7 lane #2 (2026-07-07, out-of-repo command
 center `24-STRATEGY-WARROOM-2026-07-07.md` §3.1 and §6) — LLM fleet as cheap analysts over the
@@ -32,7 +31,8 @@ Hard constraints:
 - **Polymarket leg inherits plan 08's gates** — shadow-only until the W5 authority contradiction
   (US close-only per official geoblock docs, flagged 7/9) is operator-resolved; the Kalshi leg is
   independent and proceeds regardless.
-- **Plan 08 dependency (build-order prerequisite):** Stage D imports plan 08's shadow-fill
+- **Plan 08 dependency (build-order prerequisite; plan 08 = PR #82, landing as
+  `docs/plans/08-polymarket-activation.md` in this same directory):** Stage D imports plan 08's shadow-fill
   classifier, which exists today only as a spec (PR #82) — no importable code. Stages A-C may be
   built and run immediately; **Stage D is blocked until plan 08's shadow-fill classifier (defined in plan 08
   Phase B) is merged to master** as a concrete module (target: `shadow_fill.py::classify_fill(order, book_snapshot,
@@ -80,7 +80,10 @@ Hard constraints:
   validation). Prompt + response persisted per read for post-hoc audit.
 
 ### Stage C — Calibration store
-- Append-only SQLite (later Supabase-synced, additive migration only). **Grain: one row per
+- A **NEW dedicated store** (module + table of its own; the existing
+  `calibration_tracker.py` is NOT reused — it is unique on `(platform, market_key)` with
+  `INSERT OR REPLACE` semantics, incompatible with per-read append-only history).
+  Append-only SQLite (later Supabase-synced, additive migration only). **Grain: one row per
   READ**, keyed by a unique `read_id` (venue + market_id + read timestamp); re-reads append new rows,
   never update. Each row: model fair value, confidence, market mid at read time, spread,
   category, venue, timestamps; joined on resolution to a **public per-venue settlement
@@ -187,7 +190,7 @@ invalidates the window rather than shrinking the denominator.
 | Gate | Criterion | On pass | On fail |
 |---|---|---|---|
 | G1 — pipeline health | 2 weeks of scheduled runs (cadence fixed at ratification, e.g. every 6h) with ≥95% run-completion uptime, ≥200 **unique markets** attempted (predetermined attempts, not reads — re-reads don't add), error rate ≤10% of attempts, valid-read rate ≥30% of attempts, abstain rate reported separately, zero crashes (crash = unhandled exception terminating a scheduled run) — thresholds fixed at ratification | continue | fix or halt lane |
-| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) AND **paired Brier superiority**: the one-sided 95% LOWER confidence bound of the mean per-cluster (Brier_market − Brier_model) difference is above the pre-registered margin δ, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled INDEPENDENT EVENT CLUSTERS each containing at least one settled FILLED position** (UNFILLED-only clusters never count), **spanning ≥3 categories with no category >50% of counted clusters** (a cluster's category = the category of its largest-exposure FILLED position, ties broken by earliest cohort entry), with the **mean per-cluster ROI (cluster ROI = cluster net P&L ÷ cluster exposure; exposure = Σ limit_price × quantity over its FILLED positions) having a one-sided 95% lower confidence bound above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
+| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) (the scored Brier cohort itself also carries a concentration cap: no category >50% of scored clusters, with per-category Brier reported) AND **paired Brier superiority**: the one-sided 95% LOWER confidence bound of the mean per-cluster (Brier_market − Brier_model) difference is above the pre-registered margin δ, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled INDEPENDENT EVENT CLUSTERS each containing at least one settled FILLED position** (UNFILLED-only clusters never count), **spanning ≥3 categories with no category >50% of counted clusters** (a cluster's category = the category of its largest-exposure FILLED position, ties broken by earliest cohort entry), with the **mean per-cluster ROI (cluster ROI = cluster net P&L ÷ cluster exposure; exposure = Σ limit_price × quantity over its FILLED positions) having a one-sided 95% lower confidence bound above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
 | G3 — live (out of scope here) | operator go + broker merged AND its reconciliation/tests passing + caps configured | separate plan | — |
 
 No gate may be evaluated on unsettled markets; partial-window peeks are reported as
