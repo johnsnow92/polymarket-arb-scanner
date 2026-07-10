@@ -119,9 +119,17 @@ greenfield migration. The WIP is treated as untrusted input (see §6).
 1. Run continuous mode with `DRY_RUN=true` + `POLYMARKET_LIVE_ENABLED=false` and Polymarket scans
    enabled; every would-be order is priced with the category fee model and logged (opportunity,
    legs, fees, expected net) to `trades.db` shadow tables + snapshot recorder.
-2. Divergence logging: for each shadow fill, record book price at decision time vs T+5s re-fetch;
-   summarize slippage distribution in the P&L digest.
-3. Exit criteria to request live consideration [OP] — must not pass vacuously: ≥1 week shadow
+2. **Shadow-fill semantics (deterministic, conservative-taker; current dry-run records
+   `status="dry_run"`, not a simulated fill — this is new logic).** A shadow order is classified
+   from the decision-time book snapshot only: FILLED if visible depth at or better than the limit
+   price covers the full quantity; PARTIAL (with the covered quantity) if it covers part and the
+   order type is GTC; UNFILLED for FOK not fully coverable; UNFILLED (excluded from gate counts)
+   when the snapshot is missing or stale. No queue-position or maker-fill modeling — resting-fill
+   assumptions are out of scope for shadow gating. Unit tests cover each classification branch.
+3. Divergence logging: for each shadow fill, record book price at decision time vs T+5s re-fetch;
+   summarize slippage distribution in the P&L digest (T+5s movement measures price drift, not
+   execution — it feeds the slippage gate, never the fill classification).
+4. Exit criteria to request live consideration [OP] — must not pass vacuously: ≥1 week shadow
    AND ≥100 shadow opportunities logged AND ≥20 shadow fills spanning ≥2 strategy types and
    ≥3 market categories (thresholds are proposals subject to operator ratification), no
    crash/recovery incidents, p95 decision-to-T+5s slippage within the strategy's modeled edge,
@@ -160,7 +168,8 @@ opportunity dicts from any caller. The repo's existing tested, TTL-enforced fail
   sports/unknown-category fail-closed veto.
 - Fill semantics: partial fill, residual GTC order, cancel race, hedge-confirmation-by-fill.
 - Idempotency: intent-journal fingerprint stability, UNKNOWN quarantine, crash-injection at the
-  venue-accept boundary, restart reconciliation against open/closed/fills.
+  venue-accept boundary, restart reconciliation against open orders + fills, permanent-UNKNOWN
+  ambiguity case (accepted-then-cancelled unfilled order with no persisted ID).
 - Integration: dry-run executor path per strategy branch that can route to Polymarket
   (`tests/integration/test_executor_strategies.py` extensions).
 - VETO gate: matched-pair fixtures (equivalent, divergent, missing-rules, gate-error) → only
