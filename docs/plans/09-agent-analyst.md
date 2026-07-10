@@ -36,8 +36,9 @@ Hard constraints:
   classifier, which exists today only as a spec (PR #82) — no importable code. Stages A-C may be
   built and run immediately; **Stage D is blocked until plan 08's shadow-fill classifier (defined in plan 08
   Phase B) is merged to master** as a concrete module (target: `shadow_fill.py::classify_fill(order, book_snapshot,
-  eviction_age) -> FILLED|PARTIAL|UNFILLED`, exact module/symbol pinned in the Stage-D build PR
-  to the merged commit). If plan 08 stalls, Stage D ships its own classifier implementing the
+  eviction_age)`; plan 09 v1 uses only its FOK contract, which returns FILLED|UNFILLED —
+  PARTIAL exists only for GTC and is out of plan-09 scope; exact module/symbol pinned in the
+  Stage-D build PR to the merged commit). If plan 08 stalls, Stage D ships its own classifier implementing the
   identical plan-08 semantics and plan 08 later adopts it — one implementation either way.
 - **LLM cost ceiling:** per-market pricing budget capped (config, default ≤$0.05/market-read) and
   a daily token budget; exceeding it halts the scanner, not the wallet.
@@ -107,27 +108,32 @@ Hard constraints:
   outcome=YES}`; `fair_value` is always P(YES) for that instrument; multi-outcome events enter
   only as their binary legs. Cross-venue equivalents remain distinct instruments (deduplicated
   only in G2 scoring).
-- Signal: (fair_value − market mid) clears the category fee model + slippage buffer by a
-  configurable threshold — **signed**: positive edge → paper BUY YES, negative edge → paper BUY
-  NO at (1 − price); direction is never collapsed by an absolute value.
+- **Decision-time snapshot:** after the LLM read completes, Stage D takes a FRESH book
+  snapshot (the decision-time snapshot); signaling, pricing, and fill classification all use
+  this snapshot — never the pre-inference Stage-A book, so liquidity that vanished during model
+  latency can never count as filled.
+- Signal: edge is computed against the **executable price** from the decision-time snapshot —
+  the best resting ask on the side being bought (best YES ask for BUY YES; best NO ask for BUY
+  NO) — not the mid: `edge = fair_value_of_bought_side − executable_price`, and it must clear
+  the category fee model + slippage buffer by a configurable threshold. **Signed**: fair_value
+  above the YES ask → BUY YES; (1 − fair_value) above the NO ask → BUY NO.
 - **Paper intent schema (deterministic):** `{read_id, venue, market_id, side, limit_price =
-  book price at read time rounded to venue tick, order_type = FOK, quantity = Kelly fraction ×
-  virtual bankroll / price, floored to venue lot}`. **Determinism details:** book price = the
-  best resting price on the side being lifted (best ask for BUY YES, best NO-side ask for BUY
-  NO) from the read-time snapshot; tick rounding is always toward the less aggressive price
-  (down for buys); the virtual bankroll is static and non-compounding (config, default
-  $10,000); Kelly output is multiplied by `confidence` and then clipped to the per-market cap.
-  State machine (FOK ⇒ no partials, matching plan 08's classifier: under-covered FOK =
-  UNFILLED): SIGNALED → FILLED | UNFILLED → SETTLED | VOID. Every position links to exactly one
-  originating read_id. **Position ownership:** the FIRST Stage-D-eligible signal per instrument
-  creates the sole position; all later signals on that instrument (repeat or opposing) are
-  logged and ignored.
+  executable price rounded toward the less aggressive tick (down for buys), order_type = FOK,
+  quantity = floor_to_venue_lot(min(kelly_fraction, confidence × per_market_cap_fraction) ×
+  virtual_bankroll / limit_price)}` where `kelly_fraction` is computed from the bought side's
+  probability, the limit price, the venue payoff, and modeled fees. This is the ONLY sizing
+  formula — confidence enters solely through the cap term. The virtual bankroll is static and
+  non-compounding (config, default $10,000).
+  State machine (FOK ⇒ no partials): SIGNALED → FILLED | UNFILLED → SETTLED | VOID. Every
+  position links to exactly one originating read_id. **Position ownership:** the FIRST
+  Stage-D-eligible signal per instrument creates the sole position; all later signals on that
+  instrument (repeat or opposing) are logged and ignored.
 - **Mid-curve only:** paper orders restricted to prices in [0.15, 0.85]; no extreme-price
   longshot/near-certainty orders regardless of model output (that is where losing retail
   concentrates and where fee/variance asymmetry bites).
 - Paper fills use plan 08's deterministic conservative-taker shadow-fill classifier verbatim
-  (FILLED/PARTIAL/UNFILLED, runtime `PRICE_CACHE_EVICTION_AGE` staleness) — one classifier,
-  two consumers, no drift.
+  (FOK contract: FILLED/UNFILLED; runtime `PRICE_CACHE_EVICTION_AGE` staleness, applied to the
+  decision-time snapshot) — one classifier, two consumers, no drift.
 - Position/sizing discipline recorded but not capital-bound (paper): Kelly fraction computed
   from `fair_value` (as the calibrated probability), the paper execution price, the venue's
   payoff terms, and modeled fees — never from the confidence score alone; confidence only
@@ -166,9 +172,10 @@ definition:** event clustering (cluster = markets resolving on the same underlyi
 event, matched by the `market_discovery.py` equivalence machinery plus a manually-curated
 mapping frozen at ratification; representative = the cluster member with the largest paper
 exposure, ties broken by earliest cohort entry), the Brier test (one-sided t-test on
-per-cluster paired Brier differences against margin δ), and the P&L bound (cluster bootstrap
-of standardized return, 10,000 resamples, fixed seed) are all named and hashed at
-ratification — no post-hoc method choice. **Abstention coverage binds through G2:** the
+per-cluster paired Brier differences; pass requires the lower bound above δ), and the P&L
+bound (cluster bootstrap of standardized return: resample event clusters with replacement,
+equal cluster weight, 10,000 resamples, fixed seed, percentile method for the one-sided 95%
+lower bound) are all named and hashed at ratification — no post-hoc method choice. **Abstention coverage binds through G2:** the
 abstain-rate cap and a minimum cohort coverage floor (settled-and-scored cohort members ÷
 settled cohort members ≥ pre-registered floor) are gate conditions; falling below the floor
 invalidates the window rather than shrinking the denominator.
@@ -176,7 +183,7 @@ invalidates the window rather than shrinking the denominator.
 | Gate | Criterion | On pass | On fail |
 |---|---|---|---|
 | G1 — pipeline health | 2 weeks of scheduled runs (cadence fixed at ratification, e.g. every 6h) with ≥95% run-completion uptime, ≥200 **unique markets** attempted (predetermined attempts, not reads — re-reads don't add), error rate ≤10% of attempts, valid-read rate ≥30% of attempts, abstain rate reported separately, zero crashes (crash = unhandled exception terminating a scheduled run) — thresholds fixed at ratification | continue | fix or halt lane |
-| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) AND **paired Brier superiority**: mean per-market (Brier_market − Brier_model) > pre-registered margin δ with a one-sided 95% confidence bound above 0, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled traded positions spanning ≥3 categories, no category >50%**, with **standardized return (P&L / total exposure) whose one-sided 95% confidence bound is above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
+| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) AND **paired Brier superiority**: the one-sided 95% LOWER confidence bound of the mean per-cluster (Brier_market − Brier_model) difference is above the pre-registered margin δ, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled INDEPENDENT EVENT CLUSTERS with traded positions, spanning ≥3 categories, no category >50% of settled traded clusters**, with **standardized return (net P&L ÷ total exposure, where exposure = Σ limit_price × quantity over FILLED positions) whose one-sided 95% lower confidence bound is above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
 | G3 — live (out of scope here) | operator go + broker merged AND its reconciliation/tests passing + caps configured | separate plan | — |
 
 No gate may be evaluated on unsettled markets; partial-window peeks are reported as
@@ -197,6 +204,11 @@ No gate may be evaluated on unsettled markets; partial-window peeks are reported
 - Paper executor: mid-curve bounds (0.15/0.85 edges), fee-threshold signal math per category,
   shadow-fill classifier reuse (no forked logic — import, don't copy).
 - Digest: verdict math (G1/G2 criteria) on synthetic settled sets, provisional-vs-final labeling.
+- Gate math: clustered paired t-test, cluster bootstrap (fixed seed reproducibility, percentile
+  bound), exposure and category-concentration denominators, event-cluster counting — all on
+  fixture sets with hand-computed answers.
+- Intent determinism: identical inputs → byte-identical paper intents (executable-price
+  selection, tick rounding, sizing formula incl. the confidence-capped Kelly min()).
 - Leakage: outcome-info-time/provenance and per-source snapshot timestamps persisted per read;
   G2 exclusion predicates computed from stored fields on fixture sets (undeterminable event
   time → excluded; post-cutoff and post-outcome reads → excluded).
