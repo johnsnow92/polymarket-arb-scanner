@@ -24,13 +24,16 @@ half of any tied mass at ``d`` toward the event. ``derive_shift`` returns
 ``F_hat(d-)`` up to floating-point rounding (the value is already within
 [0, 1], so calibrate()'s clamp only absorbs rounding).
 
-Empirical CDF construction: Hazen plotting positions ``(i - 0.5) / n`` on the
-sorted sample, linear interpolation between DISTINCT order statistics (tied
-blocks form a single knot at the block's mean plotting position). At a point
-EQUAL to a data value the left-continuous, strict-count value
-``#{e < x} / n`` is returned instead — no half tied mass. Everywhere the
-result is clamped to ``[0.5 / n, 1 - 0.5 / n]`` — never exactly 0 or 1, so
-no finite sample can claim certainty.
+Empirical CDF construction: knots at DISTINCT order statistics carrying
+their strict-count probabilities ``#{e < v} / n``, linear interpolation
+between knots — a tied block's jump is spread over the gap to the NEXT
+distinct value, so the estimator is monotone nondecreasing and interpolation
+never counts tied mass at a knot toward the strict event (midrank/Hazen
+knots would sit above the strict count inside tied blocks and decrease at
+exact hits). At a point EQUAL to a data value the left-continuous,
+strict-count value ``#{e < x} / n`` is returned — identical to the knot.
+Everywhere the result is clamped to ``[0.5 / n, 1 - 0.5 / n]`` — never
+exactly 0 or 1, so no finite sample can claim certainty.
 
 Fail-closed edges: fewer than the module-floor number of errors, non-finite
 inputs, or ``raw_prob`` outside [0, 1] raise ``ValueError``. The
@@ -48,7 +51,7 @@ null assumes a CONTINUOUS distribution: PIT values from rounded/discrete
 observations have atoms and must be produced with ``randomized_pit`` (or
 come from genuinely continuous data) or the test is not distribution-free.
 ``derive_shift`` REQUIRES a ``PITResult`` and raises
-``CalibrationRejectedError`` when it did not pass — a failed PIT gate makes
+``ValueError`` when it did not pass — a failed PIT gate makes
 the shift unusable by construction, not by caller discipline.
 
 Pure + deterministic (``randomized_pit`` takes a caller-seeded
@@ -84,12 +87,8 @@ _KS_COEFF_05 = math.sqrt(-0.5 * math.log(KS_ALPHA / 2.0))
 
 
 # ---------------------------------------------------------------------------
-# Exceptions / result types
+# Result types
 # ---------------------------------------------------------------------------
-
-
-class CalibrationRejectedError(ValueError):
-    """Raised when a shift is requested against a PIT gate that failed."""
 
 
 @dataclass(frozen=True)
@@ -148,8 +147,9 @@ def empirical_cdf(errors_degrees: list[float], x: float,
     At a point equal to a data value the left-continuous, strict-count value
     ``#{e < x} / n`` is returned (no half tied mass — the event identity
     ``actual > threshold <=> e < d`` is strict). Between distinct order
-    statistics, Hazen plotting positions with linear interpolation are used
-    (tied blocks collapse to one knot at their mean plotting position).
+    statistics, linear interpolation between strict-count knots is used —
+    each distinct value carries ``#{e < v} / n``, matching the exact-hit
+    value, so the estimator is monotone nondecreasing everywhere.
     The result is clamped to [0.5/n, 1 - 0.5/n] everywhere.
 
     Args:
@@ -186,7 +186,10 @@ def empirical_cdf(errors_degrees: list[float], x: float,
     if x > ordered[-1]:
         return hi_clamp
 
-    # Knots: distinct values with the mean Hazen position of each tied block.
+    # Knots: distinct values carrying their strict-count probability
+    # #{e < v} / n — the same value the exact-hit branch returns, so the
+    # interpolant is monotone (midrank/Hazen knots sit above the strict
+    # count inside tied blocks and would decrease at exact hits).
     xs: list[float] = []
     ps: list[float] = []
     i = 0
@@ -194,10 +197,8 @@ def empirical_cdf(errors_degrees: list[float], x: float,
         j = i
         while j + 1 < n and ordered[j + 1] == ordered[i]:
             j += 1
-        # positions i..j (0-based) -> Hazen (k + 0.5) / n; mean over the block
-        mean_pos = ((i + j) / 2.0 + 0.5) / n
         xs.append(ordered[i])
-        ps.append(mean_pos)
+        ps.append(i / n)
         i = j + 1
 
     k = bisect.bisect_right(xs, x)
@@ -246,20 +247,19 @@ def derive_shift(errors_degrees: list[float], raw_prob: float,
         floating-point rounding.
 
     Raises:
-        CalibrationRejectedError: If ``pit.passed`` is False.
         TypeError: If ``pit`` is not a ``PITResult`` from ``pit_uniformity``
             (duck-typed fakes and ``None`` are rejected, not trusted).
-        ValueError: If ``raw_prob`` is outside [0, 1], the sample is too
-            short, ``min_samples`` is invalid, or any input is non-finite —
-            callers must treat this as "no calibration available", not
-            shift = 0 (fail-closed).
+        ValueError: If ``pit.passed`` is False, ``raw_prob`` is outside
+            [0, 1], the sample is too short, ``min_samples`` is invalid, or
+            any input is non-finite — callers must treat this as "no
+            calibration available", not shift = 0 (fail-closed).
     """
     if not isinstance(pit, PITResult):
         raise TypeError(
             "derive_shift: pit must be a PITResult from pit_uniformity, got %r"
             % (type(pit).__name__,))
     if not pit.passed:
-        raise CalibrationRejectedError(
+        raise ValueError(
             "derive_shift: PIT gate failed (%s) — calibration rejected" % pit.reason)
     if not math.isfinite(raw_prob) or not 0.0 <= raw_prob <= 1.0:
         raise ValueError("derive_shift: raw_prob must be in [0, 1], got %r" % (raw_prob,))

@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from weather_calibration import (  # noqa: E402
     MIN_ERROR_SAMPLES,
     MIN_PIT_SAMPLES,
-    CalibrationRejectedError,
     PITResult,
     derive_shift,
     empirical_cdf,
@@ -26,9 +25,9 @@ from weather_calibration import (  # noqa: E402
 from weather_paper_rules import calibrate  # noqa: E402
 
 FIVE = [-2.0, -1.0, 0.0, 1.0, 2.0]
-# n = 30 sample with the same distinct values (6 copies each): the tied-block
-# mean Hazen knots are 0.1, 0.3, 0.5, 0.7, 0.9 — identical to a plain
-# 5-point Hazen grid, so interpolated values are hand-computable.
+# n = 30 sample with the same distinct values (6 copies each): the strict-count
+# knots are 0.0, 0.2, 0.4, 0.6, 0.8 (#{e < v} / n at each distinct value), so
+# interpolated values are hand-computable.
 REP = FIVE * 6
 
 # Synthetic gate verdicts for exercising derive_shift's structural PIT gate.
@@ -47,9 +46,10 @@ class TestEmpiricalCdf:
         assert empirical_cdf(REP, 2.0) == pytest.approx(24 / 30)
 
     def test_linear_interpolation_between_distinct_order_statistics(self):
-        assert empirical_cdf(REP, 0.5) == pytest.approx(0.6)
-        assert empirical_cdf(REP, 0.25) == pytest.approx(0.55)
-        assert empirical_cdf(REP, 1.5) == pytest.approx(0.8)
+        # strict-count knots: F(0) = 0.4, F(1) = 0.6, F(2) = 0.8
+        assert empirical_cdf(REP, 0.5) == pytest.approx(0.5)
+        assert empirical_cdf(REP, 0.25) == pytest.approx(0.45)
+        assert empirical_cdf(REP, 1.5) == pytest.approx(0.7)
 
     def test_edges_clamped_never_zero_or_one(self):
         assert empirical_cdf(REP, -100.0) == pytest.approx(0.5 / 30)
@@ -64,8 +64,8 @@ class TestEmpiricalCdf:
         tied = [0.0] * 24 + [1.0] * 6
         assert empirical_cdf(tied, 0.0) == pytest.approx(0.5 / 30)  # #{e < 0} = 0, clamped
         assert empirical_cdf(tied, 1.0) == pytest.approx(24 / 30)   # #{e < 1} = 24
-        # between distinct values: Hazen knots 0.4 (block 0..23) and 0.9
-        assert empirical_cdf(tied, 0.5) == pytest.approx(0.65)
+        # between distinct values: strict-count knots 0.0 (at 0.0) and 0.8 (at 1.0)
+        assert empirical_cdf(tied, 0.5) == pytest.approx(0.4)
 
     def test_short_sample_fails_closed(self):
         with pytest.raises(ValueError):
@@ -90,15 +90,45 @@ class TestEmpiricalCdf:
     def test_extreme_magnitude_samples_no_overflow(self):
         # x_hi - x_lo overflows to inf for valid finite inputs; the rescale
         # path must still return a finite, correctly interpolated value.
-        extreme = [-1e308] * 15 + [1e308] * 15  # knots at 0.25 and 0.75
-        assert empirical_cdf(extreme, 0.0) == pytest.approx(0.5)
-        assert empirical_cdf(extreme, 0.5e308) == pytest.approx(0.625)
+        extreme = [-1e308] * 15 + [1e308] * 15  # strict-count knots 0.0 and 0.5
+        assert empirical_cdf(extreme, 0.0) == pytest.approx(0.25)
+        assert empirical_cdf(extreme, 0.5e308) == pytest.approx(0.375)
 
     def test_non_finite_inputs_rejected(self):
         with pytest.raises(ValueError):
             empirical_cdf(REP, float("nan"))
         with pytest.raises(ValueError):
             empirical_cdf([0.0] * 29 + [float("inf")], 0.0)
+
+    def test_monotone_nondecreasing_around_every_knot(self):
+        # Regression (CodeRabbit, PR #85): with midrank/Hazen knots the
+        # interpolant approached 0.7 just below a tied value while the exact
+        # hit returned the strict count 0.6 — increasing x LOWERED the
+        # probability. Strict-count knots make the estimator monotone:
+        # check immediately below / at / immediately above every knot.
+        eps = 1e-9
+        for sample in (REP, [0.0] * 24 + [1.0] * 6, sorted({float(i % 7) for i in range(70)} | {2.5}) * 6):
+            knots = sorted(set(sample))
+            probes = sorted(
+                {v + d for v in knots for d in (-eps, 0.0, eps)}
+                | {knots[0] - 1.0, knots[-1] + 1.0})
+            values = [empirical_cdf(sample, x) for x in probes]
+            for a, b in zip(values, values[1:]):
+                assert b >= a, "empirical_cdf must be nondecreasing"
+
+    def test_monotone_on_dense_grid(self):
+        # Property: nondecreasing on a dense grid spanning past both edges.
+        grid = [x / 50.0 for x in range(-150, 151)]
+        values = [empirical_cdf(REP, x) for x in grid]
+        for a, b in zip(values, values[1:]):
+            assert b >= a
+
+    def test_exact_hit_agrees_with_left_limit(self):
+        # The CodeRabbit counterexample shape: the left limit at a tied value
+        # must not exceed the exact-hit strict count.
+        assert empirical_cdf(REP, 1.0 - 1e-9) <= empirical_cdf(REP, 1.0)
+        assert empirical_cdf(REP, 1.0) == pytest.approx(18 / 30)
+        assert empirical_cdf(REP, 1.0 - 1e-9) == pytest.approx(0.6, abs=1e-6)
 
 
 class TestDeriveShift:
@@ -107,8 +137,9 @@ class TestDeriveShift:
         assert derive_shift(REP, 0.4, 0.0, PASS_PIT) == pytest.approx(0.0)
         # F(1-) = 18/30 = 0.6; raw 0.7 -> shift -0.1
         assert derive_shift(REP, 0.7, 1.0, PASS_PIT) == pytest.approx(-0.1)
-        # F(0.5) = 0.6 (interpolated); raw 0.9 -> shift -0.3
-        assert derive_shift(REP, 0.9, 0.5, PASS_PIT) == pytest.approx(-0.3)
+        # F(0.5) = 0.5 (interpolated between strict-count knots 0.4 and 0.6);
+        # raw 0.9 -> shift -0.4
+        assert derive_shift(REP, 0.9, 0.5, PASS_PIT) == pytest.approx(-0.4)
 
     def test_event_identity_with_tied_mass(self):
         # NBM exactly right every time (all errors 0): P(actual > threshold)
@@ -125,12 +156,12 @@ class TestDeriveShift:
         assert shift < 0
 
     def test_failed_pit_gate_raises(self):
-        with pytest.raises(CalibrationRejectedError):
+        with pytest.raises(ValueError, match="PIT gate failed"):
             derive_shift(REP, 0.5, 0.0, FAIL_PIT)
         # a real failing verdict from pit_uniformity is equally rejected
         real_fail = pit_uniformity([0.5] * 100)
         assert real_fail.passed is False
-        with pytest.raises(CalibrationRejectedError):
+        with pytest.raises(ValueError, match="PIT gate failed"):
             derive_shift(REP, 0.5, 0.0, real_fail)
 
     def test_raw_prob_out_of_range_rejected(self):
