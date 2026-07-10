@@ -247,11 +247,17 @@ def derive_shift(errors_degrees: list[float], raw_prob: float,
 
     Raises:
         CalibrationRejectedError: If ``pit.passed`` is False.
+        TypeError: If ``pit`` is not a ``PITResult`` from ``pit_uniformity``
+            (duck-typed fakes and ``None`` are rejected, not trusted).
         ValueError: If ``raw_prob`` is outside [0, 1], the sample is too
             short, ``min_samples`` is invalid, or any input is non-finite —
             callers must treat this as "no calibration available", not
             shift = 0 (fail-closed).
     """
+    if not isinstance(pit, PITResult):
+        raise TypeError(
+            "derive_shift: pit must be a PITResult from pit_uniformity, got %r"
+            % (type(pit).__name__,))
     if not pit.passed:
         raise CalibrationRejectedError(
             "derive_shift: PIT gate failed (%s) — calibration rejected" % pit.reason)

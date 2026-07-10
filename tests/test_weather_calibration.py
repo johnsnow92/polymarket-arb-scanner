@@ -269,3 +269,18 @@ class TestPitUniformity:
     def test_determinism(self):
         pit = [((i * 7919) % 100 + 0.5) / 100 for i in range(100)]
         assert pit_uniformity(list(pit)) == pit_uniformity(list(pit))
+
+
+class TestPitTypeValidation:
+    def test_none_pit_raises_type_error(self):
+        errors = [float(i) for i in range(30)]
+        with pytest.raises(TypeError):
+            derive_shift(errors, 0.5, 10.0, None)
+
+    def test_duck_typed_fake_pit_rejected(self):
+        class FakePit:
+            passed = True
+            reason = "fake"
+        errors = [float(i) for i in range(30)]
+        with pytest.raises(TypeError):
+            derive_shift(errors, 0.5, 10.0, FakePit())
