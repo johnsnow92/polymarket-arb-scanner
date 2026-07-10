@@ -2962,7 +2962,7 @@ class ArbitrageExecutor:
                                 try:
                                     _alert_manager.alert(
                                         "cancel_unconfirmed",
-                                        "error",
+                                        "CRITICAL",
                                         f"Polymarket GTC cancel unconfirmed for order {order_id}",
                                         details={
                                             "order_id": order_id,

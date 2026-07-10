@@ -2503,6 +2503,9 @@ class TestMakerRouting:
         assert mock_alert_manager.alert.called
         args = mock_alert_manager.alert.call_args
         assert args.args[0] == "cancel_unconfirmed"
+        # Must be a supported AlertManager severity ("error" under-routes to
+        # WARNING); an untracked-exposure event is high-severity.
+        assert args.args[1] == "CRITICAL"
         assert args.kwargs["details"]["order_id"] == "order_alert_1"
 
 

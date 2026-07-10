@@ -67,8 +67,11 @@ def _install_clob_proxy(proxy_url: str) -> None:
 
 
 if _proxy_url:
+    # Gamma REST proxying only — never raises. The fail-closed CLOB write-path
+    # injection (_install_clob_proxy) runs in PolymarketTrader.__init__ so a
+    # missing SDK internal aborts only when the authenticated write path is
+    # actually constructed, not any dry-run/read-only import of this module.
     _session.proxies = {"http": _proxy_url, "https": _proxy_url}
-    _install_clob_proxy(_proxy_url)
 _session.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=10))
 
 _ORDER_TYPE_MAP = {
@@ -335,6 +338,12 @@ class PolymarketTrader:
             raise ValueError(
                 f"signature_type must be one of 0 (EOA), 1 (email/Magic), "
                 f"2 (Gnosis Safe), 3 (POLY_1271); got {signature_type!r}")
+        # Fail-closed proxy injection belongs to the authenticated write path:
+        # install (or abort) here, before the CLOB client exists, so read-only
+        # imports of this module never hard-fail on the SDK internal check.
+        proxy_url = os.getenv("POLYMARKET_PROXY_URL")
+        if proxy_url:
+            _install_clob_proxy(proxy_url)
         kwargs: dict = dict(
             host=CLOB_BASE,
             key=private_key,
@@ -411,7 +420,9 @@ class PolymarketTrader:
         try:
             ot = _ORDER_TYPE_MAP.get(str(order_type).upper())
             if ot is None:
-                logger.error("Unknown order_type %r — refusing to place order", order_type)
+                logger.error(
+                    "Unknown order_type %r — refusing to place order (allowed: %s)",
+                    order_type, ", ".join(sorted(_ORDER_TYPE_MAP)))
                 return None
             order_kwargs: dict = dict(
                 token_id=token_id,

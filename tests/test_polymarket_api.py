@@ -362,6 +362,29 @@ class TestPolymarketTraderPlaceOrder:
             )
         assert not trader.client.create_and_post_order.called
 
+    def test_place_order_gtd_forwards_expiration(self):
+        """A valid GTD order forwards the GTD mapping and the expiration."""
+        mock_client = MagicMock()
+        mock_client.create_and_post_order.return_value = {"success": True, "orderID": "x"}
+        trader = PolymarketTrader.__new__(PolymarketTrader)
+        trader.client = mock_client
+        captured = {}
+
+        class _CapturingOrderArgs:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        with patch.object(polymarket_api, "OrderArgs", _CapturingOrderArgs):
+            resp = trader.place_order(
+                token_id="tok", side="BUY", price=0.45, size=5.0,
+                order_type="GTD", expiration=1893456000,
+            )
+        assert resp is not None
+        assert captured["expiration"] == 1893456000
+        call = mock_client.create_and_post_order.call_args
+        assert call.kwargs["order_type"] == polymarket_api._ORDER_TYPE_MAP["GTD"]
+        assert isinstance(call.args[0], _CapturingOrderArgs)
+
 
 class TestPolymarketTraderCancelOrder:
     """Fail-closed cancel confirmation."""
@@ -443,17 +466,57 @@ class TestClobProxyInjection:
 
     def test_install_sets_httpx_client(self):
         helpers_mod = polymarket_api._clob_http
+        had_attr = hasattr(helpers_mod, "_http_client")
         saved = getattr(helpers_mod, "_http_client", None)
-        sentinel_before = object()
-        helpers_mod._http_client = sentinel_before
+        helpers_mod._http_client = object()
         try:
             with patch.object(polymarket_api.httpx, "Client") as mock_client_cls:
                 polymarket_api._install_clob_proxy("http://proxy.local:8080")
                 mock_client_cls.assert_called_once_with(
                     http2=True, proxy="http://proxy.local:8080")
-            assert helpers_mod._http_client is not sentinel_before
+                assert helpers_mod._http_client is mock_client_cls.return_value
         finally:
-            helpers_mod._http_client = saved
+            if had_attr:
+                helpers_mod._http_client = saved
+            else:
+                del helpers_mod._http_client
+
+    def test_trader_init_installs_proxy_before_client_when_env_set(self):
+        """The write path must be proxied before the CLOB client exists."""
+        calls = []
+        with patch.dict(os.environ, {"POLYMARKET_PROXY_URL": "http://proxy.local:8080"}), \
+             patch.object(polymarket_api, "_install_clob_proxy",
+                          side_effect=lambda url: calls.append(("proxy", url))), \
+             patch.object(polymarket_api, "ClobClient",
+                          side_effect=lambda **kw: calls.append(("client",)) or MagicMock()):
+            PolymarketTrader(private_key="0xkey")
+        assert calls[0] == ("proxy", "http://proxy.local:8080")
+        assert ("client",) in calls
+
+    def test_trader_init_fails_closed_when_sdk_internal_missing(self):
+        """Missing SDK internal aborts trader construction, not module import."""
+        helpers_mod = polymarket_api._clob_http
+        had_attr = hasattr(helpers_mod, "_http_client")
+        saved = getattr(helpers_mod, "_http_client", None)
+        try:
+            if had_attr:
+                delattr(helpers_mod, "_http_client")
+            with patch.dict(os.environ, {"POLYMARKET_PROXY_URL": "http://proxy.local:8080"}), \
+                 patch.object(polymarket_api, "ClobClient") as mock_cls:
+                with pytest.raises(RuntimeError):
+                    PolymarketTrader(private_key="0xkey")
+                assert not mock_cls.called
+        finally:
+            if had_attr:
+                helpers_mod._http_client = saved
+
+    def test_trader_init_skips_proxy_when_env_unset(self):
+        env_without = {k: v for k, v in os.environ.items() if k != "POLYMARKET_PROXY_URL"}
+        with patch.dict(os.environ, env_without, clear=True), \
+             patch.object(polymarket_api, "_install_clob_proxy") as mock_install, \
+             patch.object(polymarket_api, "ClobClient", return_value=MagicMock()):
+            PolymarketTrader(private_key="0xkey")
+        assert not mock_install.called
 
 
 class TestPolymarketTraderGetOrders:
