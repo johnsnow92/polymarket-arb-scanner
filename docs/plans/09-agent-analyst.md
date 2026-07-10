@@ -116,7 +116,9 @@ Hard constraints:
   the best resting ask on the side being bought (best YES ask for BUY YES; best NO ask for BUY
   NO) — not the mid: `edge = fair_value_of_bought_side − executable_price`, and it must clear
   the category fee model + slippage buffer by a configurable threshold. **Signed**: fair_value
-  above the YES ask → BUY YES; (1 − fair_value) above the NO ask → BUY NO.
+  above the YES ask → BUY YES; (1 − fair_value) above the NO ask → BUY NO. **If BOTH sides
+  qualify from one snapshot (crossed/incoherent book), the signal fails closed** — no intent,
+  logged as INCOHERENT_BOOK — a genuinely crossed book is a data artifact, not an edge.
 - **Paper intent schema (deterministic):** `{read_id, venue, market_id, side, limit_price =
   executable price rounded toward the less aggressive tick (down for buys), order_type = FOK,
   quantity = floor_to_venue_lot(min(kelly_fraction, confidence × per_market_cap_fraction) ×
@@ -173,9 +175,11 @@ event, matched by the `market_discovery.py` equivalence machinery plus a manuall
 mapping frozen at ratification; representative = the cluster member with the largest paper
 exposure, ties broken by earliest cohort entry), the Brier test (one-sided t-test on
 per-cluster paired Brier differences; pass requires the lower bound above δ), and the P&L
-bound (cluster bootstrap of standardized return: resample event clusters with replacement,
-equal cluster weight, 10,000 resamples, fixed seed, percentile method for the one-sided 95%
-lower bound) are all named and hashed at ratification — no post-hoc method choice. **Abstention coverage binds through G2:** the
+bound (statistic = the MEAN of per-cluster ROI, where a cluster's ROI = its net P&L ÷ its
+exposure — equal cluster weight, never ratio-of-sums; cluster bootstrap: resample event
+clusters with replacement, recompute the mean per-cluster ROI per resample, 10,000 resamples,
+fixed seed, percentile method for the one-sided 95% lower bound) are all named and hashed at
+ratification — no post-hoc method choice. **Abstention coverage binds through G2:** the
 abstain-rate cap and a minimum cohort coverage floor (settled-and-scored cohort members ÷
 settled cohort members ≥ pre-registered floor) are gate conditions; falling below the floor
 invalidates the window rather than shrinking the denominator.
@@ -183,7 +187,7 @@ invalidates the window rather than shrinking the denominator.
 | Gate | Criterion | On pass | On fail |
 |---|---|---|---|
 | G1 — pipeline health | 2 weeks of scheduled runs (cadence fixed at ratification, e.g. every 6h) with ≥95% run-completion uptime, ≥200 **unique markets** attempted (predetermined attempts, not reads — re-reads don't add), error rate ≤10% of attempts, valid-read rate ≥30% of attempts, abstain rate reported separately, zero crashes (crash = unhandled exception terminating a scheduled run) — thresholds fixed at ratification | continue | fix or halt lane |
-| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) AND **paired Brier superiority**: the one-sided 95% LOWER confidence bound of the mean per-cluster (Brier_market − Brier_model) difference is above the pre-registered margin δ, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled INDEPENDENT EVENT CLUSTERS with traded positions, spanning ≥3 categories, no category >50% of settled traded clusters**, with **standardized return (net P&L ÷ total exposure, where exposure = Σ limit_price × quantity over FILLED positions) whose one-sided 95% lower confidence bound is above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
+| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) AND **paired Brier superiority**: the one-sided 95% LOWER confidence bound of the mean per-cluster (Brier_market − Brier_model) difference is above the pre-registered margin δ, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled INDEPENDENT EVENT CLUSTERS each containing at least one settled FILLED position** (UNFILLED-only clusters never count), **spanning ≥3 categories with no category >50% of counted clusters** (a cluster's category = the category of its largest-exposure FILLED position, ties broken by earliest cohort entry), with the **mean per-cluster ROI (cluster ROI = cluster net P&L ÷ cluster exposure; exposure = Σ limit_price × quantity over its FILLED positions) having a one-sided 95% lower confidence bound above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
 | G3 — live (out of scope here) | operator go + broker merged AND its reconciliation/tests passing + caps configured | separate plan | — |
 
 No gate may be evaluated on unsettled markets; partial-window peeks are reported as
