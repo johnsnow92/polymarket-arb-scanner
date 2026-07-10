@@ -2387,6 +2387,68 @@ class TestMakerRouting:
             f"Expected exactly 1 order attempt (maker only), got {call_count}"
         )
 
+    def test_unconfirmed_cancel_flags_leg_for_reconciliation(self, executor, caplog):
+        """cancel_order returning False must flag the leg (_cancel_unconfirmed),
+        log an ERROR, and preserve the order ID for recovery/reconciliation."""
+        import logging as _logging
+        from unittest.mock import patch as mpatch
+        leg = {
+            "platform": "polymarket",
+            "side": "BUY",
+            "token": "yes",
+            "price": 0.45,
+            "_token_id": "tok_yes",
+        }
+        opp = {"type": "Binary", "_layer": 1, "market": "Test Market?"}
+        executor.pm_trader.place_order.return_value = {
+            "success": True, "orderID": "order_unconfirmed_1"
+        }
+        executor.pm_trader.cancel_order = MagicMock(return_value=False)
+        with mpatch("executor.ORDER_TIME_IN_FORCE", "gtc"), \
+             mpatch("executor.GTC_ORDER_TIMEOUT", 0.01), \
+             mpatch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])), \
+             mpatch.object(executor, "_confirm_fill_pm", return_value=None), \
+             caplog.at_level(_logging.ERROR, logger="executor"):
+            executor.dry_run = False
+            success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
+        assert success is False
+        # Order ID preserved on both the return value and the leg
+        assert order_id == "order_unconfirmed_1"
+        assert leg["_order_id"] == "order_unconfirmed_1"
+        # Leg carries the unconfirmed-cancel marker
+        assert leg.get("_cancel_unconfirmed") is True
+        # An ERROR mentioning the order ID was logged
+        assert any(
+            r.levelno == _logging.ERROR and "order_unconfirmed_1" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_confirmed_cancel_does_not_flag_leg(self, executor):
+        """cancel_order returning True must NOT set _cancel_unconfirmed."""
+        from unittest.mock import patch as mpatch
+        leg = {
+            "platform": "polymarket",
+            "side": "BUY",
+            "token": "yes",
+            "price": 0.45,
+            "_token_id": "tok_yes",
+        }
+        opp = {"type": "Binary", "_layer": 1}
+        executor.pm_trader.place_order.return_value = {
+            "success": True, "orderID": "order_confirmed_1"
+        }
+        executor.pm_trader.cancel_order = MagicMock(return_value=True)
+        with mpatch("executor.ORDER_TIME_IN_FORCE", "gtc"), \
+             mpatch("executor.GTC_ORDER_TIMEOUT", 0.01), \
+             mpatch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])), \
+             mpatch.object(executor, "_confirm_fill_pm", return_value=None):
+            executor.dry_run = False
+            success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
+        assert success is False
+        assert "_cancel_unconfirmed" not in leg
+
 
 # ---------------------------------------------------------------------------
 # _derive_position_platform: position.platform must reflect the legs' actual

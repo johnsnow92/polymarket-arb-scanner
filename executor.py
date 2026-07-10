@@ -2923,13 +2923,37 @@ class ArbitrageExecutor:
                             "cancelling — no taker fallback per D-05",
                             order_id, GTC_ORDER_TIMEOUT,
                         )
+                        cancel_confirmed = False
                         try:
-                            self.pm_trader.cancel_order(order_id)
+                            cancel_confirmed = bool(self.pm_trader.cancel_order(order_id))
                         except Exception as cancel_err:
                             logger.warning(
-                                "Failed to cancel Polymarket GTC order %s: %s",
-                                order_id, cancel_err,
+                                f"Failed to cancel Polymarket GTC order {order_id}: {cancel_err}"
                             )
+                        if not cancel_confirmed:
+                            # Cancel unconfirmed: the order may still be live and fill
+                            # later (untracked exposure). Mark the leg so recovery/
+                            # reconciliation can find it via the preserved _order_id.
+                            leg["_cancel_unconfirmed"] = True
+                            logger.error(
+                                f"Polymarket GTC order {order_id} cancel UNCONFIRMED for market "
+                                f"{opportunity.get('market', opportunity.get('type', '?'))} — "
+                                f"order may still be live; leg flagged for reconciliation"
+                            )
+                            if _alert_manager:
+                                try:
+                                    _alert_manager.alert(
+                                        "cancel_unconfirmed",
+                                        "error",
+                                        f"Polymarket GTC cancel unconfirmed for order {order_id}",
+                                        details={
+                                            "order_id": order_id,
+                                            "market": opportunity.get("market"),
+                                            "platform": "polymarket",
+                                        },
+                                    )
+                                except Exception:
+                                    logger.exception("cancel_unconfirmed alert failed")
                         return False, order_id, None
                     return True, order_id, fill_price
                 else:
