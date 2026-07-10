@@ -5,8 +5,8 @@ Question #1): ``weather_paper_rules.calibrate(raw_prob, shift)`` expects a
 scalar shift in PROBABILITY space, but the NBM error archive is naturally in
 DEGREE space (forecast MaxT - actual MaxT). This module performs the
 conversion via empirical-CDF percentile interpolation, and provides the
-PIT-uniformity diagnostic that gates whether the calibration may be used
-at all.
+PIT-uniformity diagnostic that structurally gates whether the calibration
+may be used at all.
 
 Semantics
 ---------
@@ -14,40 +14,52 @@ With signed errors ``e = forecast_max_f - actual_max_f`` (positive = NBM ran
 hot) and ``d = forecast_max_f - bracket_threshold_f`` (the threshold
 distance, positive = forecast above the bracket threshold):
 
-    actual > threshold  <=>  e < d
+    actual > threshold  <=>  e < d          (STRICT inequality)
 
 so the calibrated probability that the actual MaxT clears the threshold is
-the empirical CDF of historical errors evaluated at ``d``. ``derive_shift``
-returns ``F_hat(d) - raw_prob`` so that
-``calibrate(raw_prob, shift) == F_hat(d)`` exactly (already in [0, 1], so
-calibrate()'s clamp is a no-op).
+the LEFT limit of the empirical CDF of historical errors at ``d`` —
+``F_hat(d-) ~= P(e < d)`` — not the midrank value, which would wrongly count
+half of any tied mass at ``d`` toward the event. ``derive_shift`` returns
+``F_hat(d-) - raw_prob`` so that ``calibrate(raw_prob, shift)`` equals
+``F_hat(d-)`` up to floating-point rounding (the value is already within
+[0, 1], so calibrate()'s clamp only absorbs rounding).
 
 Empirical CDF construction: Hazen plotting positions ``(i - 0.5) / n`` on the
-sorted sample, linear interpolation between order statistics. Tied values are
-collapsed to a single knot at the mean plotting position of the tied block
-(the mid-distribution CDF), keeping the interpolant a well-defined function.
-Outside the sample range the CDF is clamped to ``0.5 / n`` / ``1 - 0.5 / n``
-— never exactly 0 or 1, so no finite sample can claim certainty.
+sorted sample, linear interpolation between DISTINCT order statistics (tied
+blocks form a single knot at the block's mean plotting position). At a point
+EQUAL to a data value the left-continuous, strict-count value
+``#{e < x} / n`` is returned instead — no half tied mass. Everywhere the
+result is clamped to ``[0.5 / n, 1 - 0.5 / n]`` — never exactly 0 or 1, so
+no finite sample can claim certainty.
 
-Fail-closed edges: fewer than ``min_samples`` errors, non-finite inputs, or
-``raw_prob`` outside [0, 1] raise ``ValueError``. Callers must not fall back
-to an uncalibrated path silently.
+Fail-closed edges: fewer than the module-floor number of errors, non-finite
+inputs, or ``raw_prob`` outside [0, 1] raise ``ValueError``. The
+``min_samples`` parameters can only RAISE the hard floors
+``MIN_ERROR_SAMPLES`` / ``MIN_PIT_SAMPLES``, never lower them, and must be
+ints. Callers must not fall back to an uncalibrated path silently.
 
-PIT gate: ``pit_uniformity`` runs a one-sample Kolmogorov-Smirnov test of the
-probability-integral-transform values against Uniform(0, 1), using the
-asymptotic critical value ``D_crit = 1.3581 / sqrt(n)`` at alpha = 0.05
-(Smirnov's asymptotic formula — adequate for the n >= 30 samples this gate
-requires; exact small-sample tables are NOT used, which is why small n
-fails closed instead). ``PITResult.passed`` is a hard gate: when it is
-False, ``derive_shift`` output for that city/window must not be used.
+PIT gate (structural): ``pit_uniformity`` runs a one-sample
+Kolmogorov-Smirnov test of probability-integral-transform values against
+Uniform(0, 1), using the asymptotic critical value
+``D_crit = 1.3581 / sqrt(n)`` at alpha = 0.05 (Smirnov's asymptotic formula
+— adequate for the n >= 30 samples this gate requires; exact small-sample
+tables are NOT used, which is why small n fails closed instead). The KS
+null assumes a CONTINUOUS distribution: PIT values from rounded/discrete
+observations have atoms and must be produced with ``randomized_pit`` (or
+come from genuinely continuous data) or the test is not distribution-free.
+``derive_shift`` REQUIRES a ``PITResult`` and raises
+``CalibrationRejectedError`` when it did not pass — a failed PIT gate makes
+the shift unusable by construction, not by caller discipline.
 
-Pure + deterministic, stdlib only.
+Pure + deterministic (``randomized_pit`` takes a caller-seeded
+``random.Random``), stdlib only.
 """
 from __future__ import annotations
 
 import bisect
 import logging
 import math
+import random
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -56,12 +68,13 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Minimum error-archive size before a shift may be derived. Below this the
-# empirical CDF is too coarse to interpolate meaningfully — fail closed.
+# Hard module floor on the error-archive size before a shift may be derived.
+# Below this the empirical CDF is too coarse to interpolate meaningfully —
+# fail closed. Callers can only raise this via min_samples, never lower it.
 MIN_ERROR_SAMPLES = 30
 
-# Minimum PIT sample size for the asymptotic KS critical value to be a fair
-# approximation. Below this the gate fails closed (passed=False).
+# Hard module floor on the PIT sample size for the asymptotic KS critical
+# value to be a fair approximation. Below it the gate fails closed.
 MIN_PIT_SAMPLES = 30
 
 # Smirnov asymptotic critical-value coefficient at alpha = 0.05:
@@ -71,8 +84,12 @@ _KS_COEFF_05 = math.sqrt(-0.5 * math.log(KS_ALPHA / 2.0))
 
 
 # ---------------------------------------------------------------------------
-# Result types
+# Exceptions / result types
 # ---------------------------------------------------------------------------
+
+
+class CalibrationRejectedError(ValueError):
+    """Raised when a shift is requested against a PIT gate that failed."""
 
 
 @dataclass(frozen=True)
@@ -87,51 +104,89 @@ class PITResult:
 
 
 # ---------------------------------------------------------------------------
-# Empirical CDF (percentile interpolation)
+# Internal validation helpers
+# ---------------------------------------------------------------------------
+
+
+def _effective_min(min_samples: int, floor: int, func_name: str) -> int:
+    """Validate ``min_samples`` and apply the hard module floor.
+
+    Callers can only RAISE the floor, never lower it. Non-int values
+    (including bool, NaN, inf) are rejected outright.
+    """
+    if isinstance(min_samples, bool) or not isinstance(min_samples, int):
+        raise ValueError(
+            "%s: min_samples must be an int, got %r" % (func_name, min_samples))
+    if min_samples < 1:
+        raise ValueError(
+            "%s: min_samples must be >= 1, got %d" % (func_name, min_samples))
+    return max(min_samples, floor)
+
+
+def _validated_errors(errors_degrees: list[float], effective_min: int,
+                      func_name: str) -> list[float]:
+    """Finiteness + floor checks; returns the sorted sample."""
+    if len(errors_degrees) < effective_min:
+        raise ValueError(
+            "%s: %d error samples < required minimum %d (fail-closed)"
+            % (func_name, len(errors_degrees), effective_min))
+    for e in errors_degrees:
+        if not math.isfinite(e):
+            raise ValueError("%s: non-finite error sample %r" % (func_name, e))
+    return sorted(errors_degrees)
+
+
+# ---------------------------------------------------------------------------
+# Empirical CDF (left-continuous at data values, interpolated between)
 # ---------------------------------------------------------------------------
 
 
 def empirical_cdf(errors_degrees: list[float], x: float,
                   min_samples: int = MIN_ERROR_SAMPLES) -> float:
-    """Empirical CDF of the error sample evaluated at ``x``.
+    """Strict-event empirical CDF estimate ``F_hat(x-) ~= P(e < x)``.
 
-    Hazen plotting positions with linear interpolation between order
-    statistics; ties collapsed to their mean plotting position; clamped to
-    [0.5/n, 1 - 0.5/n] outside the sample range.
+    At a point equal to a data value the left-continuous, strict-count value
+    ``#{e < x} / n`` is returned (no half tied mass — the event identity
+    ``actual > threshold <=> e < d`` is strict). Between distinct order
+    statistics, Hazen plotting positions with linear interpolation are used
+    (tied blocks collapse to one knot at their mean plotting position).
+    The result is clamped to [0.5/n, 1 - 0.5/n] everywhere.
 
     Args:
         errors_degrees: Historical error sample in degree space
             (forecast MaxT - actual MaxT).
-        x: Point at which to evaluate the empirical CDF (degree space).
-        min_samples: Minimum sample size before evaluation is allowed
-            (must be >= 1; defaults to ``MIN_ERROR_SAMPLES``).
+        x: Point at which to evaluate the estimator (degree space).
+        min_samples: Minimum sample size, an int >= 1. Only raises the hard
+            module floor ``MIN_ERROR_SAMPLES``; it can never lower it.
 
     Returns:
-        The interpolated empirical CDF value in (0, 1) — never exactly
-        0 or 1 for a finite sample.
+        The estimate in (0, 1) — never exactly 0 or 1 for a finite sample.
 
     Raises:
-        ValueError: If ``min_samples`` < 1, the sample is shorter than
-            ``min_samples``, or ``x`` / any sample value is non-finite
-            (fail-closed).
+        ValueError: If ``min_samples`` is not an int or < 1, the sample is
+            shorter than the effective minimum, or ``x`` / any sample value
+            is non-finite (fail-closed).
     """
-    if min_samples < 1:
-        raise ValueError(
-            "empirical_cdf: min_samples must be >= 1, got %d" % min_samples)
-    if len(errors_degrees) < min_samples:
-        raise ValueError(
-            "empirical_cdf: %d error samples < required minimum %d (fail-closed)"
-            % (len(errors_degrees), min_samples))
+    eff_min = _effective_min(min_samples, MIN_ERROR_SAMPLES, "empirical_cdf")
     if not math.isfinite(x):
         raise ValueError("empirical_cdf: x must be finite, got %r" % (x,))
-    for e in errors_degrees:
-        if not math.isfinite(e):
-            raise ValueError("empirical_cdf: non-finite error sample %r" % (e,))
+    ordered = _validated_errors(errors_degrees, eff_min, "empirical_cdf")
+    n = len(ordered)
+    lo_clamp = 0.5 / n
+    hi_clamp = 1.0 - 0.5 / n
 
-    n = len(errors_degrees)
-    ordered = sorted(errors_degrees)
+    lt = bisect.bisect_left(ordered, x)
+    le = bisect.bisect_right(ordered, x)
+    if le > lt:
+        # x coincides with a data value: left-continuous strict count.
+        return min(max(lt / n, lo_clamp), hi_clamp)
 
-    # Knots: unique values with the mean Hazen position of each tied block.
+    if x < ordered[0]:
+        return lo_clamp
+    if x > ordered[-1]:
+        return hi_clamp
+
+    # Knots: distinct values with the mean Hazen position of each tied block.
     xs: list[float] = []
     ps: list[float] = []
     i = 0
@@ -145,11 +200,6 @@ def empirical_cdf(errors_degrees: list[float], x: float,
         ps.append(mean_pos)
         i = j + 1
 
-    if x <= xs[0]:
-        return ps[0] if x == xs[0] else 0.5 / n
-    if x >= xs[-1]:
-        return ps[-1] if x == xs[-1] else 1.0 - 0.5 / n
-
     k = bisect.bisect_right(xs, x)
     x_lo, x_hi = xs[k - 1], xs[k]
     p_lo, p_hi = ps[k - 1], ps[k]
@@ -161,38 +211,50 @@ def empirical_cdf(errors_degrees: list[float], x: float,
         logger.debug("empirical_cdf: rescaling interpolation span by %g to avoid overflow", scale)
         x, x_lo, x_hi = x / scale, x_lo / scale, x_hi / scale
         span = x_hi - x_lo
-    return p_lo + (p_hi - p_lo) * (x - x_lo) / span
+    value = p_lo + (p_hi - p_lo) * (x - x_lo) / span
+    return min(max(value, lo_clamp), hi_clamp)
 
 
 # ---------------------------------------------------------------------------
-# Shift derivation (degree space -> probability space)
+# Shift derivation (degree space -> probability space), PIT-gated
 # ---------------------------------------------------------------------------
 
 
 def derive_shift(errors_degrees: list[float], raw_prob: float,
-                 threshold_distance_degrees: float,
+                 threshold_distance_degrees: float, pit: PITResult,
                  min_samples: int = MIN_ERROR_SAMPLES) -> float:
     """Probability-space shift for ``weather_paper_rules.calibrate``.
+
+    The PIT gate is structural: a ``PITResult`` from ``pit_uniformity`` is
+    REQUIRED, and a failed gate raises instead of returning a number —
+    calibration whose PIT diagnostic failed must never be used.
 
     Args:
         errors_degrees: Historical NBM errors in degree space
             (forecast MaxT - actual MaxT).
         raw_prob: Uncalibrated model probability of the YES outcome
-            (actual MaxT above the bracket threshold), in [0, 1].
+            (actual MaxT strictly above the bracket threshold), in [0, 1].
         threshold_distance_degrees: Forecast MaxT - bracket threshold.
-        min_samples: Minimum error-archive size before a shift may be
-            derived (must be >= 1; defaults to ``MIN_ERROR_SAMPLES``).
+        pit: The PIT-uniformity verdict for this error archive (run
+            ``pit_uniformity`` on held-out randomized PITs first).
+        min_samples: Minimum error-archive size, an int >= 1. Only raises
+            the hard module floor ``MIN_ERROR_SAMPLES``.
 
     Returns:
         ``shift`` such that ``calibrate(raw_prob, shift)`` equals the
-        empirical-CDF calibrated probability F_hat(threshold_distance).
+        left-continuous empirical-CDF probability F_hat(d-) up to
+        floating-point rounding.
 
     Raises:
+        CalibrationRejectedError: If ``pit.passed`` is False.
         ValueError: If ``raw_prob`` is outside [0, 1], the sample is too
-            short, ``min_samples`` < 1, or any input is non-finite —
+            short, ``min_samples`` is invalid, or any input is non-finite —
             callers must treat this as "no calibration available", not
             shift = 0 (fail-closed).
     """
+    if not pit.passed:
+        raise CalibrationRejectedError(
+            "derive_shift: PIT gate failed (%s) — calibration rejected" % pit.reason)
     if not math.isfinite(raw_prob) or not 0.0 <= raw_prob <= 1.0:
         raise ValueError("derive_shift: raw_prob must be in [0, 1], got %r" % (raw_prob,))
     calibrated = empirical_cdf(errors_degrees, threshold_distance_degrees,
@@ -201,44 +263,82 @@ def derive_shift(errors_degrees: list[float], raw_prob: float,
 
 
 # ---------------------------------------------------------------------------
-# PIT-uniformity gate
+# PIT construction + uniformity gate
 # ---------------------------------------------------------------------------
+
+
+def randomized_pit(errors_degrees: list[float], observed: float,
+                   rng: random.Random,
+                   min_samples: int = MIN_ERROR_SAMPLES) -> float:
+    """Randomized PIT ``u = F_hat(x-) + V * (F_hat(x) - F_hat(x-))``.
+
+    For discrete/rounded observations the plain (midrank) PIT has atoms, so
+    the continuous-null KS test in ``pit_uniformity`` is not
+    distribution-free. Randomizing uniformly across each tied block's
+    probability mass (V ~ Uniform(0, 1) from the caller-seeded ``rng``)
+    restores uniformity under the null. Here ``F_hat`` is the raw step
+    ECDF: ``F_hat(x-) = #{e < x} / n``, ``F_hat(x) = #{e <= x} / n``.
+
+    Args:
+        errors_degrees: The historical error sample defining the CDF.
+        observed: The held-out observed error to transform.
+        rng: Caller-seeded ``random.Random`` — seeding makes runs
+            deterministic.
+        min_samples: Minimum sample size, an int >= 1. Only raises the hard
+            module floor ``MIN_ERROR_SAMPLES``.
+
+    Returns:
+        A PIT value in [0, 1].
+
+    Raises:
+        ValueError: If ``min_samples`` is invalid, the sample is too short,
+            or any input is non-finite (fail-closed).
+    """
+    eff_min = _effective_min(min_samples, MIN_ERROR_SAMPLES, "randomized_pit")
+    if not math.isfinite(observed):
+        raise ValueError("randomized_pit: observed must be finite, got %r" % (observed,))
+    ordered = _validated_errors(errors_degrees, eff_min, "randomized_pit")
+    n = len(ordered)
+    lt = bisect.bisect_left(ordered, observed)
+    eq = bisect.bisect_right(ordered, observed) - lt
+    return (lt + rng.random() * eq) / n
 
 
 def pit_uniformity(pit_values: list[float],
                    min_samples: int = MIN_PIT_SAMPLES) -> PITResult:
     """Kolmogorov-Smirnov test of PIT values against Uniform(0, 1).
 
-    ``pit_values`` are F_hat(observed error) over held-out (forecast,
-    outcome) pairs; a well-calibrated CDF makes them ~Uniform(0, 1).
+    ``pit_values`` are PITs over held-out (forecast, outcome) pairs; a
+    well-calibrated CDF makes them ~Uniform(0, 1). The KS null assumes a
+    continuous distribution: inputs must be randomized PITs (see
+    ``randomized_pit``) or come from genuinely continuous observations —
+    raw midrank PITs of rounded data have atoms and bias the test.
 
     Args:
-        pit_values: Probability-integral-transform values, each in [0, 1].
-        min_samples: Minimum sample size for the asymptotic KS critical
-            value to be a fair approximation (must be >= 1; defaults to
-            ``MIN_PIT_SAMPLES``). Below it the gate fails closed.
+        pit_values: PIT values, each in [0, 1].
+        min_samples: Minimum sample size, an int >= 1. Only raises the hard
+            module floor ``MIN_PIT_SAMPLES``. Below the effective minimum
+            the gate fails closed (passed=False).
 
     Returns:
-        A ``PITResult``; ``passed`` is True iff n >= ``min_samples`` and
-        D < 1.3581 / sqrt(n) (asymptotic alpha = 0.05 critical value).
-        Anything else — including tiny samples — fails closed.
+        A ``PITResult``; ``passed`` is True iff n meets the effective
+        minimum and D < 1.3581 / sqrt(n) (asymptotic alpha = 0.05 critical
+        value). Anything else — including tiny samples — fails closed.
 
     Raises:
-        ValueError: If ``min_samples`` < 1 or any PIT value is outside
-            [0, 1] or non-finite.
+        ValueError: If ``min_samples`` is not an int or < 1, or any PIT
+            value is outside [0, 1] or non-finite.
     """
-    if min_samples < 1:
-        raise ValueError(
-            "pit_uniformity: min_samples must be >= 1, got %d" % min_samples)
+    eff_min = _effective_min(min_samples, MIN_PIT_SAMPLES, "pit_uniformity")
     n = len(pit_values)
     for v in pit_values:
         if not math.isfinite(v) or not 0.0 <= v <= 1.0:
             raise ValueError("pit_uniformity: PIT value out of [0, 1]: %r" % (v,))
 
-    if n < min_samples:
+    if n < eff_min:
         return PITResult(
             statistic=float("nan"), threshold=float("nan"), n=n, passed=False,
-            reason="fail-closed: %d PIT values < required minimum %d" % (n, min_samples))
+            reason="fail-closed: %d PIT values < required minimum %d" % (n, eff_min))
 
     ordered = sorted(pit_values)
     d_stat = 0.0
