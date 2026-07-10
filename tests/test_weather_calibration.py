@@ -1,11 +1,14 @@
 """Tests for weather_calibration — empirical-CDF shift derivation + PIT gate."""
 from __future__ import annotations
 
+import logging
 import math
 import sys
 from pathlib import Path
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -50,6 +53,19 @@ class TestEmpiricalCdf:
             empirical_cdf(FIVE, 0.0)  # default min_samples = 30
         with pytest.raises(ValueError):
             empirical_cdf([], 0.0, min_samples=1)
+
+    def test_min_samples_below_one_rejected(self):
+        with pytest.raises(ValueError):
+            empirical_cdf(FIVE, 0.0, min_samples=0)
+        with pytest.raises(ValueError):
+            empirical_cdf(FIVE, 0.0, min_samples=-3)
+
+    def test_extreme_magnitude_samples_no_overflow(self):
+        # x_hi - x_lo overflows to inf for valid finite inputs; the rescale
+        # path must still return a finite, correctly interpolated value.
+        extreme = [-1e308, 1e308]
+        assert empirical_cdf(extreme, 0.0, min_samples=1) == pytest.approx(0.5)
+        assert empirical_cdf(extreme, 0.5e308, min_samples=1) == pytest.approx(0.625)
 
     def test_non_finite_inputs_rejected(self):
         with pytest.raises(ValueError):
@@ -133,6 +149,10 @@ class TestPitUniformity:
         assert math.isnan(res.statistic)
         assert "fail-closed" in res.reason
         assert MIN_PIT_SAMPLES == 30
+
+    def test_min_samples_below_one_rejected(self):
+        with pytest.raises(ValueError):
+            pit_uniformity([0.5] * 30, min_samples=0)
 
     def test_out_of_range_values_rejected(self):
         with pytest.raises(ValueError):

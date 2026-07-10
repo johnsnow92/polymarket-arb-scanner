@@ -46,8 +46,11 @@ Pure + deterministic, stdlib only.
 from __future__ import annotations
 
 import bisect
+import logging
 import math
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -94,9 +97,27 @@ def empirical_cdf(errors_degrees: list[float], x: float,
 
     Hazen plotting positions with linear interpolation between order
     statistics; ties collapsed to their mean plotting position; clamped to
-    [0.5/n, 1 - 0.5/n] outside the sample range. Raises ``ValueError`` on
-    short samples or non-finite inputs (fail-closed).
+    [0.5/n, 1 - 0.5/n] outside the sample range.
+
+    Args:
+        errors_degrees: Historical error sample in degree space
+            (forecast MaxT - actual MaxT).
+        x: Point at which to evaluate the empirical CDF (degree space).
+        min_samples: Minimum sample size before evaluation is allowed
+            (must be >= 1; defaults to ``MIN_ERROR_SAMPLES``).
+
+    Returns:
+        The interpolated empirical CDF value in (0, 1) — never exactly
+        0 or 1 for a finite sample.
+
+    Raises:
+        ValueError: If ``min_samples`` < 1, the sample is shorter than
+            ``min_samples``, or ``x`` / any sample value is non-finite
+            (fail-closed).
     """
+    if min_samples < 1:
+        raise ValueError(
+            "empirical_cdf: min_samples must be >= 1, got %d" % min_samples)
     if len(errors_degrees) < min_samples:
         raise ValueError(
             "empirical_cdf: %d error samples < required minimum %d (fail-closed)"
@@ -132,7 +153,15 @@ def empirical_cdf(errors_degrees: list[float], x: float,
     k = bisect.bisect_right(xs, x)
     x_lo, x_hi = xs[k - 1], xs[k]
     p_lo, p_hi = ps[k - 1], ps[k]
-    return p_lo + (p_hi - p_lo) * (x - x_lo) / (x_hi - x_lo)
+    span = x_hi - x_lo
+    if math.isinf(span):
+        # Finite endpoints whose difference overflows float range: rescale by
+        # the largest magnitude so the interpolation fraction stays finite.
+        scale = max(abs(x), abs(x_lo), abs(x_hi))
+        logger.debug("empirical_cdf: rescaling interpolation span by %g to avoid overflow", scale)
+        x, x_lo, x_hi = x / scale, x_lo / scale, x_hi / scale
+        span = x_hi - x_lo
+    return p_lo + (p_hi - p_lo) * (x - x_lo) / span
 
 
 # ---------------------------------------------------------------------------
@@ -145,15 +174,24 @@ def derive_shift(errors_degrees: list[float], raw_prob: float,
                  min_samples: int = MIN_ERROR_SAMPLES) -> float:
     """Probability-space shift for ``weather_paper_rules.calibrate``.
 
-    ``errors_degrees``: historical NBM errors (forecast MaxT - actual MaxT).
-    ``raw_prob``: the uncalibrated model probability of the YES outcome
-    (actual MaxT above the bracket threshold).
-    ``threshold_distance_degrees``: forecast MaxT - bracket threshold.
+    Args:
+        errors_degrees: Historical NBM errors in degree space
+            (forecast MaxT - actual MaxT).
+        raw_prob: Uncalibrated model probability of the YES outcome
+            (actual MaxT above the bracket threshold), in [0, 1].
+        threshold_distance_degrees: Forecast MaxT - bracket threshold.
+        min_samples: Minimum error-archive size before a shift may be
+            derived (must be >= 1; defaults to ``MIN_ERROR_SAMPLES``).
 
-    Returns ``shift`` such that ``calibrate(raw_prob, shift)`` equals the
-    empirical-CDF calibrated probability F_hat(threshold_distance). Raises
-    ``ValueError`` on short samples or invalid inputs — callers must treat
-    that as "no calibration available", not shift = 0.
+    Returns:
+        ``shift`` such that ``calibrate(raw_prob, shift)`` equals the
+        empirical-CDF calibrated probability F_hat(threshold_distance).
+
+    Raises:
+        ValueError: If ``raw_prob`` is outside [0, 1], the sample is too
+            short, ``min_samples`` < 1, or any input is non-finite —
+            callers must treat this as "no calibration available", not
+            shift = 0 (fail-closed).
     """
     if not math.isfinite(raw_prob) or not 0.0 <= raw_prob <= 1.0:
         raise ValueError("derive_shift: raw_prob must be in [0, 1], got %r" % (raw_prob,))
@@ -173,10 +211,25 @@ def pit_uniformity(pit_values: list[float],
 
     ``pit_values`` are F_hat(observed error) over held-out (forecast,
     outcome) pairs; a well-calibrated CDF makes them ~Uniform(0, 1).
-    Passes iff n >= ``min_samples`` and D < 1.3581 / sqrt(n) (asymptotic
-    alpha = 0.05 critical value). Anything else — including tiny samples —
-    fails closed. Values outside [0, 1] raise ``ValueError``.
+
+    Args:
+        pit_values: Probability-integral-transform values, each in [0, 1].
+        min_samples: Minimum sample size for the asymptotic KS critical
+            value to be a fair approximation (must be >= 1; defaults to
+            ``MIN_PIT_SAMPLES``). Below it the gate fails closed.
+
+    Returns:
+        A ``PITResult``; ``passed`` is True iff n >= ``min_samples`` and
+        D < 1.3581 / sqrt(n) (asymptotic alpha = 0.05 critical value).
+        Anything else — including tiny samples — fails closed.
+
+    Raises:
+        ValueError: If ``min_samples`` < 1 or any PIT value is outside
+            [0, 1] or non-finite.
     """
+    if min_samples < 1:
+        raise ValueError(
+            "pit_uniformity: min_samples must be >= 1, got %d" % min_samples)
     n = len(pit_values)
     for v in pit_values:
         if not math.isfinite(v) or not 0.0 <= v <= 1.0:
