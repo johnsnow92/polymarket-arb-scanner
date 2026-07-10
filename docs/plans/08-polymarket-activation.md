@@ -7,20 +7,33 @@ no allowlist change, and no capital movement.**
 not auditable from this repo alone). Polymarket execution enabled from Michigan (non-sports only),
 contingent on operator API-level verification.
 **Queue position:** W7 lane #1 (2026-07-07 priority queue, item #2 spec / item #4 build).
-**Written:** 2026-07-09. Revised same day after adversarial review (Codex round 1: FAIL → fixes below).
+**Written:** 2026-07-09. Revised same day after adversarial review (Codex rounds 1–2).
+
+> **⚠️ OPEN AUTHORITY CONTRADICTION (must resolve before ANY live consideration):** as of
+> 2026-07-09, Polymarket's official geoblock documentation
+> (`docs.polymarket.com/api-reference/geoblock`) lists the United States as **close-only** —
+> existing positions may close, but new orders cannot open, on both frontend and API. This
+> contradicts W5's premise ("execution enabled from MI ~mid-June", operator ground truth). A
+> successful authenticated GET does NOT establish order eligibility. The [OP] verification item
+> therefore must explicitly confirm **new-order-opening eligibility** for the operator's account,
+> and until that confirmation exists this plan's live-activation reference material is void.
+> Shadow mode (Phases A–C) is unaffected — it places no orders.
 
 ---
 
 ## 1. Context and constraints
 
-Polymarket became accessible from Michigan ~mid-June 2026 (non-sports; sports remains blocked
-statewide). The 6/12 "read-only from MI" posture is superseded by W5. However:
+Per W5, Polymarket became accessible from Michigan ~mid-June 2026 (non-sports; sports remains
+blocked statewide), superseding the 6/12 "read-only from MI" posture — subject to the authority
+contradiction flagged above. However:
 
 - **App access ≠ API access.** API-level verification from the operator's account is an open
   [OP] item (queue #1). Verification is **read-only**: authenticated GET endpoints (balance,
   open orders) only — it must NOT place test orders, cancel orders, move funds, write secrets,
-  or change routing. A working proxy is never treated as permission to bypass venue or
-  jurisdiction restrictions.
+  or change routing — plus an explicit determination of new-order-opening eligibility (see the
+  authority-contradiction banner). A working proxy is never treated as permission to bypass venue
+  or jurisdiction restrictions; if venue policy prohibits opening orders from the US, no proxy
+  configuration makes activation permissible and the activation plan is void.
 - **Shadow-only must be technically enforced, not conventional.** Today `polymarket` is in the
   default `ENABLED_EXECUTION_PLATFORMS` (`config.py`), `DRY_RUN=false` + a key constructs the
   authenticated writer, and `master` auto-deploys to Railway. Phase A therefore adds a
@@ -36,7 +49,12 @@ statewide). The 6/12 "read-only from MI" posture is superseded by W5. However:
 - **Sports filter is a code gate, not prose.** Phase A adds a central executor-side veto:
   any Polymarket-routable opportunity whose market category is `sports`, missing, or unknown is
   **blocked fail-closed** before order construction, with test coverage for every
-  Polymarket-routable strategy branch.
+  Polymarket-routable strategy branch. **Category provenance:** today the binary, NegRisk, and
+  WS-cross producers use category for fees but do not attach it to opportunity dicts — a strict
+  veto would block every shadow opportunity, while trusting caller-supplied values would weaken
+  the gate. Phase A therefore requires canonical category propagation (fetched from market
+  metadata, normalized) from **every** producer including the WebSocket path, with
+  known-non-sports positive tests proving legitimate opportunities still flow.
 
 ## 2. What already exists (do not rebuild)
 
@@ -53,10 +71,14 @@ greenfield migration. The WIP is treated as untrusted input (see §6).
 ## 3. Build phases
 
 ### Phase A — Land the CLOB V2 client migration (this repo, PR-sized)
-1. Start from `wip/clob-v2-snapshot-2026-07-09`; rebase onto current `master`.
-   **Acceptance explicitly rejects** — do not carry over — the WIP's live-authority content:
-   `CANARY_MODE=live` / `CANARY_LIVE_ACK`, live caps, allowlist/config defaults, and local
-   settings files. Adversarial review of the resulting PR must confirm none of these survive.
+1. **WIP intake is extraction, not rebase.** Pin the snapshot to an immutable pushed
+   commit/patch first (push `wip/clob-v2-snapshot-2026-07-09` to origin or archive its patch),
+   then **extract only allowed hunks** onto a fresh branch off `master` — the snapshot spans
+   24 files / +1,565 lines including unrelated Firecrawl, Layer-4 wiring, agent docs, and local
+   settings that must NOT replay. **Acceptance explicitly rejects** the WIP's live-authority
+   content: `CANARY_MODE=live` / `CANARY_LIVE_ACK`, live caps, allowlist/config defaults, and
+   local settings files. Adversarial review of the resulting PR must confirm none of these
+   survive.
 2. Scope: `polymarket_api.py` (V2 imports, `OrderPayload`/`OrderType`, httpx proxy injection,
    pUSD collateral in `get_balance()`), `requirements.txt` (`py-clob-client-v2==1.0.2`),
    sizing in `executor.py`, order/intent persistence, the default-deny live gate and sports veto
@@ -77,10 +99,16 @@ greenfield migration. The WIP is treated as untrusted input (see §6).
    themselves resolve unknown acceptance (instant fills may not appear among open orders).
    Require a durable intent journal written before submission with a **stable fingerprint**
    (token ID, side, quantity, price — not wall-clock-derived), an explicit **UNKNOWN quarantine**
-   state, and restart reconciliation against open orders, closed orders, AND fills
-   (extend `recovery.py`). Never auto-resubmit; UNKNOWN intents halt that market and alert.
-   A failure-injection test (crash between venue accept and `_persist_order_id`) is part of
-   Phase A acceptance.
+   state, and restart reconciliation against open orders and fills (extend `recovery.py`).
+   **The venue enumerates open orders only** — an accepted-then-immediately-cancelled unfilled
+   order with no persisted ID is unresolvable by API; such intents become **permanent UNKNOWN**
+   requiring manual operator resolution, with ambiguity tests covering that case. Never
+   auto-resubmit; UNKNOWN intents halt that market and alert. A failure-injection test (crash
+   between venue accept and `_persist_order_id`) is part of Phase A acceptance.
+   **Dead-man switch:** any use of GTC orders requires Polymarket's order heartbeat
+   (`docs.polymarket.com/api-reference/trade/send-heartbeat`) so the venue auto-cancels open
+   orders if the system stops responding — with startup, heartbeat-failure, shutdown, and
+   restart tests. (The WIP contains WebSocket heartbeats only; this is a separate mechanism.)
 6. **Review flag:** this touches order-placement paths → money-authority merge (operator 1-tap
    after CodeRabbit + Codex both clean).
 7. Acceptance: full suite green ×2 fixed-seed; V1 client fully removed (V1 endpoints are dead);
@@ -93,13 +121,20 @@ greenfield migration. The WIP is treated as untrusted input (see §6).
    legs, fees, expected net) to `trades.db` shadow tables + snapshot recorder.
 2. Divergence logging: for each shadow fill, record book price at decision time vs T+5s re-fetch;
    summarize slippage distribution in the P&L digest.
-3. Exit criteria to request live consideration [OP]: ≥1 week shadow, no crash/recovery incidents,
+3. Exit criteria to request live consideration [OP] — must not pass vacuously: ≥1 week shadow
+   AND ≥100 shadow opportunities logged AND ≥20 shadow fills spanning ≥2 strategy types and
+   ≥3 market categories (thresholds are proposals subject to operator ratification), no
+   crash/recovery incidents, p95 decision-to-T+5s slippage within the strategy's modeled edge,
    shadow fee accounting matches `polymarket_taker_fee()` to the cent on sampled markets,
-   read-only API verification passed.
+   read-only API verification passed, and the §authority contradiction resolved.
 
 ### Phase C — Settlement-divergence VETO gate (mandatory before any cross-venue pair could go live)
 Per W5: every Polymarket↔other-venue pair must pass a resolution-criteria equivalence check.
-Implement as a hard gate in the cross-platform scan refinement stage:
+**Enforcement point: the common final dispatch boundary** (`executor.execute()`), not scan
+refinement — the WebSocket cross path (`continuous.py`/`cross_pair_index.py`) generates and
+queues opportunities without passing through refinement, and `execute()` accepts plain
+opportunity dicts from any caller. The repo's existing tested, TTL-enforced fail-closed veto
+(`settlement_divergence.py`) is the mechanism; wire it so every producer hits it:
 - Pair resolution-source/rule text (Polymarket UMA/oracle text vs counterpart venue rules);
   mismatch, missing rule text, or gate error → VETO (fail-closed), opportunity dropped and logged.
 - Reuses the market-equivalence machinery in `market_discovery.py` + `matcher.py`; the LLM
