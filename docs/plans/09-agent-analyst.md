@@ -47,13 +47,16 @@ Hard constraints:
 - Reuses: `kalshi_api.py`/`polymarket_api.py` read paths, `snapshot.py` recorder.
 
 ### Stage B — LLM analyst read
-- Per candidate: one structured read producing `{fair_value, confidence, base_rate_source,
-  resolution_risk_notes, abstain}` from (a) full resolution-rule text, (b) base rates the model
+- Per candidate: one structured read producing `{fair_value ∈ [0,1], confidence ∈ [0,1],
+  base_rate_source, resolution_risk_notes, abstain, abstain_reason}` — non-finite or
+  out-of-range values fail schema validation (→ ERROR status) — from (a) full resolution-rule text, (b) base rates the model
   must cite (historical frequency, reference-class data), (c) optional news snippets (existing
   Firecrawl source, default off, same flag discipline as STRAT-02).
-- **Abstain is a first-class output** — ambiguous rules, missing base rates, or model-declared
-  low confidence produce no paper trade, logged with reason. Unparseable/failed reads abstain
-  (fail-closed), never default-price.
+- **Read status taxonomy (mutually exclusive, one per read):** `VALID` (schema-conforming
+  priced read), `ABSTAIN` (model-declared: ambiguous rules, missing base rates, low
+  confidence — logged with `abstain_reason`), `ERROR` (transport/schema/validation failure).
+  G1's error rate = ERROR/total; valid-read rate = VALID/total; abstain rate = ABSTAIN/total.
+  ABSTAIN and ERROR never price and never trade (fail-closed).
 - Model calls go through a thin `llm_client.py` (retry, cost metering, response-schema
   validation). Prompt + response persisted per read for post-hoc audit.
 
@@ -63,8 +66,11 @@ Hard constraints:
   never update. Each row: model fair value, confidence, market mid at read time, spread,
   category, venue, timestamps; joined to the venue's own settlement result on resolution
   (authoritative-settlement pattern from the exit-liquidity work, PR #46). **Metric identity:**
-  G2 Brier/calibration use exactly one prediction per market — the final read before the
-  market's trading close; earlier reads are retained for drift analysis only.
+  G2 Brier/calibration use exactly one prediction per market — the final VALID read before the
+  market's trading close; earlier reads are retained for drift analysis only. **Baseline
+  time-lock:** the market-implied baseline uses the market mid stored in that SAME selected
+  final read, with the same outcome encoding and settlement timestamp — never a re-fetched or
+  different-snapshot price, so the gate is reproducible from the store alone.
 - Metrics computed from settled rows only: **Brier score** (overall + per category + per
   confidence bucket), calibration curve, edge realization (did |model − market| gaps close in the
   model's favor).
@@ -101,7 +107,7 @@ Hard constraints:
 | Gate | Criterion | On pass | On fail |
 |---|---|---|---|
 | G1 — pipeline health | 2 weeks paper, ≥200 markets read, error rate ≤10% of reads, valid (non-abstain, non-error) reads ≥30%, abstain rate reported separately, zero crashes (thresholds are proposals subject to operator ratification) | continue | fix or halt lane |
-| G2 — calibration | **≥300 settled paper markets** (seed rows excluded) AND Brier ≤ market-implied baseline (Brier of "price = probability", computed on the SAME settled cohort) AND positive paper P&L after modeled fees on **≥50 settled traded positions spanning ≥3 categories with no category >50% of the traded sample** (thresholds subject to operator ratification) | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
+| G2 — calibration | **≥300 settled paper markets** (seed rows excluded) AND Brier ≤ market-implied baseline (Brier of "price = probability", computed on the SAME settled cohort) AND positive paper P&L after modeled fees on **≥50 settled traded positions spanning ≥3 categories with no category >50% of the traded sample** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters it (no manual selection), one position per market (re-signals on the same market do not add positions), PARTIAL paper fills aggregate into that single position at their covered quantity, and the sizing/threshold config is snapshot-frozen at G1 pass and unchanged through G2 evaluation (thresholds subject to operator ratification) | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
 | G3 — live (out of scope here) | operator go + broker merged + caps configured | separate plan | — |
 
 No gate may be evaluated on unsettled markets; partial-window peeks are reported as
@@ -129,8 +135,10 @@ No gate may be evaluated on unsettled markets; partial-window peeks are reported
   concentration; G2 reports per-category Brier and the [OP] decision sees the breakdown, not
   just the aggregate.
 - **LLM data leakage/staleness:** the model may "know" outcomes for markets resolving on public
-  schedules; reads record the model's knowledge-cutoff and flag markets whose resolution window
-  predates it — those rows are excluded from G2.
+  schedules; reads record the model's knowledge-cutoff and G2 excludes any market whose
+  **settlement-determining event time (or, if unavailable, its trading-close time) is ≤ the
+  model's knowledge-cutoff date** — i.e. the outcome could have been in training data. Read
+  time plays no role in the predicate.
 - **Cost runaway:** long-tail enumeration × LLM reads is unbounded by default — the daily token
   budget halt is load-bearing, tested, and alerts on trip.
 - **Judgment-loop scope creep:** any attempt to point Stage B at liquid markets or extremes is a
