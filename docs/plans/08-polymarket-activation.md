@@ -1,10 +1,13 @@
 # Plan 08 — Polymarket Activation (CLOB V2, shadow-only)
 
-**Status:** SPEC — build authorized for shadow mode only
-**Authority:** Warroom decision W5 (2026-07-07, `24-STRATEGY-WARROOM-2026-07-07.md` §6) — Polymarket
-execution ENABLED from Michigan (non-sports only), contingent on operator API-level verification.
+**Status:** SPEC — build authorized for shadow mode only. **This plan authorizes no live order,
+no allowlist change, and no capital movement.**
+**Authority:** Warroom decision W5 (2026-07-07) — recorded in the out-of-repo command center
+(`~/Financial Markets with AI/24-STRATEGY-WARROOM-2026-07-07.md` §6 and 00-STRATEGY decision log;
+not auditable from this repo alone). Polymarket execution enabled from Michigan (non-sports only),
+contingent on operator API-level verification.
 **Queue position:** W7 lane #1 (2026-07-07 priority queue, item #2 spec / item #4 build).
-**Written:** 2026-07-09.
+**Written:** 2026-07-09. Revised same day after adversarial review (Codex round 1: FAIL → fixes below).
 
 ---
 
@@ -14,94 +17,130 @@ Polymarket became accessible from Michigan ~mid-June 2026 (non-sports; sports re
 statewide). The 6/12 "read-only from MI" posture is superseded by W5. However:
 
 - **App access ≠ API access.** API-level verification from the operator's account is an open
-  [OP] item (queue #1). Until it passes, everything in this plan runs **shadow-only**
-  (`DRY_RUN=true`, `polymarket` may remain in `ENABLED_EXECUTION_PLATFORMS` for dry-run paths
-  but no live flip).
+  [OP] item (queue #1). Verification is **read-only**: authenticated GET endpoints (balance,
+  open orders) only — it must NOT place test orders, cancel orders, move funds, write secrets,
+  or change routing. A working proxy is never treated as permission to bypass venue or
+  jurisdiction restrictions.
+- **Shadow-only must be technically enforced, not conventional.** Today `polymarket` is in the
+  default `ENABLED_EXECUTION_PLATFORMS` (`config.py`), `DRY_RUN=false` + a key constructs the
+  authenticated writer, and `master` auto-deploys to Railway. Phase A therefore adds a
+  **default-deny Polymarket live gate** (`POLYMARKET_LIVE_ENABLED`, default `false`) enforced at
+  three boundaries: config validation, client construction (shadow mode must be structurally
+  unable to construct a signing client), and the executor dispatch. Flipping it is a
+  money-authority change (operator 1-tap).
 - **Policy broker precondition.** No agent-executed live order until broker PR #78 merges and its
   reconciliation passes tests (loop rule; doc 22). Live sizing/caps come from the broker's
   out-of-repo config — this plan does NOT define capital limits.
 - **Money-authority hard-stop.** Any diff that flips the allowlist, touches capital caps, gate
   thresholds, or order-placement paths gets a 1-tap operator merge, never auto-merge.
-- **Sports filter.** Markets categorized `sports` are excluded from all Polymarket execution
-  paths regardless of fee-model support (MI litigation posture).
+- **Sports filter is a code gate, not prose.** Phase A adds a central executor-side veto:
+  any Polymarket-routable opportunity whose market category is `sports`, missing, or unknown is
+  **blocked fail-closed** before order construction, with test coverage for every
+  Polymarket-routable strategy branch.
 
 ## 2. What already exists (do not rebuild)
 
 | Piece | State | Where |
 |---|---|---|
-| Category taker-fee model (crypto 7% / sports 3% / finance-politics-mentions-tech 4% / econ-culture-weather-other 5% / geopolitics 0%; `rate·C·P·(1−P)`) | **SHIPPED** (PR #47) | `fees.py:POLYMARKET_CATEGORY_TAKER_RATES`, `polymarket_taker_fee()` |
+| Category taker-fee model (crypto 7% / sports 3% / finance-politics-mentions-tech 4% / econ-culture-weather-other 5% / geopolitics 0%; `rate·C·P·(1−P)`) | **SHIPPED** (PR #41) | `fees.py:POLYMARKET_CATEGORY_TAKER_RATES`, `polymarket_taker_fee()` |
 | Maker-rebate model (25% of taker fee, 20% crypto) | **SHIPPED** (PR #47) | `fees.py:polymarket_maker_rebate()` |
-| CLOB V2 client migration WIP: `py-clob-client-v2==1.0.2`, `OrderPayload`/`OrderType` (GTC/FOK map), httpx proxy injection for CLOB writes, pUSD/USDC collateral balance, dollar→shares sizing (`_dollar_size_to_contracts`), order-id persistence (`_persist_order_id`), venue-aware fill finalization, hedger + Kalshi sizing updates, test updates | **UNMERGED WIP** — preserved 2026-07-09 on branch `wip/clob-v2-snapshot-2026-07-09` (snapshot of uncommitted work found on `fix/layer4-continuous-wiring`) | branch `wip/clob-v2-snapshot-2026-07-09` |
+| CLOB V2 client migration WIP: `py-clob-client-v2==1.0.2`, `OrderPayload`/`OrderType` (GTC/FOK map), httpx proxy injection for CLOB writes, pUSD/USDC collateral balance, dollar→shares sizing (`_dollar_size_to_contracts`), order-id persistence (`_persist_order_id`), venue-aware fill finalization, hedger + Kalshi sizing updates, test updates | **UNMERGED WIP** — preserved 2026-07-09 on **local-only** branch `wip/clob-v2-snapshot-2026-07-09` (snapshot of uncommitted work found on `fix/layer4-continuous-wiring`; not on origin) | branch `wip/clob-v2-snapshot-2026-07-09` |
 | Proxy support for geoblock (`POLYMARKET_PROXY_URL`) | shipped (V1-era); V2 needs the httpx injection from the WIP | `polymarket_api.py` |
 
 The build task is therefore: **review, harden, and land the V2 WIP as its own PR series**, not a
-greenfield migration.
+greenfield migration. The WIP is treated as untrusted input (see §6).
 
 ## 3. Build phases
 
 ### Phase A — Land the CLOB V2 client migration (this repo, PR-sized)
-1. Start from `wip/clob-v2-snapshot-2026-07-09`; rebase onto current `master`; split out anything
-   unrelated to the migration (the snapshot was taken from a mixed working tree).
+1. Start from `wip/clob-v2-snapshot-2026-07-09`; rebase onto current `master`.
+   **Acceptance explicitly rejects** — do not carry over — the WIP's live-authority content:
+   `CANARY_MODE=live` / `CANARY_LIVE_ACK`, live caps, allowlist/config defaults, and local
+   settings files. Adversarial review of the resulting PR must confirm none of these survive.
 2. Scope: `polymarket_api.py` (V2 imports, `OrderPayload`/`OrderType`, httpx proxy injection,
    pUSD collateral in `get_balance()`), `requirements.txt` (`py-clob-client-v2==1.0.2`),
-   sizing helpers in `executor.py` (`_dollar_size_to_contracts`, zero-share skip guards),
-   order-id persistence to SQLite at venue-accept time, matching test updates.
-   **Crash/retry semantics at the venue-accept boundary:** py-clob-client-v2 exposes no
-   client-order-id/idempotency hook, so the executor must carry app-side dedupe — persist an
-   idempotency key before submission, reconcile open orders against persisted keys on restart
-   (extend `recovery.py`), and never blind-resubmit. A failure-injection test (crash between
-   venue accept and `_persist_order_id`) is part of Phase A acceptance.
-3. **Review flag:** this touches order-placement paths → money-authority merge (operator 1-tap
+   sizing in `executor.py`, order/intent persistence, the default-deny live gate and sports veto
+   from §1, and matching test updates.
+3. **Quantity planning must preserve arb invariants.** The WIP's per-leg
+   `floor(dollars / leg_price)` conversion applied independently to each leg produces mismatched
+   share counts (e.g. $5 at $0.40/$0.55 → 12 YES vs 9 NO — directional exposure, not an arb).
+   Phase A replaces this with a strategy-level quantity planner: compute one target quantity per
+   opportunity that preserves the payoff invariant across legs, respect inventory constraints on
+   SELL legs, and add payoff-invariant tests per strategy type — not just helper boundary tests.
+4. **Fill semantics.** A venue-accepted order is not a fill, and `size_matched > 0` is not a
+   complete fill (the WIP currently records the full requested amount as `_fill_qty`). Track
+   requested vs matched quantity per leg; handle partial fills, GTC cancel results, cancel races,
+   and hedge-confirmation (hedge success = confirmed fill, not acceptance). Tests must cover
+   partial-fill, residual-order, cancel-race, and hedge-confirmation paths.
+5. **Crash/idempotency semantics at the venue-accept boundary.** py-clob-client-v2 exposes no
+   client-order-id hook and the key is never transmitted to the venue, so local keys cannot by
+   themselves resolve unknown acceptance (instant fills may not appear among open orders).
+   Require a durable intent journal written before submission with a **stable fingerprint**
+   (token ID, side, quantity, price — not wall-clock-derived), an explicit **UNKNOWN quarantine**
+   state, and restart reconciliation against open orders, closed orders, AND fills
+   (extend `recovery.py`). Never auto-resubmit; UNKNOWN intents halt that market and alert.
+   A failure-injection test (crash between venue accept and `_persist_order_id`) is part of
+   Phase A acceptance.
+6. **Review flag:** this touches order-placement paths → money-authority merge (operator 1-tap
    after CodeRabbit + Codex both clean).
-4. Acceptance: full suite green ×2 fixed-seed; V1 client fully removed (V1 endpoints are dead);
-   dry-run order construction round-trips against recorded fixtures.
+7. Acceptance: full suite green ×2 fixed-seed; V1 client fully removed (V1 endpoints are dead);
+   dry-run order construction round-trips against recorded fixtures; live-gate/sports-veto/
+   invariant/fill-semantics tests from items 3–5 all present and green.
 
 ### Phase B — Shadow mode (no live orders)
-1. Run continuous mode with `DRY_RUN=true` and Polymarket scans enabled; every would-be order is
-   priced with the category fee model and logged (opportunity, legs, fees, expected net) to
-   `trades.db` shadow tables + snapshot recorder.
+1. Run continuous mode with `DRY_RUN=true` + `POLYMARKET_LIVE_ENABLED=false` and Polymarket scans
+   enabled; every would-be order is priced with the category fee model and logged (opportunity,
+   legs, fees, expected net) to `trades.db` shadow tables + snapshot recorder.
 2. Divergence logging: for each shadow fill, record book price at decision time vs T+5s re-fetch;
    summarize slippage distribution in the P&L digest.
-3. Exit criteria to request live flip [OP]: ≥1 week shadow, no crash/recovery incidents,
+3. Exit criteria to request live consideration [OP]: ≥1 week shadow, no crash/recovery incidents,
    shadow fee accounting matches `polymarket_taker_fee()` to the cent on sampled markets,
-   API-level verification passed.
+   read-only API verification passed.
 
-### Phase C — Settlement-divergence VETO gate (mandatory before any cross-venue pair goes live)
-Per W5: every Polymarket↔other-venue pair must pass a resolution-criteria equivalence check
-before execution. Implement as a hard gate in the cross-platform scan refinement stage:
+### Phase C — Settlement-divergence VETO gate (mandatory before any cross-venue pair could go live)
+Per W5: every Polymarket↔other-venue pair must pass a resolution-criteria equivalence check.
+Implement as a hard gate in the cross-platform scan refinement stage:
 - Pair resolution-source/rule text (Polymarket UMA/oracle text vs counterpart venue rules);
-  mismatch or missing rule text → VETO (fail-closed), opportunity dropped and logged.
+  mismatch, missing rule text, or gate error → VETO (fail-closed), opportunity dropped and logged.
 - Reuses the market-equivalence machinery in `market_discovery.py` + `matcher.py`; the LLM
   settlement-divergence gate (tracker backlog) is the eventual scorer — until it lands, the
   gate is conservative string/source matching with an explicit allowlist of manually-verified
-  pairs.
+  pairs (allowlist changes are money-authority).
 
-### Phase D — Scale gate (operator-owned)
-First 50 dual-venue round-trips: zero settlement-divergence losses AND net-positive after fees,
-else halt and review. Tracked from `trades.db`; surfaced in the P&L digest. Tranche sizing and
-the $2–3K funding step are [OP] via the policy broker.
-
-## 4. Explicitly out of scope
-- Allowlist flag flip to live, funding, and API verification — [OP].
+## 4. Explicitly out of scope (operator-owned, NOT authorized here)
+- **Live activation entirely**: the `POLYMARKET_LIVE_ENABLED` flip, the allowlist, funding
+  (including the W5 $2–3K tranche), and the live scale gate (first 50 dual-venue round-trips,
+  zero settlement-divergence losses, net-positive after fees). These belong to a **separate
+  operator-approved activation plan** routed through the policy broker; W5's gate criteria are
+  recorded here for reference only.
+- API-level verification — [OP], read-only as defined in §1.
 - Polymarket Liquidity Rewards quoting rotation (W6) — separate plan after MM-pilot verdict (~7/17).
 - Agent-analyst judgment lane (queue #3) — separate spec `NN-agent-analyst.md`.
 - Any capital/caps/risk policy — lives in the command center + broker config, not this repo.
 
 ## 5. Test plan
 - Unit: V2 order construction (type map, price/size rounding, tick-size), pUSD balance parsing,
-  `_dollar_size_to_contracts` boundaries (0-share, exact-multiple, price→1 and →0 edges).
+  quantity-planner payoff invariants per strategy type, sizing boundaries (0-share,
+  exact-multiple, price→1 and →0 edges), live-gate default-deny at all three boundaries,
+  sports/unknown-category fail-closed veto.
+- Fill semantics: partial fill, residual GTC order, cancel race, hedge-confirmation-by-fill.
+- Idempotency: intent-journal fingerprint stability, UNKNOWN quarantine, crash-injection at the
+  venue-accept boundary, restart reconciliation against open/closed/fills.
 - Integration: dry-run executor path per strategy branch that can route to Polymarket
-  (`tests/integration/test_executor_strategies.py` extensions from the WIP).
-- VETO gate: matched-pair fixtures (equivalent, divergent, missing-rules) → only equivalent passes.
+  (`tests/integration/test_executor_strategies.py` extensions).
+- VETO gate: matched-pair fixtures (equivalent, divergent, missing-rules, gate-error) → only
+  equivalent passes.
 - Regression: full suite ×2 fixed-seed before every push (loop VERIFY rule).
 
 ## 6. Risks
-- **V2 WIP provenance:** the snapshot came from an unattributed working tree; every hunk must be
-  re-reviewed as if new (no assumed prior review).
+- **V2 WIP provenance:** the snapshot came from an unattributed working tree and includes
+  live-authority scope creep (canary-live flags, caps, config defaults) — every hunk must be
+  re-reviewed as if new, and the rejected content in Phase A item 1 checked for explicitly.
+  The snapshot branch is local-only; losing this machine loses it.
 - **Geoblock/proxy:** CLOB writes from MI depend on the httpx proxy injection; a silent bypass
   would send unproxied signed requests — add a startup assertion when `POLYMARKET_PROXY_URL` is
   set that inspects the actual CLOB write client (`py_clob_client_v2.http_helpers.helpers`
   module-level httpx client) and verifies its configured proxy matches, not merely that the env
   var is present.
 - **Fee drift:** category rates verified 2026-06-10; re-verify against docs.polymarket.com before
-  the live flip and record the check date in `fees.py`.
+  any live consideration and record the check date in `fees.py`.
