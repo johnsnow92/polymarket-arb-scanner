@@ -41,7 +41,8 @@ Hard constraints:
 - Enumerate all open markets on Kalshi (later: every CFTC venue via the venue-watcher) and
   Polymarket (read-only Gamma).
 - Long-tail filter: volume/liquidity below configurable thresholds, ≥N days to resolution,
-  category ∉ {sports}, not on the existing arb paths. Output: candidate list with market
+  **category is known** (normalized from market metadata; missing/unknown → excluded, same
+  fail-closed rule as plan 08's veto), category ∉ {sports}, not on the existing arb paths. Output: candidate list with market
   metadata, resolution-rule text, current book.
 - Reuses: `kalshi_api.py`/`polymarket_api.py` read paths, `snapshot.py` recorder.
 
@@ -57,10 +58,13 @@ Hard constraints:
   validation). Prompt + response persisted per read for post-hoc audit.
 
 ### Stage C — Calibration store
-- Append-only SQLite (later Supabase-synced, additive migration only): one row per priced
-  market — model fair value, confidence, market mid at read time, spread, category, venue,
-  timestamps; joined to the venue's own settlement result on resolution (authoritative-settlement
-  pattern from the exit-liquidity work, PR #46).
+- Append-only SQLite (later Supabase-synced, additive migration only). **Grain: one row per
+  READ**, keyed by a unique `read_id` (market_id + read timestamp); re-reads append new rows,
+  never update. Each row: model fair value, confidence, market mid at read time, spread,
+  category, venue, timestamps; joined to the venue's own settlement result on resolution
+  (authoritative-settlement pattern from the exit-liquidity work, PR #46). **Metric identity:**
+  G2 Brier/calibration use exactly one prediction per market — the final read before the
+  market's trading close; earlier reads are retained for drift analysis only.
 - Metrics computed from settled rows only: **Brier score** (overall + per category + per
   confidence bucket), calibration curve, edge realization (did |model − market| gaps close in the
   model's favor).
@@ -74,8 +78,11 @@ Hard constraints:
 - Paper fills use plan 08's deterministic conservative-taker shadow-fill classifier verbatim
   (FILLED/PARTIAL/UNFILLED, runtime `PRICE_CACHE_EVICTION_AGE` staleness) — one classifier,
   two consumers, no drift.
-- Position/sizing discipline recorded but not capital-bound (paper): Kelly-fraction from model
-  confidence, capped per market and per category (constants in config, ratified before live).
+- Position/sizing discipline recorded but not capital-bound (paper): Kelly fraction computed
+  from `fair_value` (as the calibrated probability), the paper execution price, the venue's
+  payoff terms, and modeled fees — never from the confidence score alone; confidence only
+  scales the per-market cap downward. Caps per market and per category are config constants,
+  ratified before live.
 
 ### Stage E — Verdict reporting
 - Weekly digest section (existing `notifier.py`/P&L-digest pattern): settled count, Brier by
@@ -84,14 +91,17 @@ Hard constraints:
   pipeline (branch `feat/earnings-mention-oos`, 8/3 verdict) becomes Stage B's first
   specialized reader; its verdict date is unchanged and its pipeline is not modified by this
   plan — the agent-analyst store INGESTS its settled paper trades as seed calibration data
-  where schemas align, clearly tagged by source.
+  where schemas align, clearly tagged by source. **Seed rows do NOT count toward G2's
+  300-settled-market requirement or its P&L/Brier computation** — they are reported separately
+  unless and until they demonstrably meet the same provenance, timestamp, settlement-join, and
+  leakage controls, at which point their inclusion is an explicit [OP] decision.
 
 ## 3. Gates (pre-registered, in order)
 
 | Gate | Criterion | On pass | On fail |
 |---|---|---|---|
-| G1 — pipeline health | 2 weeks paper, ≥200 markets read, abstain+error rate logged, zero crashes | continue | fix or halt lane |
-| G2 — calibration | **≥300 settled paper markets** AND Brier ≤ market-implied baseline (Brier of "price = probability") AND positive paper P&L after modeled fees on the traded subset | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
+| G1 — pipeline health | 2 weeks paper, ≥200 markets read, error rate ≤10% of reads, valid (non-abstain, non-error) reads ≥30%, abstain rate reported separately, zero crashes (thresholds are proposals subject to operator ratification) | continue | fix or halt lane |
+| G2 — calibration | **≥300 settled paper markets** (seed rows excluded) AND Brier ≤ market-implied baseline (Brier of "price = probability", computed on the SAME settled cohort) AND positive paper P&L after modeled fees on **≥50 settled traded positions spanning ≥3 categories with no category >50% of the traded sample** (thresholds subject to operator ratification) | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
 | G3 — live (out of scope here) | operator go + broker merged + caps configured | separate plan | — |
 
 No gate may be evaluated on unsettled markets; partial-window peeks are reported as
