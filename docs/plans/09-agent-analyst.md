@@ -108,7 +108,7 @@ Hard constraints:
 |---|---|---|---|
 | G1 — pipeline health | 2 weeks paper, ≥200 markets read, error rate ≤10% of reads, valid (non-abstain, non-error) reads ≥30%, abstain rate reported separately, zero crashes (thresholds are proposals subject to operator ratification) | continue | fix or halt lane |
 | G2 — calibration | **≥300 settled paper markets** (seed rows excluded) AND Brier ≤ market-implied baseline (Brier of "price = probability", computed on the SAME settled cohort) AND positive paper P&L after modeled fees on **≥50 settled traded positions spanning ≥3 categories with no category >50% of the traded sample** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters it (no manual selection), one position per market (re-signals on the same market do not add positions), PARTIAL paper fills aggregate into that single position at their covered quantity, and the sizing/threshold config is snapshot-frozen at G1 pass and unchanged through G2 evaluation (thresholds subject to operator ratification) | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
-| G3 — live (out of scope here) | operator go + broker merged + caps configured | separate plan | — |
+| G3 — live (out of scope here) | operator go + broker merged AND its reconciliation/tests passing + caps configured | separate plan | — |
 
 No gate may be evaluated on unsettled markets; partial-window peeks are reported as
 "provisional" and never trigger a stage change.
@@ -122,7 +122,7 @@ No gate may be evaluated on unsettled markets; partial-window peeks are reported
 ## 5. Test plan
 - Scanner: long-tail filter boundaries (volume/day thresholds, sports/unknown-category exclusion),
   venue-read fixtures.
-- LLM client: schema-validation rejects malformed output → abstain; cost-meter halt; retry caps.
+- LLM client: schema-validation rejects malformed output → ERROR status (never priced, never ABSTAIN); cost-meter halt; retry caps.
 - Calibration store: append-only enforcement, settlement join against authoritative results,
   Brier/bucket math on fixture sets with known answers.
 - Paper executor: mid-curve bounds (0.15/0.85 edges), fee-threshold signal math per category,
