@@ -40,7 +40,14 @@ _proxy_url = os.getenv("POLYMARKET_PROXY_URL")
 if _proxy_url:
     _session.proxies = {"http": _proxy_url, "https": _proxy_url}
     # py-clob-client-v2 uses a module-level httpx client that otherwise bypasses
-    # POLYMARKET_PROXY_URL (critical for US/MI geoblock on CLOB writes).
+    # POLYMARKET_PROXY_URL (critical for US/MI geoblock on CLOB writes). This is an
+    # undocumented internal; fail closed if the SDK layout changes rather than
+    # silently sending unproxied signed requests.
+    if not hasattr(_clob_http, "_http_client"):
+        raise RuntimeError(
+            "py-clob-client-v2 no longer exposes http_helpers.helpers._http_client; "
+            "POLYMARKET_PROXY_URL cannot be enforced — refusing to start with an "
+            "unproxied CLOB write path")
     _clob_http._http_client = httpx.Client(http2=True, proxy=_proxy_url)
 _session.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=10))
 
@@ -352,7 +359,10 @@ class PolymarketTrader:
             Order response dict or None on failure.
         """
         try:
-            ot = _ORDER_TYPE_MAP.get(str(order_type).upper(), OrderType.GTC)
+            ot = _ORDER_TYPE_MAP.get(str(order_type).upper())
+            if ot is None:
+                logger.error("Unknown order_type %r — refusing to place order", order_type)
+                return None
             order_args = OrderArgs(
                 token_id=token_id,
                 price=price,
