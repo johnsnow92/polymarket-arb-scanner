@@ -2512,20 +2512,28 @@ class ArbitrageExecutor:
         self._write_decision(opportunity, "execute", "dry_run")
         return True
 
-    def _record_failed_leg(self, trade_id: int, leg: dict) -> None:
+    def _record_failed_leg(self, trade_id: int, leg: dict,
+                           unknown_state: bool = False) -> None:
         """Record a failed leg, preserving reconciliation state for unconfirmed cancels.
 
         A leg whose GTC cancel was unconfirmed may still have a live order at
         the venue. Recording it as 'failed' would hide it from recovery.py
         (which only scans 'pending' trades with order IDs), so persist it as
         'pending' with its order_id instead.
+
+        unknown_state: pass True from exception handlers. An exception raised
+        after _execute_single_leg assigned leg['_order_id'] leaves the venue-
+        side state unknown (the order may be live), so such legs are also
+        preserved as 'pending' rather than dropped to 'failed' (fail closed).
         """
-        if leg.get("_cancel_unconfirmed"):
+        if leg.get("_cancel_unconfirmed") or (unknown_state and leg.get("_order_id")):
             self.db.set_trade_order_id(trade_id, leg.get("_order_id"))
             self.db.update_trade_status(trade_id, "pending")
+            reason = ("cancel unconfirmed" if leg.get("_cancel_unconfirmed")
+                      else "exception after order placement — venue state unknown")
             logger.error(
                 f"Trade #{trade_id} left 'pending' with order_id={leg.get('_order_id')!r} "
-                f"— cancel unconfirmed, awaiting recovery reconciliation"
+                f"— {reason}, awaiting recovery reconciliation"
             )
         else:
             self.db.update_trade_status(trade_id, "failed")
@@ -2613,7 +2621,7 @@ class ArbitrageExecutor:
                             logger.error(f"Leg {idx+1} FAILED: {leg['platform']}")
                     except Exception as e:
                         trade_id = leg["_trade_id"]
-                        self.db.update_trade_status(trade_id, "failed")
+                        self._record_failed_leg(trade_id, leg, unknown_state=True)
                         results[idx] = False
                         logger.error(f"Leg {idx+1} ERROR: {e}")
         else:
@@ -2640,7 +2648,7 @@ class ArbitrageExecutor:
                         break
                 except Exception as e:
                     trade_id = leg["_trade_id"]
-                    self.db.update_trade_status(trade_id, "failed")
+                    self._record_failed_leg(trade_id, leg, unknown_state=True)
                     results[i] = False
                     logger.error(f"Leg {i+1} ERROR: {e}")
                     for j in range(i + 1, len(legs)):
@@ -2829,7 +2837,7 @@ class ArbitrageExecutor:
                             "Concurrent leg %d FAILED: %s", idx + 1, leg["platform"])
                 except Exception as e:
                     trade_id = leg["_trade_id"]
-                    self.db.update_trade_status(trade_id, "failed")
+                    self._record_failed_leg(trade_id, leg, unknown_state=True)
                     results[idx] = False
                     logger.error("Concurrent leg %d ERROR: %s", idx + 1, e)
 

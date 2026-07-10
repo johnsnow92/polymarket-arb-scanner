@@ -2544,6 +2544,31 @@ class TestRecordFailedLeg:
             "SELECT status FROM trades WHERE id = ?", (trade_id,)).fetchall()
         assert rows[0][0] == "failed"
 
+    def test_exception_after_placement_row_is_pending_with_order_id(self, executor, db):
+        """unknown_state=True + an assigned order_id: the venue-side state is
+        unknown (order may be live) — must stay visible to recovery."""
+        trade_id = self._make_trade(db)
+        leg = {
+            "platform": "polymarket",
+            "_trade_id": trade_id,
+            "_order_id": "order_maybe_live_1",
+        }
+        executor._record_failed_leg(trade_id, leg, unknown_state=True)
+        row = [t for t in db.get_pending_trades() if t["id"] == trade_id]
+        assert len(row) == 1, "exception-path trade with an order_id must stay pending"
+        assert row[0]["status"] == "pending"
+        assert row[0]["order_id"] == "order_maybe_live_1"
+
+    def test_exception_before_placement_row_is_failed(self, executor, db):
+        """unknown_state=True without an order_id: nothing was placed — failed."""
+        trade_id = self._make_trade(db)
+        leg = {"platform": "polymarket", "_trade_id": trade_id}
+        executor._record_failed_leg(trade_id, leg, unknown_state=True)
+        assert all(t["id"] != trade_id for t in db.get_pending_trades())
+        rows = db.conn.execute(
+            "SELECT status FROM trades WHERE id = ?", (trade_id,)).fetchall()
+        assert rows[0][0] == "failed"
+
 
 # ---------------------------------------------------------------------------
 # _derive_position_platform: position.platform must reflect the legs' actual
