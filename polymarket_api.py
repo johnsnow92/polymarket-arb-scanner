@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -37,18 +38,27 @@ _rate_lock = threading.Lock()
 # Proxy support — Gamma REST (requests) + authenticated CLOB writes (httpx in py-clob-client-v2)
 _session = requests.Session()
 _proxy_url = os.getenv("POLYMARKET_PROXY_URL")
-if _proxy_url:
-    _session.proxies = {"http": _proxy_url, "https": _proxy_url}
-    # py-clob-client-v2 uses a module-level httpx client that otherwise bypasses
-    # POLYMARKET_PROXY_URL (critical for US/MI geoblock on CLOB writes). This is an
-    # undocumented internal; fail closed if the SDK layout changes rather than
-    # silently sending unproxied signed requests.
+
+
+def _install_clob_proxy(proxy_url: str) -> None:
+    """Route py-clob-client-v2's httpx transport through proxy_url.
+
+    py-clob-client-v2 uses a module-level httpx client that otherwise bypasses
+    POLYMARKET_PROXY_URL (critical for US/MI geoblock on CLOB writes). This is an
+    undocumented internal; fail closed if the SDK layout changes rather than
+    silently sending unproxied signed requests.
+    """
     if not hasattr(_clob_http, "_http_client"):
         raise RuntimeError(
             "py-clob-client-v2 no longer exposes http_helpers.helpers._http_client; "
             "POLYMARKET_PROXY_URL cannot be enforced — refusing to start with an "
             "unproxied CLOB write path")
-    _clob_http._http_client = httpx.Client(http2=True, proxy=_proxy_url)
+    _clob_http._http_client = httpx.Client(http2=True, proxy=proxy_url)
+
+
+if _proxy_url:
+    _session.proxies = {"http": _proxy_url, "https": _proxy_url}
+    _install_clob_proxy(_proxy_url)
 _session.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=10))
 
 _ORDER_TYPE_MAP = {
@@ -304,9 +314,17 @@ class PolymarketTrader:
             funder: Proxy/funder/deposit wallet that holds collateral.
                 Required when the signing key differs from the funded address
                 (Magic, browser proxy, or deposit-wallet flow).
-            signature_type: 0 = EOA, 1 = email/Magic, 2 = browser proxy,
-                3 = deposit wallet (POLYMARKET_SIGNATURE_TYPE=3).
+            signature_type: 0 = EOA, 1 = email/Magic,
+                2 = Polymarket Gnosis Safe (browser proxy wallet),
+                3 = POLY_1271 (EIP-1271 smart-contract wallet).
+
+        Raises:
+            ValueError: if signature_type is not one of 0, 1, 2, 3.
         """
+        if signature_type not in (0, 1, 2, 3):
+            raise ValueError(
+                f"signature_type must be one of 0 (EOA), 1 (email/Magic), "
+                f"2 (Gnosis Safe), 3 (POLY_1271); got {signature_type!r}")
         kwargs: dict = dict(
             host=CLOB_BASE,
             key=private_key,
@@ -322,14 +340,28 @@ class PolymarketTrader:
         self.client.set_api_creds(self.client.create_or_derive_api_key())
 
     def get_balance(self) -> float | None:
-        """Get collateral balance available for trading (USDC / pUSD, 6 decimals)."""
+        """Get collateral balance available for trading (USDC / pUSD, 6 decimals).
+
+        NOTE: the 6-decimal (1e6) unit assumption is carried over from V1 and
+        must be confirmed against a real py-clob-client-v2 balance fixture
+        before any live activation (plan 08, Phase A acceptance).
+        """
         try:
             resp = self.client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
-            if resp and "balance" in resp:
-                return float(resp["balance"]) / 1e6
-            return None
+            if not isinstance(resp, dict) or "balance" not in resp:
+                logger.error("Polymarket get_balance: unexpected response schema: %r", resp)
+                return None
+            try:
+                balance = float(resp["balance"])
+            except (TypeError, ValueError):
+                logger.error("Polymarket get_balance: malformed balance value: %r", resp["balance"])
+                return None
+            if math.isnan(balance) or math.isinf(balance) or balance < 0:
+                logger.error("Polymarket get_balance: non-finite/negative balance: %r", resp["balance"])
+                return None
+            return balance / 1e6
         except Exception as e:
             logger.error("Polymarket get_balance failed: %s", e)
             return None
@@ -343,6 +375,7 @@ class PolymarketTrader:
         neg_risk: bool = False,
         tick_size: str = "0.01",
         order_type: str = "GTC",
+        expiration: int | None = None,
     ) -> dict | None:
         """Place an order on the Polymarket CLOB.
 
@@ -354,21 +387,31 @@ class PolymarketTrader:
             neg_risk: Whether this is a negRisk market
             tick_size: Market tick size ("0.1", "0.01", "0.001", "0.0001")
             order_type: "GTC", "FOK", "FAK", or "GTD" (default GTC)
+            expiration: Unix timestamp (seconds) when a GTD order expires.
+                Required (non-zero) for GTD; ignored otherwise.
 
         Returns:
             Order response dict or None on failure.
+
+        Raises:
+            ValueError: if order_type is GTD and expiration is missing or 0.
         """
+        if str(order_type).upper() == "GTD" and not expiration:
+            raise ValueError("order_type=GTD requires a non-zero expiration timestamp")
         try:
             ot = _ORDER_TYPE_MAP.get(str(order_type).upper())
             if ot is None:
                 logger.error("Unknown order_type %r — refusing to place order", order_type)
                 return None
-            order_args = OrderArgs(
+            order_kwargs: dict = dict(
                 token_id=token_id,
                 price=price,
                 size=size,
                 side=side.upper(),
             )
+            if ot == _ORDER_TYPE_MAP["GTD"]:
+                order_kwargs["expiration"] = int(expiration)
+            order_args = OrderArgs(**order_kwargs)
             options = PartialCreateOrderOptions(
                 tick_size=tick_size,
                 neg_risk=neg_risk,
@@ -389,13 +432,20 @@ class PolymarketTrader:
         """Cancel an open order."""
         try:
             resp = self.client.cancel_order(OrderPayload(orderID=order_id))
-            if resp is None:
+            # Fail closed: only a dict response whose canceled list explicitly
+            # names this order ID counts as a confirmed cancel. Anything else
+            # (None, non-dict, empty list, other IDs) is treated as not canceled.
+            if not isinstance(resp, dict):
+                logger.warning(
+                    "Polymarket cancel_order: non-dict response for %s: %r — treating as not canceled",
+                    order_id, resp)
                 return False
-            if isinstance(resp, dict):
-                canceled = resp.get("canceled") or resp.get("cancelled") or []
-                if isinstance(canceled, list):
-                    return order_id in canceled or bool(canceled)
-                return bool(canceled)
+            canceled = resp.get("canceled") or resp.get("cancelled")
+            if not isinstance(canceled, list) or order_id not in canceled:
+                logger.warning(
+                    "Polymarket cancel_order: %s not confirmed in canceled list %r",
+                    order_id, canceled)
+                return False
             return True
         except Exception as e:
             logger.warning("Polymarket cancel_order failed for %s: %s", order_id, e)
