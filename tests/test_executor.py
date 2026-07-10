@@ -2449,6 +2449,98 @@ class TestMakerRouting:
         assert success is False
         assert "_cancel_unconfirmed" not in leg
 
+    def test_cancel_raising_flags_leg_and_preserves_order_id(self, executor):
+        """cancel_order RAISING must still flag the leg and preserve the order ID."""
+        from unittest.mock import patch as mpatch
+        leg = {
+            "platform": "polymarket",
+            "side": "BUY",
+            "token": "yes",
+            "price": 0.45,
+            "_token_id": "tok_yes",
+        }
+        opp = {"type": "Binary", "_layer": 1, "market": "Test Market?"}
+        executor.pm_trader.place_order.return_value = {
+            "success": True, "orderID": "order_raise_1"
+        }
+        executor.pm_trader.cancel_order = MagicMock(side_effect=RuntimeError("venue down"))
+        with mpatch("executor.ORDER_TIME_IN_FORCE", "gtc"), \
+             mpatch("executor.GTC_ORDER_TIMEOUT", 0.01), \
+             mpatch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])), \
+             mpatch.object(executor, "_confirm_fill_pm", return_value=None):
+            executor.dry_run = False
+            success, order_id, fill_price = executor._execute_single_leg(leg, 5.0, opp)
+        assert success is False
+        assert order_id == "order_raise_1"
+        assert leg["_order_id"] == "order_raise_1"
+        assert leg.get("_cancel_unconfirmed") is True
+
+    def test_unconfirmed_cancel_fires_alert_when_manager_present(self, executor):
+        """An unconfirmed cancel must route through alerting when available."""
+        from unittest.mock import patch as mpatch
+        leg = {
+            "platform": "polymarket",
+            "side": "BUY",
+            "token": "yes",
+            "price": 0.45,
+            "_token_id": "tok_yes",
+        }
+        opp = {"type": "Binary", "_layer": 1, "market": "Alert Market?"}
+        executor.pm_trader.place_order.return_value = {
+            "success": True, "orderID": "order_alert_1"
+        }
+        executor.pm_trader.cancel_order = MagicMock(return_value=False)
+        mock_alert_manager = MagicMock()
+        with mpatch("executor.ORDER_TIME_IN_FORCE", "gtc"), \
+             mpatch("executor.GTC_ORDER_TIMEOUT", 0.01), \
+             mpatch("executor.ENABLED_EXECUTION_PLATFORMS",
+                    frozenset(["polymarket", "kalshi"])), \
+             mpatch("executor._alert_manager", mock_alert_manager), \
+             mpatch.object(executor, "_confirm_fill_pm", return_value=None):
+            executor.dry_run = False
+            executor._execute_single_leg(leg, 5.0, opp)
+        assert mock_alert_manager.alert.called
+        args = mock_alert_manager.alert.call_args
+        assert args.args[0] == "cancel_unconfirmed"
+        assert args.kwargs["details"]["order_id"] == "order_alert_1"
+
+
+class TestRecordFailedLeg:
+    """Unconfirmed cancels must survive restart via a pending DB row + order_id."""
+
+    def _make_trade(self, db):
+        opp_id = db.log_opportunity(
+            "Binary", "M?", "Y=0.4 N=0.5", 0.9, 0.1, 0.11, 100.0, "detect")
+        return db.log_trade(opp_id, "polymarket", "BUY", 0.45, 5.0, "pending")
+
+    def test_unconfirmed_cancel_row_is_pending_with_order_id(self, executor, db):
+        trade_id = self._make_trade(db)
+        leg = {
+            "platform": "polymarket",
+            "_trade_id": trade_id,
+            "_order_id": "order_live_1",
+            "_cancel_unconfirmed": True,
+        }
+        executor._record_failed_leg(trade_id, leg)
+        row = [t for t in db.get_pending_trades() if t["id"] == trade_id]
+        assert len(row) == 1, "unconfirmed-cancel trade must stay visible to recovery"
+        assert row[0]["status"] == "pending"
+        assert row[0]["order_id"] == "order_live_1"
+
+    def test_confirmed_cancel_row_is_failed(self, executor, db):
+        trade_id = self._make_trade(db)
+        leg = {
+            "platform": "polymarket",
+            "_trade_id": trade_id,
+            "_order_id": "order_dead_1",
+        }
+        executor._record_failed_leg(trade_id, leg)
+        assert all(t["id"] != trade_id for t in db.get_pending_trades())
+        rows = db.conn.execute(
+            "SELECT status FROM trades WHERE id = ?", (trade_id,)).fetchall()
+        assert rows[0][0] == "failed"
+
 
 # ---------------------------------------------------------------------------
 # _derive_position_platform: position.platform must reflect the legs' actual

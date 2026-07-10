@@ -53,15 +53,17 @@ def _install_clob_proxy(proxy_url: str) -> None:
             "py-clob-client-v2 no longer exposes http_helpers.helpers._http_client; "
             "POLYMARKET_PROXY_URL cannot be enforced — refusing to start with an "
             "unproxied CLOB write path")
-    # Close the previous transport (if any) before replacing it to avoid
-    # leaking connections on repeated installation.
+    # Atomic replacement: construct the new client first; only after successful
+    # construction close the old transport (guarded) and swap, so a construction
+    # failure never leaves the SDK without a working proxied client.
+    new_client = httpx.Client(http2=True, proxy=proxy_url)
     previous = _clob_http._http_client
     if previous is not None:
         try:
             previous.close()
         except Exception:
             logger.debug("Failed to close previous CLOB httpx client", exc_info=True)
-    _clob_http._http_client = httpx.Client(http2=True, proxy=proxy_url)
+    _clob_http._http_client = new_client
 
 
 if _proxy_url:
