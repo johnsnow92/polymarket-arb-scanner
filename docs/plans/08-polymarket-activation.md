@@ -122,15 +122,20 @@ greenfield migration. The WIP is treated as untrusted input (see §6).
 2. **Shadow-fill semantics (deterministic, conservative-taker; current dry-run records
    `status="dry_run"`, not a simulated fill — this is new logic).** A shadow order is classified
    from the decision-time book snapshot only: FILLED if visible depth at or better than the limit
-   price covers the full quantity; PARTIAL (with the covered quantity) if it covers part and the
-   order type is GTC; UNFILLED for FOK not fully coverable; UNFILLED (excluded from gate counts)
-   when the snapshot is missing or stale. No queue-position or maker-fill modeling — resting-fill
-   assumptions are out of scope for shadow gating. Unit tests cover each classification branch.
+   price covers the full quantity; PARTIAL (with the covered quantity) if a GTC order is covered
+   in part; UNFILLED if executable depth at or better than the limit is zero (any order type) or
+   a FOK is not fully coverable; UNFILLED and excluded from all gate counts when the snapshot is
+   missing or stale (**stale = snapshot timestamp older than 60s at decision time**, matching the
+   price-cache TTL). No queue-position or maker-fill modeling — resting-fill assumptions are out
+   of scope for shadow gating. Unit tests cover each classification branch, including
+   zero-depth-GTC, exact-boundary staleness, and FOK partial-coverage.
 3. Divergence logging: for each shadow fill, record book price at decision time vs T+5s re-fetch;
    summarize slippage distribution in the P&L digest (T+5s movement measures price drift, not
    execution — it feeds the slippage gate, never the fill classification).
 4. Exit criteria to request live consideration [OP] — must not pass vacuously: ≥1 week shadow
-   AND ≥100 shadow opportunities logged AND ≥20 shadow fills spanning ≥2 strategy types and
+   AND ≥100 shadow opportunities logged AND ≥20 shadow fills — counted **per opportunity**, an
+   opportunity counts only when **every leg classifies FILLED** (PARTIALs never count toward
+   this gate) — spanning ≥2 strategy types and
    ≥3 market categories (thresholds are proposals subject to operator ratification), no
    crash/recovery incidents, p95 decision-to-T+5s slippage within the strategy's modeled edge,
    shadow fee accounting matches `polymarket_taker_fee()` to the cent on sampled markets,
