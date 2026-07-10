@@ -74,7 +74,12 @@ Hard constraints:
 - **Read status taxonomy (mutually exclusive, one per read):** `VALID` (schema-conforming
   priced read), `ABSTAIN` (model-declared: ambiguous rules, missing base rates, low
   confidence — logged with `abstain_reason`), `ERROR` (transport/schema/validation failure).
-  G1's error rate = ERROR/total; valid-read rate = VALID/total; abstain rate = ABSTAIN/total.
+  **G1 denominator (deterministic):** G1 rates are computed over the *attempt population* —
+  each unique market's FIRST scheduled read in the G1 window contributes exactly one status;
+  re-reads of the same market never enter G1 rates (they are retained for drift analysis
+  only). Error rate = first-read ERRORs ÷ attempts; valid-read rate = first-read VALIDs ÷
+  attempts; abstain rate = first-read ABSTAINs ÷ attempts. Correction records (Stage C) are
+  not reads and never enter the attempt population.
   ABSTAIN and ERROR never price and never trade (fail-closed).
 - Model calls go through a thin `llm_client.py` (retry, cost metering, response-schema
   validation). Prompt + response persisted per read for post-hoc audit.
@@ -91,8 +96,16 @@ Hard constraints:
   resolution/oracle outcome (UMA-disputed markets are held un-scored until finality). Paper
   positions never appear in account-scoped endpoints (PR #46's portfolio reconciliation is for
   real fills and is NOT reused here). Outcome encoding: YES=1/NO=0 for the canonical
-  instrument; voided/cancelled markets are excluded from scoring; post-settlement corrections
-  reopen the row via an appended correction record, never an update. **Leakage fields are
+  instrument; voided/cancelled markets are excluded from scoring; **post-settlement corrections are
+  immutable appended records, never updates**: a correction row has `record_type=CORRECTION`
+  (reads have `record_type=READ`), references the original read's market via
+  `corrects_read_id`, and carries the corrected settlement outcome, an effective timestamp,
+  and provenance. Correction rows are NOT reads: they are excluded from all read counts, from
+  the G1 attempt population, and from final-VALID-read selection. **Deterministic outcome
+  resolution:** a market's effective outcome = the outcome of its latest correction record by
+  effective timestamp (ties broken by highest appended row id), else the original settlement
+  join — so G2 still scores exactly one prediction per market (the final VALID read before
+  close) with its outcome resolved through this rule, reproducibly from the store alone. **Leakage fields are
   Stage C's responsibility:** each read row stores the market's earliest
   outcome-determining public-information time (with provenance) when determinable, the
   model's knowledge-cutoff date, and per-source snapshot timestamps for every news/document
@@ -129,7 +142,10 @@ Hard constraints:
   probability, the limit price, the venue payoff, and modeled fees. This is the ONLY sizing
   formula — confidence enters solely through the cap term. The virtual bankroll is static and
   non-compounding (config, default $10,000).
-  State machine (FOK ⇒ no partials): SIGNALED → FILLED | UNFILLED → SETTLED | VOID. Every
+  State machine (FOK ⇒ no partials), explicit transitions:
+  `SIGNALED → FILLED → SETTLED` (normal path); `SIGNALED → UNFILLED` (terminal — an unfilled
+  FOK never settles and never voids); `FILLED → VOID` (market voided/cancelled before
+  settlement — excluded from scoring). No other transitions exist. Every
   position links to exactly one originating read_id. **Position ownership:** the FIRST
   Stage-D-eligible signal per instrument creates the sole position; all later signals on that
   instrument (repeat or opposing) are logged and ignored.
@@ -167,16 +183,21 @@ template, retrieval/news configuration, scan cadence, long-tail filter threshold
 version, settlement adapters, shadow-fill classifier version, sizing constants, and all gate
 thresholds below. Any material change to any of these **resets the evaluation cohort**. An
 **inception cohort** is then frozen: every unique eligible market entering the scanner under
-the frozen config joins the cohort at first sight, before its outcome is knowable; G2's "300
-settled markets" means 300 settled *cohort* members with a scoreable final VALID read — never
-successes selected after filtering. G1's coverage/error limits continue to bind throughout the
+the frozen config joins the cohort at first sight, before its outcome is knowable; **G2's
+"300" minimum applies AFTER deduplication**: it requires ≥300 settled, scoreable *event-cluster
+representatives* (cohort members with a scoreable final VALID read, collapsed to one
+representative per event cluster) — never successes selected after filtering, and never a
+raw-market count that dedup could shrink below the minimum. G1's coverage/error limits continue to bind throughout the
 G2 window (selective abstention that drops valid-read coverage below the G1 floor invalidates
 the window). A terminal evaluation date (or cohort-size cap) is declared at ratification;
 there is no open-ended peek-until-pass. **Statistical procedures are part of the frozen
 definition:** event clustering (cluster = markets resolving on the same underlying real-world
 event, matched by the `market_discovery.py` equivalence machinery plus a manually-curated
-mapping frozen at ratification; representative = the cluster member with the largest paper
-exposure, ties broken by earliest cohort entry), the Brier test (one-sided t-test on
+mapping frozen at ratification; **Brier representative = chosen by frozen exogenous fields
+only — earliest cohort entry, ties broken by lexicographically smallest canonical
+`{venue, market_id}` — never by exposure, signals, or fills, which would couple the scored
+market to model behavior; exposure-based assignment is reserved for P&L reporting only**),
+the Brier test (one-sided t-test on
 per-cluster paired Brier differences; pass requires the lower bound above δ), and the P&L
 bound (statistic = the MEAN of per-cluster ROI, where a cluster's ROI = its net P&L ÷ its
 exposure — equal cluster weight, never ratio-of-sums; cluster bootstrap: resample event
@@ -189,8 +210,8 @@ invalidates the window rather than shrinking the denominator.
 
 | Gate | Criterion | On pass | On fail |
 |---|---|---|---|
-| G1 — pipeline health | 2 weeks of scheduled runs (cadence fixed at ratification, e.g. every 6h) with ≥95% run-completion uptime, ≥200 **unique markets** attempted (predetermined attempts, not reads — re-reads don't add), error rate ≤10% of attempts, valid-read rate ≥30% of attempts, abstain rate reported separately, zero crashes (crash = unhandled exception terminating a scheduled run) — thresholds fixed at ratification | continue | fix or halt lane |
-| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) (the scored Brier cohort itself also carries a concentration cap: no category >50% of scored clusters, with per-category Brier reported) AND **paired Brier superiority**: the one-sided 95% LOWER confidence bound of the mean per-cluster (Brier_market − Brier_model) difference is above the pre-registered margin δ, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled INDEPENDENT EVENT CLUSTERS each containing at least one settled FILLED position** (UNFILLED-only clusters never count), **spanning ≥3 categories with no category >50% of counted clusters** (a cluster's category = the category of its largest-exposure FILLED position, ties broken by earliest cohort entry), with the **mean per-cluster ROI (cluster ROI = cluster net P&L ÷ cluster exposure; exposure = Σ limit_price × quantity over its FILLED positions) having a one-sided 95% lower confidence bound above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
+| G1 — pipeline health | 2 weeks of scheduled runs (cadence fixed at ratification, e.g. every 6h) with ≥95% run-completion uptime, ≥200 **unique markets** attempted (attempt population per §2 Stage B: each unique market's FIRST scheduled read — re-reads and correction records never add), error rate ≤10% of attempts, valid-read rate ≥30% of attempts, abstain rate reported separately (all three rates over the same attempt population), zero crashes (crash = unhandled exception terminating a scheduled run) — thresholds fixed at ratification | continue | fix or halt lane |
+| G2 — calibration | **≥300 settled, scoreable event-cluster REPRESENTATIVES** (deduplication applied first: seed rows excluded; dual-venue duplicates and related contracts collapsed to one representative per event cluster by the frozen exogenous rule in §3 — the raw settled-market count may be higher and never substitutes for this post-dedup minimum) (the scored Brier cohort itself also carries a concentration cap: no category >50% of scored clusters, with per-category Brier reported) AND **paired Brier superiority**: the one-sided 95% LOWER confidence bound of the mean per-cluster (Brier_market − Brier_model) difference is above the pre-registered margin δ, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled INDEPENDENT EVENT CLUSTERS each containing at least one settled FILLED position** (UNFILLED-only clusters never count), **spanning ≥3 categories with no category >50% of counted clusters** (a cluster's category = the category of its largest-exposure FILLED position, ties broken by earliest cohort entry), with the **mean per-cluster ROI (cluster ROI = cluster net P&L ÷ cluster exposure; exposure = Σ limit_price × quantity over its FILLED positions) having a one-sided 95% lower confidence bound above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
 | G3 — live (out of scope here) | operator go + broker merged AND its reconciliation/tests passing + caps configured | separate plan | — |
 
 No gate may be evaluated on unsettled markets; partial-window peeks are reported as
