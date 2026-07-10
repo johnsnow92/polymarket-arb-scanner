@@ -34,8 +34,8 @@ Hard constraints:
   independent and proceeds regardless.
 - **Plan 08 dependency (build-order prerequisite):** Stage D imports plan 08's shadow-fill
   classifier, which exists today only as a spec (PR #82) — no importable code. Stages A-C may be
-  built and run immediately; **Stage D is blocked until plan 08 Phase A merges the classifier to
-  master** as a concrete module (target: `shadow_fill.py::classify_fill(order, book_snapshot,
+  built and run immediately; **Stage D is blocked until plan 08's shadow-fill classifier (defined in plan 08
+  Phase B) is merged to master** as a concrete module (target: `shadow_fill.py::classify_fill(order, book_snapshot,
   eviction_age) -> FILLED|PARTIAL|UNFILLED`, exact module/symbol pinned in the Stage-D build PR
   to the merged commit). If plan 08 stalls, Stage D ships its own classifier implementing the
   identical plan-08 semantics and plan 08 later adopts it — one implementation either way.
@@ -51,11 +51,16 @@ Hard constraints:
   **category is known** (normalized from market metadata; missing/unknown → excluded, same
   fail-closed rule as plan 08's veto), category ∉ {sports}, not on the existing arb paths. Output: candidate list with market
   metadata, resolution-rule text, current book.
-- Reuses: `kalshi_api.py`/`polymarket_api.py` read paths, `snapshot.py` recorder — with a
-  **completeness contract**: the current readers return accumulated pages even after
-  request/page-budget failures, which would silently select the cohort from partial data.
-  Stage A wraps enumeration to surface completeness explicitly; an incomplete enumeration
-  fails that scan cycle closed (no cohort additions, cycle logged as failed).
+- Access is through a **read-only transport**: a scanner-owned client that talks only to
+  public read endpoints and is constructed WITHOUT credentials — not the signing-capable
+  `KalshiClient`/CLOB classes (which expose `place_order()`); the structural paper-only test
+  asserts this at the import/constructor level.
+- **Completeness contract (reader-level, not wrapper-level):** the current readers return
+  accumulated pages even after request/page-budget failures and discard the error state, so an
+  outer wrapper cannot detect truncation. The read-only transport's enumeration RAISES or
+  returns explicit completeness metadata on any failed/aborted pagination; an incomplete
+  enumeration fails that scan cycle closed (no cohort additions, cycle logged as failed).
+- Reuses `snapshot.py` recorder for book snapshots.
 
 ### Stage B — LLM analyst read
 - Per candidate: one structured read producing a **tagged union**: a `VALID` read carries
@@ -75,7 +80,7 @@ Hard constraints:
 
 ### Stage C — Calibration store
 - Append-only SQLite (later Supabase-synced, additive migration only). **Grain: one row per
-  READ**, keyed by a unique `read_id` (market_id + read timestamp); re-reads append new rows,
+  READ**, keyed by a unique `read_id` (venue + market_id + read timestamp); re-reads append new rows,
   never update. Each row: model fair value, confidence, market mid at read time, spread,
   category, venue, timestamps; joined on resolution to a **public per-venue settlement
   adapter** — Kalshi: the public market `result` field; Polymarket: the public
@@ -83,7 +88,11 @@ Hard constraints:
   positions never appear in account-scoped endpoints (PR #46's portfolio reconciliation is for
   real fills and is NOT reused here). Outcome encoding: YES=1/NO=0 for the canonical
   instrument; voided/cancelled markets are excluded from scoring; post-settlement corrections
-  reopen the row via an appended correction record, never an update. **Metric identity:**
+  reopen the row via an appended correction record, never an update. **Leakage fields are
+  Stage C's responsibility:** each read row stores the market's earliest
+  outcome-determining public-information time (with provenance) when determinable, the
+  model's knowledge-cutoff date, and per-source snapshot timestamps for every news/document
+  input — the G2 leakage exclusions are computed from these stored fields, never ad hoc. **Metric identity:**
   G2 Brier/calibration use exactly one prediction per market — the final VALID read before the
   market's trading close; earlier reads are retained for drift analysis only. **Baseline
   time-lock:** the market-implied baseline uses the market mid stored in that SAME selected
@@ -103,9 +112,16 @@ Hard constraints:
   NO at (1 − price); direction is never collapsed by an absolute value.
 - **Paper intent schema (deterministic):** `{read_id, venue, market_id, side, limit_price =
   book price at read time rounded to venue tick, order_type = FOK, quantity = Kelly fraction ×
-  virtual bankroll (config, default $10,000 paper) / price, floored to venue lot}`. State
-  machine: SIGNALED → (classifier) FILLED | PARTIAL | UNFILLED → SETTLED | VOID. Every position
-  links to exactly one originating read_id.
+  virtual bankroll / price, floored to venue lot}`. **Determinism details:** book price = the
+  best resting price on the side being lifted (best ask for BUY YES, best NO-side ask for BUY
+  NO) from the read-time snapshot; tick rounding is always toward the less aggressive price
+  (down for buys); the virtual bankroll is static and non-compounding (config, default
+  $10,000); Kelly output is multiplied by `confidence` and then clipped to the per-market cap.
+  State machine (FOK ⇒ no partials, matching plan 08's classifier: under-covered FOK =
+  UNFILLED): SIGNALED → FILLED | UNFILLED → SETTLED | VOID. Every position links to exactly one
+  originating read_id. **Position ownership:** the FIRST Stage-D-eligible signal per instrument
+  creates the sole position; all later signals on that instrument (repeat or opposing) are
+  logged and ignored.
 - **Mid-curve only:** paper orders restricted to prices in [0.15, 0.85]; no extreme-price
   longshot/near-certainty orders regardless of model output (that is where losing retail
   concentrates and where fee/variance asymmetry bites).
@@ -145,12 +161,22 @@ settled markets" means 300 settled *cohort* members with a scoreable final VALID
 successes selected after filtering. G1's coverage/error limits continue to bind throughout the
 G2 window (selective abstention that drops valid-read coverage below the G1 floor invalidates
 the window). A terminal evaluation date (or cohort-size cap) is declared at ratification;
-there is no open-ended peek-until-pass.
+there is no open-ended peek-until-pass. **Statistical procedures are part of the frozen
+definition:** event clustering (cluster = markets resolving on the same underlying real-world
+event, matched by the `market_discovery.py` equivalence machinery plus a manually-curated
+mapping frozen at ratification; representative = the cluster member with the largest paper
+exposure, ties broken by earliest cohort entry), the Brier test (one-sided t-test on
+per-cluster paired Brier differences against margin δ), and the P&L bound (cluster bootstrap
+of standardized return, 10,000 resamples, fixed seed) are all named and hashed at
+ratification — no post-hoc method choice. **Abstention coverage binds through G2:** the
+abstain-rate cap and a minimum cohort coverage floor (settled-and-scored cohort members ÷
+settled cohort members ≥ pre-registered floor) are gate conditions; falling below the floor
+invalidates the window rather than shrinking the denominator.
 
 | Gate | Criterion | On pass | On fail |
 |---|---|---|---|
 | G1 — pipeline health | 2 weeks of scheduled runs (cadence fixed at ratification, e.g. every 6h) with ≥95% run-completion uptime, ≥200 **unique markets** attempted (predetermined attempts, not reads — re-reads don't add), error rate ≤10% of attempts, valid-read rate ≥30% of attempts, abstain rate reported separately, zero crashes (crash = unhandled exception terminating a scheduled run) — thresholds fixed at ratification | continue | fix or halt lane |
-| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) AND **paired Brier superiority**: mean per-market (Brier_market − Brier_model) > pre-registered margin δ with a one-sided 95% confidence bound above 0, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled traded positions spanning ≥3 categories, no category >50%**, with **standardized return (P&L / total exposure) whose one-sided 95% confidence bound is above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per market linked to its originating read_id (opposing or repeat re-signals never add or offset positions), PARTIAL fills aggregate into that single position at covered quantity, UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
+| G2 — calibration | **≥300 settled inception-cohort markets** with scoreable final VALID reads (seed rows excluded; dual-venue duplicates and related contracts deduplicated to one representative per event cluster) AND **paired Brier superiority**: mean per-market (Brier_market − Brier_model) > pre-registered margin δ with a one-sided 95% confidence bound above 0, using event-clustered inference — not a bare ≤ comparison, which a market-copying model passes AND paper P&L: **≥50 settled traded positions spanning ≥3 categories, no category >50%**, with **standardized return (P&L / total exposure) whose one-sided 95% confidence bound is above 0** — cohort is non-cherry-pickable: EVERY Stage-D-eligible signal under the frozen config enters (no manual selection), one position per instrument owned by the FIRST eligible signal (later repeat/opposing signals are logged, never add or offset), UNFILLED positions are recorded and excluded from P&L but reported | request [OP] live decision via broker | REFINE (per-category breakdown) or KILL; no live |
 | G3 — live (out of scope here) | operator go + broker merged AND its reconciliation/tests passing + caps configured | separate plan | — |
 
 No gate may be evaluated on unsettled markets; partial-window peeks are reported as
@@ -171,6 +197,9 @@ No gate may be evaluated on unsettled markets; partial-window peeks are reported
 - Paper executor: mid-curve bounds (0.15/0.85 edges), fee-threshold signal math per category,
   shadow-fill classifier reuse (no forked logic — import, don't copy).
 - Digest: verdict math (G1/G2 criteria) on synthetic settled sets, provisional-vs-final labeling.
+- Leakage: outcome-info-time/provenance and per-source snapshot timestamps persisted per read;
+  G2 exclusion predicates computed from stored fields on fixture sets (undeterminable event
+  time → excluded; post-cutoff and post-outcome reads → excluded).
 - **Structural paper-only negative tests:** the pipeline's modules cannot construct a signing/
   writer client and cannot reach order-placement endpoints (import-graph assertion + a test that
   the paper executor raises if handed a live client).
