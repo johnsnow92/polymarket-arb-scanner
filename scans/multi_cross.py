@@ -250,8 +250,8 @@ def scan_multi_cross(
     if kalshi_data:
         kalshi_events, kalshi_by_event, kalshi_event_titles = kalshi_data
     elif kalshi_client:
-        from scans.helpers import _parallel_fetch_kalshi
-        kalshi_events, kalshi_by_event, kalshi_event_titles = _parallel_fetch_kalshi(kalshi_client)
+        from .kalshi import _fetch_kalshi_data
+        kalshi_events, kalshi_by_event, kalshi_event_titles = _fetch_kalshi_data(kalshi_client)
     else:
         logger.info("No Kalshi credentials — multi-cross scan requires at least 2 platforms.")
         return opportunities

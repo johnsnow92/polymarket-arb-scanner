@@ -574,3 +574,39 @@ class TestWhaleCopyConfig:
     def test_polygonscan_api_key_optional(self):
         from config import POLYGONSCAN_API_KEY
         assert isinstance(POLYGONSCAN_API_KEY, str)
+
+
+# ---------------------------------------------------------------------------
+# Env hygiene — no personal/global env files merged into the bot environment
+# ---------------------------------------------------------------------------
+
+class TestEnvFileHygiene:
+    """The bot must only load the project-local .env.
+
+    Loading ~/.claude/.env (or any file outside the repo) merges personal
+    credentials into the trading process environment. Regression guard for
+    the audit finding that config.py and cli.py both did exactly that.
+    """
+
+    def _module_source(self, name: str) -> str:
+        root = Path(__file__).resolve().parent.parent
+        return (root / name).read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("module_file", ["config.py", "cli.py"])
+    def test_no_personal_env_file_loaded(self, module_file):
+        source = self._module_source(module_file)
+        assert "load_dotenv(os.path.expanduser" not in source, (
+            f"{module_file} loads a dotenv file outside the project directory "
+            "— personal env files must never be merged into the bot environment"
+        )
+        assert "find_dotenv" not in source, (
+            f"{module_file} must not search parent directories for dotenv files"
+        )
+
+    @pytest.mark.parametrize("module_file", ["config.py", "cli.py"])
+    def test_project_local_dotenv_still_loaded(self, module_file):
+        source = self._module_source(module_file)
+        assert 'Path(__file__).resolve().parent / ".env"' in source, (
+            f"{module_file} must load only the .env adjacent to the module"
+        )
+        assert "load_dotenv(dotenv_path=" in source

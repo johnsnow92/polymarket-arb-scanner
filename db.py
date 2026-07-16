@@ -49,7 +49,8 @@ class TradeDB:
                 size REAL NOT NULL,
                 status TEXT NOT NULL,
                 fill_price REAL,
-                order_id TEXT
+                order_id TEXT,
+                outcome TEXT
             );
 
             CREATE TABLE IF NOT EXISTS positions (
@@ -140,6 +141,15 @@ class TradeDB:
         except sqlite3.OperationalError:
             logger.debug("Migration: reward_yield_usdc column already exists")
 
+        # Safe migration: add outcome to trades. Polymarket BUY_NO legs are
+        # logged with side="BUY", so settlement cannot recover the traded
+        # outcome (yes/no) from the side column — persist it explicitly.
+        try:
+            self.conn.execute("ALTER TABLE trades ADD COLUMN outcome TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            logger.debug("Migration: outcome column already exists on trades")
+
         # Safe migration: add market_ticker to positions. Settlement checks
         # query the platform API by ticker (e.g. KXEPLSPREAD-...), but
         # market_identifier holds the human title (e.g. "Chelsea: Spreads").
@@ -206,13 +216,18 @@ class TradeDB:
         status: str,
         fill_price: float | None = None,
         order_id: str | None = None,
+        outcome: str | None = None,
     ) -> int | None:
-        """Log a trade leg. Returns the trade ID."""
+        """Log a trade leg. Returns the trade ID.
+
+        outcome is the traded market outcome (e.g. "yes"/"no") — distinct
+        from side (BUY/SELL) so settlement can score Polymarket BUY_NO legs.
+        """
         with self._lock:
             cur = self.conn.execute(
                 """INSERT INTO trades
-                   (opportunity_id, timestamp, platform, side, price, size, status, fill_price, order_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (opportunity_id, timestamp, platform, side, price, size, status, fill_price, order_id, outcome)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     opportunity_id,
                     datetime.now(timezone.utc).isoformat(),
@@ -223,6 +238,7 @@ class TradeDB:
                     status,
                     fill_price,
                     order_id,
+                    outcome,
                 ),
             )
             self.conn.commit()

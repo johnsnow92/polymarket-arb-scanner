@@ -67,6 +67,18 @@ class TestLogTrade:
         trades = db.get_trades_for_opportunity(opp_id)
         assert len(trades) == 2
 
+    def test_trade_outcome_persisted_separately_from_execution_side(self, db):
+        opp_id = db.log_opportunity("Imbalance", "M", "", 0.4, 0.1, 0.25, 50, "traded")
+        db.log_trade(
+            opp_id, "polymarket", "BUY", 0.4, 10.0, "filled",
+            fill_price=0.4, outcome="no",
+        )
+
+        trade = db.get_trades_for_opportunity(opp_id)[0]
+
+        assert trade["side"] == "BUY"
+        assert trade["outcome"] == "no"
+
     def test_update_trade_status(self, db):
         opp_id = db.log_opportunity("Binary", "M", "", 0.9, 0.1, 0.1, 50, "traded")
         trade_id = db.log_trade(opp_id, "polymarket", "BUY", 0.45, 5.0, "pending")
