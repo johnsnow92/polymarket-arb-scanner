@@ -1254,7 +1254,9 @@ class TestBuildLegsTriangularCross:
             "_platform_b": "kalshi",
             "_kalshi_ticker": "TICKER-TRI",
         }
-        legs = executor._build_legs(opp, 5.0)
+        p1, p2 = self._patch_all_platforms()
+        with p1, p2:
+            legs = executor._build_legs(opp, 5.0)
         assert len(legs) == 2
         assert legs[0]["platform"] == "polymarket"
         assert legs[0]["price"] == pytest.approx(0.350)

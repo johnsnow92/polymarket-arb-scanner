@@ -402,7 +402,8 @@ class TestExecutorNewTypes:
             "_trade_price": 0.45,
             "_token_ids": ["tok_yes", "tok_no"],
         }
-        legs = self.executor._build_legs(opp, 5.0)
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS", frozenset({"polymarket"})):
+            legs = self.executor._build_legs(opp, 5.0)
         assert len(legs) == 1
         assert legs[0]["platform"] == "polymarket"
 
@@ -426,7 +427,8 @@ class TestExecutorNewTypes:
             "_trade_price": 0.30,
             "_token_ids": ["tok_yes", "tok_no"],
         }
-        legs = self.executor._build_legs(opp, 5.0)
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS", frozenset({"polymarket"})):
+            legs = self.executor._build_legs(opp, 5.0)
         assert len(legs) == 1
         assert legs[0]["token"] == "no"
 
@@ -438,7 +440,8 @@ class TestExecutorNewTypes:
             "_ask_price": 0.52,
             "_market_key": "test_mkt",
         }
-        legs = self.executor._build_legs(opp, 5.0)
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS", frozenset({"polymarket"})):
+            legs = self.executor._build_legs(opp, 5.0)
         assert len(legs) == 2
         assert legs[0]["_mm_side"] == "bid"
         assert legs[1]["_mm_side"] == "ask"

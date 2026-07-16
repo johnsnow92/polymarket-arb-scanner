@@ -318,7 +318,8 @@ class PolymarketTrader:
     """CLOB trading client for Polymarket using py-clob-client-v2."""
 
     def __init__(self, private_key: str, chain_id: int = 137,
-                 funder: str | None = None, signature_type: int = 0):
+                 funder: str | None = None, signature_type: int = 0,
+                 execution_enabled: bool = False):
         """Initialise the CLOB trading client.
 
         Args:
@@ -330,6 +331,9 @@ class PolymarketTrader:
             signature_type: 0 = EOA, 1 = email/Magic,
                 2 = Polymarket Gnosis Safe (browser proxy wallet),
                 3 = POLY_1271 (EIP-1271 smart-contract wallet).
+            execution_enabled: Internal code-level breaker. Production callers
+                must leave this false while international Polymarket is
+                public-data/shadow-only.
 
         Raises:
             ValueError: if signature_type is not one of 0, 1, 2, 3.
@@ -338,6 +342,12 @@ class PolymarketTrader:
             raise ValueError(
                 f"signature_type must be one of 0 (EOA), 1 (email/Magic), "
                 f"2 (Gnosis Safe), 3 (POLY_1271); got {signature_type!r}")
+        self.execution_enabled = bool(execution_enabled)
+        if not self.execution_enabled:
+            raise PermissionError(
+                "Authenticated Polymarket trading is disabled: international "
+                "Polymarket is public-data/shadow-only"
+            )
         # Fail-closed proxy injection belongs to the authenticated write path:
         # install (or abort) here, before the CLOB client exists, so read-only
         # imports of this module never hard-fail on the SDK internal check.
@@ -415,6 +425,12 @@ class PolymarketTrader:
         Raises:
             ValueError: if order_type is GTD and expiration is missing or 0.
         """
+        if not getattr(self, "execution_enabled", False):
+            logger.critical(
+                "Blocked Polymarket order: international Polymarket is "
+                "public-data/shadow-only"
+            )
+            return None
         if str(order_type).upper() == "GTD" and not expiration:
             raise ValueError("order_type=GTD requires a non-zero expiration timestamp")
         try:
