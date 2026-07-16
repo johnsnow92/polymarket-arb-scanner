@@ -252,7 +252,7 @@ class QuoteManager:
         return None
 
     @staticmethod
-    def _cancel_on_exchange(order_id: str, trader) -> None:
+    def _cancel_on_exchange(order_id: str, trader) -> bool:
         """Best-effort live cancel (plan 10 side-finding 1).
 
         Before this, "cancelling" only cleared the local dict — a live
@@ -260,11 +260,13 @@ class QuoteManager:
         (``dry_`` prefix) never reach the exchange.
         """
         if trader is None or order_id.startswith("dry_"):
-            return
+            return True
         try:
-            trader.cancel_order(order_id)
+            result = trader.cancel_order(order_id)
         except Exception as exc:
             logger.warning("Live cancel failed for %s: %s", order_id, exc)
+            return False
+        return result is not False
 
     def cancel_quote(self, order_id: str, trader=None) -> bool:
         """Cancel a resting order.
@@ -277,7 +279,8 @@ class QuoteManager:
         Returns:
             True if cancelled or already gone.
         """
-        self._cancel_on_exchange(order_id, trader)
+        if not self._cancel_on_exchange(order_id, trader):
+            return False
         with self._lock:
             if order_id in self._active_orders:
                 self._active_orders[order_id]["status"] = "cancelled"
@@ -298,12 +301,14 @@ class QuoteManager:
                 oid for oid, info in self._active_orders.items()
                 if not market_key or info["market_key"] == market_key
             ]
-            for oid in to_cancel:
-                self._active_orders[oid]["status"] = "cancelled"
-                del self._active_orders[oid]
+        cancelled = []
         for oid in to_cancel:
-            self._cancel_on_exchange(oid, trader)
-        return len(to_cancel)
+            if self._cancel_on_exchange(oid, trader):
+                cancelled.append(oid)
+        with self._lock:
+            for oid in cancelled:
+                self._active_orders.pop(oid, None)
+        return len(cancelled)
 
     def get_active_orders(self, market_key: str = "") -> list[dict]:
         """Get all active orders, optionally filtered by market."""

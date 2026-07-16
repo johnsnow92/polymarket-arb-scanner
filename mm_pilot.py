@@ -1984,6 +1984,7 @@ class KalshiMMPilot:
                 confirmed = remaining_count == 0
             elif self._client is None:
                 remaining_count = len(self.resting_orders())
+                confirmed = remaining_count == 0
             else:
                 try:
                     live_orders = list(self._client.get_open_orders() or [])

@@ -9,7 +9,9 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import importlib
+import json
 import logging
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -159,7 +161,8 @@ def pilot_env(monkeypatch):
 def build_pilot(clock, client=None, dry_run=False, hedger=None,
                 controls_on=True, detector=None, vol=None,
                 selection=(TICKER,), reconciled=True):
-    time_fn = lambda: clock[0]
+    def time_fn():
+        return clock[0]
     controls = ControlsPoller(time_fn=time_fn)
     controls.set_cached(controls_on)
     decisions: list[dict] = []
@@ -254,6 +257,21 @@ class TestFillDetection:
         second = pilot.poll_fills()
         assert len(first) == 1
         assert len(second) == 0
+
+    def test_fill_without_trade_id_halts_before_accounting(self, pilot_env,
+                                                            clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
+                                      purpose="quote_bid")
+        fill = kfill(oid, count=4, created=clock[0])
+        del fill["trade_id"]
+        client.fills_script = [fill]
+
+        assert pilot.poll_fills() == []
+        assert pilot.halted is True
+        assert "fill without trade_id" in pilot.halt_reason
+        assert pilot.inventory.net_contracts(TICKER) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +586,8 @@ class TestCanary:
         must still be able to reconcile from the right numbers."""
         from mm_pilot import ControlsPoller, KalshiMMPilot, PilotStateStore
         path = tmp_path / "state.json"
-        time_fn = lambda: clock[0]
+        def time_fn():
+            return clock[0]
         controls = ControlsPoller(time_fn=time_fn)
         controls.set_cached(True)
         client = FakeKalshiClient()
@@ -783,7 +802,8 @@ class TestReconciliation:
         reconciled=True convenience default) to exercise the true
         unreconciled-by-default live-mode state."""
         from mm_pilot import ControlsPoller, KalshiMMPilot
-        time_fn = lambda: clock[0]
+        def time_fn():
+            return clock[0]
         controls = ControlsPoller(time_fn=time_fn)
         controls.set_cached(True)
         return KalshiMMPilot(
@@ -1013,14 +1033,34 @@ class TestReconciliation:
         pilot = self._direct_pilot(clock, client)
         pilot.update_selection([TICKER])
         stop = threading.Event()
-        # Run exactly one pass worth of work synchronously by calling the
-        # loop body's pieces directly rather than starting a real thread —
-        # avoids flakiness from real wall-clock sleeps in a unit test.
         assert pilot._reconciled is False
-        pilot._reconciled = pilot.reconcile()
+
+        calls = []
+        reconcile = pilot.reconcile
+        refresh_all = pilot.refresh_all
+
+        def recording_reconcile():
+            calls.append("reconcile")
+            return reconcile()
+
+        def recording_refresh():
+            calls.append("refresh")
+            placed = refresh_all()
+            stop.set()
+            return placed
+
+        def no_op_stop():
+            calls.append("stop")
+
+        monkeypatch.setattr(pilot, "reconcile", recording_reconcile)
+        monkeypatch.setattr(pilot, "refresh_all", recording_refresh)
+        monkeypatch.setattr(pilot, "stop", no_op_stop)
+
+        pilot.run_loop(stop)
+
         assert pilot._reconciled is True
-        placed = pilot.refresh_all()
-        assert placed  # now allowed to quote
+        assert calls[:2] == ["reconcile", "refresh"]
+        assert pilot.resting_orders()  # placed only after reconciliation
 
 
 # ---------------------------------------------------------------------------
@@ -1195,7 +1235,7 @@ class TestPilotStatePersistence:
         path = tmp_path / "state.json"
         path.write_text("{not valid json")
         store = PilotStateStore(str(path))
-        with pytest.raises(Exception):
+        with pytest.raises(json.JSONDecodeError):
             store.load()
 
     def test_reconcile_tolerates_corrupted_persisted_file(self, pilot_env,
@@ -1206,7 +1246,8 @@ class TestPilotStatePersistence:
         from mm_pilot import ControlsPoller, KalshiMMPilot
         path = tmp_path / "state.json"
         path.write_text("{not valid json")
-        time_fn = lambda: clock[0]
+        def time_fn():
+            return clock[0]
         controls = ControlsPoller(time_fn=time_fn)
         controls.set_cached(True)
         client = FakeKalshiClient()
@@ -1214,6 +1255,7 @@ class TestPilotStatePersistence:
             kalshi_client=client, controls=controls,
             volatility_tracker=VolatilityTracker(min_samples=1),
             time_fn=time_fn, mono_fn=time_fn, state_path=str(path),
+            dry_run=False,
         )
         assert pilot.reconcile() is True
 
@@ -1225,7 +1267,8 @@ class TestPilotStatePersistence:
         working implementation (not just silently no-op'd)."""
         from mm_pilot import ControlsPoller, KalshiMMPilot, PilotStateStore
         path = tmp_path / "state.json"
-        time_fn = lambda: clock[0]
+        def time_fn():
+            return clock[0]
         controls = ControlsPoller(time_fn=time_fn)
         controls.set_cached(True)
         client = FakeKalshiClient()
@@ -1233,6 +1276,7 @@ class TestPilotStatePersistence:
             kalshi_client=client, controls=controls,
             volatility_tracker=VolatilityTracker(min_samples=1),
             time_fn=time_fn, mono_fn=time_fn, state_path=str(path),
+            dry_run=False,
         )
         pilot._reconciled = True  # bypass live reconciliation for this test
         oid = pilot.place_pilot_order(TICKER, "yes", "buy", 4, 0.49,
@@ -1244,6 +1288,18 @@ class TestPilotStatePersistence:
         pilot._cancel_order(oid)
         state = PilotStateStore(str(path)).load()
         assert oid not in state["orders"]
+
+        fill_oid = pilot.place_pilot_order(
+            TICKER, "yes", "buy", 4, 0.49, purpose="quote_bid")
+        assert fill_oid is not None
+        client.fills_script = [kfill(
+            fill_oid, count=4, created=clock[0], trade_id="persisted_fill")]
+        events = pilot.poll_fills()
+        assert len(events) == 1
+        state = PilotStateStore(str(path)).load()
+        assert state["inventory"]["net"][TICKER] == 4
+        assert state["last_fill_ts"] == pytest.approx(clock[0])
+        assert fill_oid not in state["orders"]
 
 
 # ---------------------------------------------------------------------------
@@ -1449,6 +1505,14 @@ class TestToxicityFailClosed:
 
 
 class TestShutdownCancellation:
+    def test_stop_without_client_confirms_when_no_orders_remain(self, clock):
+        pilot = build_pilot(clock, client=None, dry_run=False)
+        pilot._alert = MagicMock()
+
+        pilot.stop()
+
+        pilot._alert.assert_not_called()
+
     def test_stop_retries_until_venue_confirms_no_orders(self, pilot_env,
                                                          clock):
         client = FakeKalshiClient()
