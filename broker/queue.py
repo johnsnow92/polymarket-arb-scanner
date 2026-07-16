@@ -104,7 +104,7 @@ HALT_SCOPE_ALL = "all"
 
 DEFAULT_LEASE_NAME = "policy_broker_loop"
 
-_APPEND_ONLY_TABLES = ("intents", "intent_events", "halts")
+_APPEND_ONLY_TABLES = ("intents", "intent_events", "intent_attempts", "halts")
 
 
 def _require_finite_ttl(ttl_seconds: float) -> float:
@@ -154,6 +154,13 @@ class IntentQueue:
                 status TEXT NOT NULL,
                 reason TEXT,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS intent_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                intent_id INTEGER NOT NULL UNIQUE REFERENCES intents(id),
+                holder TEXT NOT NULL,
+                claimed_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS halts (
@@ -276,6 +283,67 @@ class IntentQueue:
                 (intent_id,),
             ).fetchone()
         return (row["reason"] or "") if row else ""
+
+    def get_intent(self, intent_id: int) -> Intent:
+        """Return the immutable intent stored for ``intent_id``.
+
+        Workers must execute the database row itself, never an object supplied
+        by a caller alongside an id. Reconstructing here preserves that trust
+        boundary and re-runs Intent's strict JSON validation.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT idempotency_key, intent_type, payload FROM intents WHERE id = ?",
+                (intent_id,),
+            ).fetchone()
+        if row is None:
+            raise IntentError(f"unknown intent id {intent_id}")
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise IntentError(f"stored intent {intent_id} has invalid JSON") from exc
+        return Intent(row["intent_type"], payload, row["idempotency_key"])
+
+    def pending_intents(self, limit: int = 25) -> list[tuple[int, Intent]]:
+        """Return oldest non-terminal intents for the single leased worker."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise IntentError("pending intent limit must be a positive integer")
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT i.id, i.idempotency_key, i.intent_type, i.payload "
+                "FROM intents i "
+                "LEFT JOIN intent_events e ON e.id = ("
+                "  SELECT e2.id FROM intent_events e2 "
+                "  WHERE e2.intent_id = i.id ORDER BY e2.id DESC LIMIT 1"
+                ") "
+                "WHERE COALESCE(e.status, ?) = ? "
+                "ORDER BY i.id ASC LIMIT ?",
+                (STATUS_PENDING, STATUS_PENDING, limit),
+            ).fetchall()
+        pending: list[tuple[int, Intent]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise IntentError(f"stored intent {row['id']} has invalid JSON") from exc
+            pending.append((
+                row["id"],
+                Intent(row["intent_type"], payload, row["idempotency_key"]),
+            ))
+        return pending
+
+    def claim_intent_attempt(self, intent_id: int, holder: str) -> bool:
+        """Atomically claim the intent's only automatic execution attempt."""
+        if not isinstance(holder, str) or not holder.strip():
+            raise IntentError("attempt holder must be a non-empty string")
+        with self._lock:
+            cur = self.conn.execute(
+                "INSERT INTO intent_attempts (intent_id, holder, claimed_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(intent_id) DO NOTHING",
+                (int(intent_id), holder.strip(), self._now()),
+            )
+            self.conn.commit()
+        return cur.rowcount == 1
 
     # -- halts ---------------------------------------------------------------
 

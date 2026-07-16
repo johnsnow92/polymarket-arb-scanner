@@ -226,6 +226,48 @@ class SupabaseIntentQueue:
         })
         return (rows[0]["reason"] or "") if rows else ""
 
+    def get_intent(self, intent_id: int) -> Intent:
+        rows = self._get("broker_intents", {
+            "id": f"eq.{int(intent_id)}",
+            "select": "idempotency_key,intent_type,payload",
+            "limit": "1",
+        })
+        if not rows:
+            raise IntentError(f"unknown intent id {intent_id}")
+        row = rows[0]
+        return Intent(row["intent_type"], row["payload"], row["idempotency_key"])
+
+    def pending_intents(self, limit: int = 25) -> list[tuple[int, Intent]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise IntentError("pending intent limit must be a positive integer")
+        rows = self._post_rpc("broker_pending_intents", {"p_limit": limit})
+        if not isinstance(rows, list):
+            raise RuntimeError(
+                f"broker_pending_intents returned an unexpected response: {rows!r}"
+            )
+        pending: list[tuple[int, Intent]] = []
+        for row in rows:
+            if not isinstance(row, dict) or not {
+                "id", "idempotency_key", "intent_type", "payload",
+            }.issubset(row):
+                raise RuntimeError(
+                    f"broker_pending_intents returned a malformed row: {row!r}"
+                )
+            pending.append((
+                int(row["id"]),
+                Intent(row["intent_type"], row["payload"], row["idempotency_key"]),
+            ))
+        return pending
+
+    def claim_intent_attempt(self, intent_id: int, holder: str) -> bool:
+        """Atomically claim the intent's only automatic execution attempt."""
+        if not isinstance(holder, str) or not holder.strip():
+            raise IntentError("attempt holder must be a non-empty string")
+        return self._as_strict_bool(self._post_rpc("broker_claim_intent_attempt", {
+            "p_intent_id": int(intent_id),
+            "p_holder": holder.strip(),
+        }), "broker_claim_intent_attempt")
+
     # -- halts ---------------------------------------------------------------
 
     def record_halt(self, scope: str, reason: str) -> None:

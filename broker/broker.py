@@ -105,6 +105,28 @@ class PolicyBroker:
                 duplicate=True,
             )
 
+        return self._process_created(intent_id, intent)
+
+    def process_stored(self, intent_id: int) -> BrokerDecision:
+        """Process the queue's trusted row for a leased background worker."""
+        status = self.queue.current_status(intent_id)
+        if status != STATUS_PENDING:
+            return BrokerDecision(
+                intent_id,
+                status,
+                reason=self.queue.last_reason(intent_id) or "intent is no longer pending",
+                duplicate=True,
+            )
+        return self._process_created(intent_id, self.queue.get_intent(intent_id))
+
+    def reconcile_preflight(self):
+        """Run the independent full-ledger reconciliation before a worker batch."""
+        result = self.validator.reconcile_all()
+        if result.halt_capital:
+            self._freeze_capital(result.reason)
+        return result
+
+    def _process_created(self, intent_id: int, intent: Intent) -> BrokerDecision:
         malformed = self._malformed_reason(intent)
         if malformed:
             return self._finish(intent_id, intent, STATUS_REJECTED, malformed)

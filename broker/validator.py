@@ -89,6 +89,41 @@ class BrokerValidator:
     def failures(results: list[CheckResult]) -> str:
         return "; ".join(f"{r.name}: {r.reason}" for r in results if not r.ok)
 
+    def reconcile_all(self) -> CheckResult:
+        """Reconcile every reported venue without trusting an intent payload."""
+        try:
+            ledger = self.sources.ledger_balances()
+            live = self.sources.venue_balances()
+            if not ledger or not live:
+                return CheckResult(
+                    "reconciliation", False,
+                    "no live balance evidence (ledger or venue balances empty)",
+                )
+            tolerance = self.policy.recon_tolerance_usd
+            for venue in sorted(set(ledger) | set(live)):
+                ledger_bal = self._finite(
+                    ledger.get(venue, 0.0), f"ledger balance '{venue}'"
+                )
+                live_bal = self._finite(
+                    live.get(venue, 0.0), f"live balance '{venue}'"
+                )
+                diff = abs(ledger_bal - live_bal)
+                if diff > tolerance:
+                    return CheckResult(
+                        "reconciliation", False,
+                        f"reconciliation break on '{venue}': ledger "
+                        f"${ledger_bal:,.2f} vs live ${live_bal:,.2f} "
+                        f"(diff ${diff:,.2f} > ${tolerance:,.2f})",
+                        halt_capital=True,
+                    )
+            return CheckResult("reconciliation", True)
+        except Exception as exc:
+            logger.error("Reconciliation preflight failed closed: %s", exc)
+            return CheckResult(
+                "reconciliation", False,
+                f"fail-closed: live source unreadable ({exc})",
+            )
+
     # -- fail-closed wrapper ----------------------------------------------------
 
     def _run(self, check: Callable[[Intent], CheckResult], intent: Intent) -> CheckResult:
