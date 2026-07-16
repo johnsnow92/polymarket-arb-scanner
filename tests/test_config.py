@@ -239,7 +239,7 @@ class TestValidateConfig:
     def test_reversed_lip_price_band_fails_fast(self, monkeypatch):
         monkeypatch.setenv("LIP_PRICE_BAND_LOW", "0.80")
         monkeypatch.setenv("LIP_PRICE_BAND_HIGH", "0.20")
-        with pytest.raises(ValueError, match="LIP_PRICE_BAND_HIGH.*LIP_PRICE_BAND_LOW"):
+        with pytest.raises(ValueError, match=r"LIP_PRICE_BAND_HIGH.*LIP_PRICE_BAND_LOW"):
             _reload_config()
 
     def test_sizing_aggressiveness_above_one(self, monkeypatch):
