@@ -457,13 +457,34 @@ class TestKillSwitch:
         assert kwargs["params"]["key"] == "eq.mm_pilot_enabled"
         assert kwargs["params"]["select"] == "value"
 
+    def test_read_only_rest_client_rejects_string_false(self):
+        response = MagicMock()
+        response.json.return_value = [{"value": "false"}]
+        session = MagicMock()
+        session.get.return_value = response
+        client = SupabaseControlsClient(
+            "https://example.supabase.co", "test-key", session=session)
+
+        assert client.fetch_control("mm_pilot_enabled") is False
+
     def test_rest_client_builder_requires_control_credentials(
             self, monkeypatch):
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
         monkeypatch.delenv("SUPABASE_KEY", raising=False)
         with pytest.raises(RuntimeError, match="SUPABASE_URL"):
             build_controls_client_from_env()
+
+    def test_rest_client_builder_accepts_service_role_key(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+        monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+        monkeypatch.delenv("SUPABASE_KEY", raising=False)
+
+        client = build_controls_client_from_env()
+
+        assert client._key == "service-role-test"
 
     def test_controls_poller_accepts_read_only_rest_client(self, clock):
         client = MagicMock()

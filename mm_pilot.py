@@ -255,13 +255,14 @@ class SupabaseControlsClient:
             raise RuntimeError("Supabase bot_controls response must be a list")
         if not rows:
             return None
-        return bool(rows[0].get("value"))
+        return rows[0].get("value") is True
 
 
 def build_controls_client_from_env() -> SupabaseControlsClient:
     """Build the read-only controls client without the supabase-py SDK."""
     url = os.getenv("SUPABASE_URL", "").strip()
     key = (os.getenv("SUPABASE_SERVICE_KEY")
+           or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
            or os.getenv("SUPABASE_KEY") or "").strip()
     if not url or not key:
         raise RuntimeError(
