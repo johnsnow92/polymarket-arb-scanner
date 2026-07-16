@@ -222,6 +222,26 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match="MIN_LIQUIDITY.*must be >= 0"):
             _reload_config()
 
+    @pytest.mark.parametrize("name,value", [
+        ("LIP_MIN_POOL", "-0.01"),
+        ("LIP_MAX_MARKETS", "0"),
+        ("LIP_SELECT_INTERVAL", "0"),
+        ("LIP_PRICE_BAND_LOW", "-0.01"),
+        ("LIP_PRICE_BAND_HIGH", "1.01"),
+        ("LIP_MIN_HOURS_REMAINING", "-1"),
+        ("LIP_DEPTH_PROBE_LIMIT", "0"),
+    ])
+    def test_invalid_lip_config_fails_fast(self, monkeypatch, name, value):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=name):
+            _reload_config()
+
+    def test_reversed_lip_price_band_fails_fast(self, monkeypatch):
+        monkeypatch.setenv("LIP_PRICE_BAND_LOW", "0.80")
+        monkeypatch.setenv("LIP_PRICE_BAND_HIGH", "0.20")
+        with pytest.raises(ValueError, match=r"LIP_PRICE_BAND_HIGH.*LIP_PRICE_BAND_LOW"):
+            _reload_config()
+
     def test_sizing_aggressiveness_above_one(self, monkeypatch):
         monkeypatch.setenv("SIZING_AGGRESSIVENESS", "1.5")
         with pytest.raises(ValueError, match="SIZING_AGGRESSIVENESS.*must be in"):
