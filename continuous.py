@@ -1473,7 +1473,10 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 with _StageTimer("fetch", _stage_timings):
                     fetch_futures = {}
                     with ThreadPoolExecutor(max_workers=3) as pool:
-                        if args.mode not in ("kalshi", "betfair", "smarkets", "sxbet", "matchbook", "gemini", "ibkr", "triangular"):
+                        if args.mode not in (
+                            "kalshi", "betfair", "smarkets", "sxbet", "matchbook",
+                            "gemini", "ibkr", "triangular", "mm-pilot",
+                        ):
                             fetch_futures["poly_markets"] = pool.submit(fetch_all_markets)
                         if args.mode in ("all", "negrisk", "multi-cross"):
                             fetch_futures["poly_events"] = pool.submit(fetch_events)

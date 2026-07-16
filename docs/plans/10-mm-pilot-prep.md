@@ -268,11 +268,57 @@ Every safety property gets a test that **fails on today's origin/master behavior
 pip install -r requirements.txt -r requirements-dev.txt
 pytest tests/test_mm_pilot.py tests/test_mm_pilot_gates.py tests/test_hedger.py -v
 pytest tests/ -q                                   # full suite still green
-DRY_RUN=true MM_KALSHI_PILOT_ENABLED=true MM_TOXIC_FLOW_ENABLED=true \
-  MM_VOLATILITY_ADJUSTED_ENABLED=true MM_AUTO_HEDGE_ENABLED=true \
-  python scanner.py --mode continuous               # D0: 48h dry-run soak on Railway
-# D0 review artifacts: decisions audit trail, gate-fire counts, zero unhandled exceptions
 ```
+
+### D0 48-hour dry-run soak launch
+
+The D0 command is intentionally isolated from every legacy market-maker and
+reward-execution path. Run it from the repository root only after PR #43 is in
+the base, migration `0004_mm_pilot_controls.sql` is applied, read-only Kalshi
+and Supabase credentials are injected through the approved secret manager, and
+an operator has set `bot_controls.mm_pilot_enabled=true` for the D0 environment.
+The command itself does not change that control or any account state.
+
+```bash
+SOAK_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+SOAK_DIR="artifacts/mm-d0/${SOAK_ID}"
+mkdir -p "$SOAK_DIR"
+
+DRY_RUN=true \
+EXECUTION_MODE=semi-auto \
+ENABLED_EXECUTION_PLATFORMS=kalshi \
+MM_KALSHI_PILOT_ENABLED=true \
+MM_ENABLED=false \
+REWARDS_ENABLED=false \
+KALSHI_MULTI_ENABLED=false \
+KALSHI_LIP_ENABLED=true \
+MM_AUTO_HEDGE_ENABLED=true \
+MM_TOXIC_FLOW_ENABLED=true \
+MM_VOLATILITY_ADJUSTED_ENABLED=true \
+DATA_DIR="$SOAK_DIR" \
+MM_DECISIONS_LOG_PATH="$SOAK_DIR/decisions.jsonl" \
+MM_STATE_PATH="$SOAK_DIR/mm_pilot_state.json" \
+python scanner.py --continuous --mode mm-pilot --dry-run --interval 60 \
+  --dashboard-port 0 --log-level INFO --log-file "$SOAK_DIR/scanner.log"
+```
+
+Let the process run for 48 continuous hours, then stop it with one `SIGINT` or
+`SIGTERM` so the normal cleanup path runs. Do not set `DRY_RUN=false`, do not
+enable the legacy `MM_ENABLED`/`REWARDS_ENABLED` paths, and do not advance to D1
+from this command.
+
+The review artifact is the timestamped `$SOAK_DIR` directory:
+
+- `scanner.log` — startup configuration, gate fires, exceptions, and graceful shutdown.
+- `decisions.jsonl` — append-only G0-G12/order/halt decision audit trail.
+- `mm_pilot_state.json` — restart/reconciliation checkpoint.
+- `trades.db` — isolated dry-run opportunity/fill ledger.
+
+D0 passes only if the folder covers at least 48 hours, every decision row is
+valid JSON, both dry-run venue mutation counters remain zero, there are no
+unhandled exceptions, and observed gate behavior matches the pre-registered
+§10 cases. D0 never graduates the canary; `DRY_RUN=true` prevents graduation by
+construction.
 
 ## 12. Definition of Done
 

@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 PLATFORM = "kalshi"  # hardcoded venue — the pilot never routes anywhere else
 KALSHI_TICK = 0.01
-DECISIONS_LOG_PATH = "decisions.jsonl"
-STATE_PATH = "mm_pilot_state.json"
+DECISIONS_LOG_PATH = os.getenv("MM_DECISIONS_LOG_PATH") or "decisions.jsonl"
+STATE_PATH = os.getenv("MM_STATE_PATH") or "mm_pilot_state.json"
 
 # Startup reconciliation (finding #4): when there is no persisted checkpoint
 # to anchor the fill lookback, use a wide fixed window rather than "now" —

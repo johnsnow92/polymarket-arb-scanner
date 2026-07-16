@@ -651,8 +651,6 @@ MM_PILOT_BANKROLL_USD = _env_float("MM_PILOT_BANKROLL_USD", "2000.0")
 MM_BOOK_MAX_STALE_SECONDS = _env_float("MM_BOOK_MAX_STALE_SECONDS", "30.0")
 MM_VOL_PULL_MULTIPLIER = _env_float("MM_VOL_PULL_MULTIPLIER", "2.5")
 MM_MAX_BOOK_DEPTH_FRACTION = _env_float("MM_MAX_BOOK_DEPTH_FRACTION", "0.25")
-LIP_PRICE_BAND_LOW = _env_float("LIP_PRICE_BAND_LOW", "0.10")
-LIP_PRICE_BAND_HIGH = _env_float("LIP_PRICE_BAND_HIGH", "0.90")
 
 # Kill switch / control plane (spec section 7). Fail closed: a cache older
 # than MM_CONTROLS_MAX_STALE_SECONDS means unknown operator intent = off.
@@ -1200,9 +1198,8 @@ def validate_config() -> list[str]:
             f"MM_HEDGE_DEADBAND_USD={MM_HEDGE_DEADBAND_USD} must be >= 0")
     if not (0 < LIP_PRICE_BAND_LOW < LIP_PRICE_BAND_HIGH < 1):
         raise ConfigError(
-            f"LIP price band invalid: need 0 < LIP_PRICE_BAND_LOW "
-            f"({LIP_PRICE_BAND_LOW}) < LIP_PRICE_BAND_HIGH "
-            f"({LIP_PRICE_BAND_HIGH}) < 1")
+            f"LIP_PRICE_BAND_HIGH ({LIP_PRICE_BAND_HIGH}) must be > "
+            f"LIP_PRICE_BAND_LOW ({LIP_PRICE_BAND_LOW}), with both in (0, 1)")
     if not (0 < MM_MAX_BOOK_DEPTH_FRACTION <= 1):
         raise ConfigError(
             f"MM_MAX_BOOK_DEPTH_FRACTION={MM_MAX_BOOK_DEPTH_FRACTION} "

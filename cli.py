@@ -1104,9 +1104,9 @@ def main():
                  "imbalance", "news-snipe", "correlated", "time-decay",
                  "logical-arb", "whale-copy",
                  "fee-promo", "cross-mm",
-                 "lead-lag-mm", "toxic-flow", "vol-mm"],
+                 "lead-lag-mm", "toxic-flow", "vol-mm", "mm-pilot"],
         default="all",
-        help="Scan mode: all, binary, negrisk, negrisk-no, cross, kalshi, cross-all, spread, betfair, smarkets, sxbet, matchbook, gemini, ibkr, event, triangular, stale, resolution, convergence, mm, rewards, imbalance, news-snipe, correlated, time-decay, fee-promo, cross-mm",
+        help="Scan mode; mm-pilot isolates the continuous Kalshi reward-MM pilot from unrelated scans",
     )
     parser.add_argument(
         "--min-profit",
