@@ -1237,6 +1237,19 @@ class TestSignalHandlerStopsMMPilotImmediately:
         mm_pilot_stop = self._closure_var(handler, "_mm_pilot_stop")
         assert mm_pilot_stop.is_set() is True
 
+    def test_signal_handler_does_not_log_reentrantly(self, monkeypatch):
+        """Logging from an OS signal handler can re-enter a buffered stream."""
+        import continuous
+        import signal as signal_module
+
+        info = MagicMock()
+        monkeypatch.setattr(continuous.logger, "info", info)
+        handler = self._run_until_signal_registered(monkeypatch)
+
+        handler(signal_module.SIGTERM, None)
+
+        info.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # CodeRabbit finding (adjacent to Codex round-2 #3, fixed opportunistically

@@ -927,7 +927,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     _mm_pilot_stop = threading.Event()
 
     def _signal_handler(sig, frame):
-        logger.info("Shutting down gracefully...")
+        # Signal handlers must only perform async-signal-safe state changes.
+        # Logging can re-enter a handler while its buffered stream is flushing,
+        # raising RuntimeError during the very shutdown path that must stay safe.
         shutdown_event.set()
         # Signal the MM pilot to stop IMMEDIATELY, not only via the
         # end-of-cycle cleanup path (further down this function, which
@@ -999,7 +1001,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     if (config.MM_KALSHI_PILOT_ENABLED
             and getattr(args, "mode", None) == "mm-pilot"):
         try:
-            from mm_pilot import ControlsPoller, KalshiMMPilot
+            from mm_pilot import (
+                ControlsPoller,
+                KalshiMMPilot,
+                build_controls_client_from_env,
+            )
             try:
                 from alerting import alert_manager as _pilot_alerts
             except ImportError as exc:
@@ -1008,8 +1014,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 _pilot_alerts = None
             _controls_client = None
             try:
-                from supabase_sync import build_client_from_env
-                _controls_client = build_client_from_env()
+                _controls_client = build_controls_client_from_env()
             except Exception as exc:
                 logger.warning(
                     "MM pilot: Supabase controls client unavailable (%s) — "

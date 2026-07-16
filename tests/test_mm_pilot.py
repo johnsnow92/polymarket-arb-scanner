@@ -16,7 +16,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from market_maker import ToxicFlowDetector, VolatilityTracker
-from mm_pilot import ControlsPoller, FillEvent, KalshiMMPilot
+from mm_pilot import (
+    ControlsPoller,
+    FillEvent,
+    KalshiMMPilot,
+    SupabaseControlsClient,
+    build_controls_client_from_env,
+)
 
 
 def live_config():
@@ -437,6 +443,39 @@ class TestHedgeLatency:
 # ---------------------------------------------------------------------------
 
 class TestKillSwitch:
+    def test_read_only_rest_client_fetches_control(self):
+        response = MagicMock()
+        response.json.return_value = [{"value": True}]
+        session = MagicMock()
+        session.get.return_value = response
+        client = SupabaseControlsClient(
+            "https://example.supabase.co", "test-key", session=session)
+
+        assert client.fetch_control("mm_pilot_enabled") is True
+        response.raise_for_status.assert_called_once()
+        _, kwargs = session.get.call_args
+        assert kwargs["params"]["key"] == "eq.mm_pilot_enabled"
+        assert kwargs["params"]["select"] == "value"
+
+    def test_rest_client_builder_requires_control_credentials(
+            self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+        monkeypatch.delenv("SUPABASE_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="SUPABASE_URL"):
+            build_controls_client_from_env()
+
+    def test_controls_poller_accepts_read_only_rest_client(self, clock):
+        client = MagicMock()
+        client.fetch_control.return_value = True
+        poller = ControlsPoller(supabase_client=client,
+                                time_fn=lambda: clock[0])
+
+        poller.poll()
+
+        assert poller.is_enabled() is True
+        client.fetch_control.assert_called_once_with("mm_pilot_enabled")
+
     def test_controls_flip_false_cancels_all_next_cycle(self, pilot_env, clock):
         client = FakeKalshiClient()
         pilot = build_pilot(clock, client=client)

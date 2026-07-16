@@ -227,6 +227,48 @@ class PilotStateStore:
 # ControlsPoller — Supabase bot_controls kill switch (spec section 7)
 # ---------------------------------------------------------------------------
 
+class SupabaseControlsClient:
+    """Minimal read-only REST client for the pilot kill switch."""
+
+    def __init__(self, url: str, key: str, session=None, timeout: float = 5.0):
+        import requests
+
+        self._url = url.rstrip("/")
+        self._key = key
+        self._session = session or requests.Session()
+        self._timeout = timeout
+
+    def fetch_control(self, key: str) -> bool | None:
+        """Return one control value, or None when the row is absent."""
+        response = self._session.get(
+            f"{self._url}/rest/v1/bot_controls",
+            params={"key": f"eq.{key}", "select": "value", "limit": "1"},
+            headers={
+                "apikey": self._key,
+                "Authorization": f"Bearer {self._key}",
+            },
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list):
+            raise RuntimeError("Supabase bot_controls response must be a list")
+        if not rows:
+            return None
+        return bool(rows[0].get("value"))
+
+
+def build_controls_client_from_env() -> SupabaseControlsClient:
+    """Build the read-only controls client without the supabase-py SDK."""
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = (os.getenv("SUPABASE_SERVICE_KEY")
+           or os.getenv("SUPABASE_KEY") or "").strip()
+    if not url or not key:
+        raise RuntimeError(
+            "SUPABASE_URL and SUPABASE_SERVICE_KEY (or SUPABASE_KEY) must be set"
+        )
+    return SupabaseControlsClient(url, key)
+
 class ControlsPoller:
     """Timestamped local cache of ``bot_controls.mm_pilot_enabled``.
 
@@ -248,10 +290,14 @@ class ControlsPoller:
         if self._client is None:
             return
         try:
-            resp = (self._client.table("bot_controls")
-                    .select("value").eq("key", self.CONTROL_KEY)
-                    .limit(1).execute())
-            rows = getattr(resp, "data", None) or []
+            if hasattr(self._client, "fetch_control"):
+                value = self._client.fetch_control(self.CONTROL_KEY)
+                rows = [] if value is None else [{"value": value}]
+            else:
+                resp = (self._client.table("bot_controls")
+                        .select("value").eq("key", self.CONTROL_KEY)
+                        .limit(1).execute())
+                rows = getattr(resp, "data", None) or []
             if not rows:
                 logger.warning("bot_controls has no %s row — treating as OFF",
                                self.CONTROL_KEY)
