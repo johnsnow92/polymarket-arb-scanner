@@ -159,7 +159,7 @@ class TreasuryManager:
 
         if self.gas_monitor is not None:
             try:
-                gas_ok = self.gas_monitor.should_execute(amount_usd)
+                gas_ok = self.gas_monitor.should_execute({"net_profit": amount_usd})
             except Exception:
                 gas_ok = True  # Gas monitor optional — don't block on errors
             if not gas_ok:

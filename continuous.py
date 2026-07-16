@@ -43,6 +43,9 @@ from config import (
     WS_STALE_FEED_SECONDS as CONFIG_WS_STALE_FEED_SECONDS,
     REWARDS_ENABLED as CONFIG_REWARDS_ENABLED,
     REWARDS_POLL_INTERVAL as CONFIG_REWARDS_POLL_INTERVAL,
+    KALSHI_LIP_ENABLED as CONFIG_KALSHI_LIP_ENABLED,
+    KALSHI_VIP_TRACK_ENABLED as CONFIG_KALSHI_VIP_TRACK_ENABLED,
+    KALSHI_VIP_POLL_INTERVAL as CONFIG_KALSHI_VIP_POLL_INTERVAL,
     IMBALANCE_ENABLED as CONFIG_IMBALANCE_ENABLED,
     NEWS_SNIPE_ENABLED as CONFIG_NEWS_SNIPE_ENABLED,
     CORRELATED_ENABLED as CONFIG_CORRELATED_ENABLED,
@@ -790,12 +793,19 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     # Initialize reward trackers for liquidity rewards (Layer 3)
     _reward_tracker = None
     _kalshi_reward_tracker = None
+    _kalshi_vip_tracker = None
     try:
         if CONFIG_REWARDS_ENABLED:
             from market_maker import RewardTracker, KalshiRewardTracker
             _reward_tracker = RewardTracker()
             _kalshi_reward_tracker = KalshiRewardTracker(db)
             logger.info("Reward trackers enabled in continuous mode.")
+        if CONFIG_KALSHI_VIP_TRACK_ENABLED and kalshi_client is not None:
+            from kalshi_vip import KalshiVipTracker
+            _kalshi_vip_tracker = KalshiVipTracker(kalshi_client)
+            logger.info("Kalshi VIP volume tracking enabled (tracking-only).")
+        if CONFIG_KALSHI_LIP_ENABLED:
+            logger.info("Kalshi LIP scoring enabled; resting-order scores accrue per period.")
     except Exception as exc:
         logger.debug("Reward trackers not available: %s", exc)
 
@@ -1486,6 +1496,22 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         )
                     except Exception as exc:
                         logger.debug("Rewards scanning error: %s", exc)
+
+                # Kalshi VIP: passive volume-rebate tracking (no execution path).
+                if _kalshi_vip_tracker is not None:
+                    try:
+                        # Monotonic clock: immune to wall-clock jumps over a long run.
+                        now_ts = time.monotonic()
+                        if now_ts - _kalshi_vip_tracker.last_poll_ts >= CONFIG_KALSHI_VIP_POLL_INTERVAL:
+                            _kalshi_vip_tracker.last_poll_ts = now_ts
+                            vip_summary = _kalshi_vip_tracker.summarize_since()
+                            logger.info(
+                                "Kalshi VIP: %d eligible contracts, est. cap $%.4f",
+                                vip_summary["eligible_contracts"],
+                                vip_summary["reward_cap_usd"],
+                            )
+                    except Exception as exc:
+                        logger.debug("Kalshi VIP tracking error: %s", exc)
 
                 # STRAT-01: Order Book Imbalance
                 if args.mode in ("all", "imbalance") and CONFIG_IMBALANCE_ENABLED:

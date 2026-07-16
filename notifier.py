@@ -11,6 +11,8 @@ from urllib.parse import quote as urlquote
 
 import requests
 
+from url_guard import assert_public_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,14 @@ class WebhookNotifier:
         self._is_callmebot = url.startswith("callmebot")
         if self._is_callmebot and (not self._callmebot_phone or not self._callmebot_apikey):
             logger.warning("WEBHOOK_URL set to callmebot but CALLMEBOT_PHONE / CALLMEBOT_APIKEY not set.")
+
+        # SSRF guard: a generic webhook URL (WEBHOOK_URL env) is POSTed the full
+        # opportunity payload — refuse hosts that resolve to internal addresses.
+        # Validate any non-sentinel URL so a mixed-case scheme (HTTP://…) or a
+        # padded value can't skip the check; assert_public_url enforces the
+        # scheme and strips whitespace.
+        if self.url and not self._is_telegram and not self._is_callmebot:
+            self.url = assert_public_url(self.url, env_name="WEBHOOK_URL")
 
     # ---------------------------------------------------------------------------
     # Public API
@@ -120,6 +130,28 @@ class WebhookNotifier:
                                                        fill_price, status)
             thread = threading.Thread(target=self._send_raw, args=(payload,), daemon=True)
             thread.start()
+
+    def notify_text(self, message: str):
+        """Send a pre-formatted alert string, synchronously.
+
+        Unlike notify()/notify_promo_warning()/notify_partial_fill(), this blocks
+        until the send completes. Detection-core watchers (EDGAR, etc.) render
+        their own ticket text via the core's formatter and run as short-lived
+        crons — a daemon thread might not flush before the process exits.
+        """
+        if not message:
+            return
+        if self._is_telegram:
+            self._send_telegram(message)
+        elif self._is_callmebot:
+            self._send_callmebot(message)
+        elif self.url:
+            if "hooks.slack.com" in self.url:
+                self._send_raw({"text": message})
+            elif "discord.com/api/webhooks" in self.url:
+                self._send_raw({"content": message})
+            else:
+                self._send_raw({"message": message})
 
     # ---------------------------------------------------------------------------
     # Internal dispatch

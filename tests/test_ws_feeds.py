@@ -1,7 +1,10 @@
 """Tests for ws_feeds.py — WebSocket message handling in FeedManager."""
 
+import asyncio
 import sys
 import os
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -18,13 +21,47 @@ mock_kalshi.KALSHI_BASE_URL = "https://api.elections.kalshi.com"
 mock_kalshi.KALSHI_API_PATH = "/trade-api/v2"
 sys.modules["kalshi_api"] = mock_kalshi
 
-from ws_feeds import FeedManager, RECONNECT_DELAY, RECONNECT_MAX_DELAY
+from ws_feeds import FeedManager, BetfairFeed, RECONNECT_DELAY, RECONNECT_MAX_DELAY
 
 # Restore the original kalshi_api module so other test files aren't polluted
 if _original_kalshi is not None:
     sys.modules["kalshi_api"] = _original_kalshi
 else:
     del sys.modules["kalshi_api"]
+
+
+class TestBetfairReadLine:
+    """Audit S13: an oversized / incomplete stream message must not OOM — it is
+    converted to a ConnectionError that the maintain-loop's reconnect handles."""
+
+    def _feed(self) -> BetfairFeed:
+        return BetfairFeed(
+            app_key="k", session_token="t",
+            market_ids=["1.123"], on_price_update=MagicMock(),
+            cache=MagicMock(),
+        )
+
+    def test_limit_overrun_raises_connectionerror(self):
+        feed = self._feed()
+        feed._reader = MagicMock()
+
+        async def _boom(_sep):
+            raise asyncio.LimitOverrunError("line too long", 0)
+
+        feed._reader.readuntil = _boom
+        with pytest.raises(ConnectionError, match="exceeded"):
+            asyncio.run(feed._read_line())
+
+    def test_incomplete_read_raises_connectionerror(self):
+        feed = self._feed()
+        feed._reader = MagicMock()
+
+        async def _boom(_sep):
+            raise asyncio.IncompleteReadError(b"partial", 100)
+
+        feed._reader.readuntil = _boom
+        with pytest.raises(ConnectionError, match="closed mid-message"):
+            asyncio.run(feed._read_line())
 
 
 def _make_feed(mock_callback: MagicMock) -> FeedManager:
