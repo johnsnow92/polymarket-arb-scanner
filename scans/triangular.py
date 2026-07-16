@@ -416,7 +416,16 @@ def _refine_triangular_with_clob(opportunities: list[dict], min_profit: float) -
             continue
 
         # Determine which side Polymarket is on and use real ask price
-        if pa == "polymarket":
+        if pa == "polymarket" and pb == "polymarket":
+            # Both legs are Polymarket: refine BOTH from the live book.
+            # Platform A carries the YES leg, platform B the NO leg —
+            # leaving _price_b at its stale Stage-1 NO midpoint would let a
+            # false arb survive and execute at an unverified NO price.
+            pm_ask = clob["yes_ask"]
+            other_price = clob["no_ask"]
+            other_platform = pb
+            result = net_profit_triangular(pm_ask, other_price, pa, pb)
+        elif pa == "polymarket":
             pm_side = o.get("_side_a", "yes") if "_side_a" in o else "yes"
             pm_ask = clob["yes_ask"] if pm_side == "yes" else clob["no_ask"]
             other_price = o.get("_price_b", 0)

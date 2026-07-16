@@ -183,7 +183,7 @@ class TestPortfolioSettlementsReconciliation(unittest.TestCase):
 
     def test_winning_side_from_feed_drives_pnl(self):
         # Directional YES position, market resolved NO → realized loss, not
-        # the legacy arb assumption of 1.0 − cost. Kalshi trades.size is the
+        # the legacy arb assumption of 1.0 - cost. Kalshi trades.size is the
         # requested DOLLAR amount; the executor places
         # max(1, int(size/price)) contracts: int(1.00/0.40) = 2 contracts at
         # 0.40 → cost 0.80. Losing settlement = -0.80.

@@ -8,9 +8,17 @@ and the before_send scrubber.
 
 import sys
 import os
+import types
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# Stub sentry_sdk before the module-scope sentry_init import (repo
+# convention: external SDKs are stubbed via sys.modules so the suite never
+# depends on the real dependency being installed).
+_sentry_stub = types.ModuleType("sentry_sdk")
+_sentry_stub.init = lambda **kwargs: None
+sys.modules["sentry_sdk"] = _sentry_stub
 
 import sentry_init  # noqa: E402
 

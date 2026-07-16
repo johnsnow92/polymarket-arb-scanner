@@ -33,34 +33,34 @@ def _assert_completes(call: Callable[[], T], timeout: float = 0.5) -> T:
     return outcome["value"]  # type: ignore[return-value]
 
 
-def test_tax_harvest_candidates_does_not_deadlock(monkeypatch) -> None:
-    monkeypatch.setattr(capital_optimizer, "TAX_AWARE_ENABLED", True)
-    optimizer = capital_optimizer.TaxOptimizer()
-    optimizer.record_entry(
-        "old-loss",
-        "kalshi",
-        cost=100.0,
-        quantity=100.0,
-        entry_time=datetime.now() - timedelta(days=400),
-    )
+class TestDeadlockRegressions:
+    def test_tax_harvest_candidates_does_not_deadlock(self, monkeypatch) -> None:
+        monkeypatch.setattr(capital_optimizer, "TAX_AWARE_ENABLED", True)
+        optimizer = capital_optimizer.TaxOptimizer()
+        optimizer.record_entry(
+            "old-loss",
+            "kalshi",
+            cost=100.0,
+            quantity=100.0,
+            entry_time=datetime.now() - timedelta(days=400),
+        )
 
-    candidates = _assert_completes(
-        lambda: optimizer.get_harvest_candidates({"old-loss": 50.0}, threshold=0.1)
-    )
+        candidates = _assert_completes(
+            lambda: optimizer.get_harvest_candidates({"old-loss": 50.0}, threshold=0.1)
+        )
 
-    assert candidates == [
-        ("old-loss", -50.0, 50.0 * capital_optimizer.TAX_LONG_TERM_RATE)
-    ]
+        assert candidates == [
+            ("old-loss", -50.0, 50.0 * capital_optimizer.TAX_LONG_TERM_RATE)
+        ]
 
+    def test_region_router_external_route_check_does_not_deadlock(self, monkeypatch) -> None:
+        monkeypatch.setattr(latency_monitor, "GEOGRAPHIC_LATENCY_ENABLED", True)
+        router = latency_monitor.RegionRouter(local_region="us-east")
+        router.record_region_latency("kalshi", "us-east", 100.0)
+        router.record_region_latency("kalshi", "us-west", 50.0)
 
-def test_region_router_external_route_check_does_not_deadlock(monkeypatch) -> None:
-    monkeypatch.setattr(latency_monitor, "GEOGRAPHIC_LATENCY_ENABLED", True)
-    router = latency_monitor.RegionRouter(local_region="us-east")
-    router.record_region_latency("kalshi", "us-east", 100.0)
-    router.record_region_latency("kalshi", "us-west", 50.0)
+        should_route = _assert_completes(
+            lambda: router.should_route_externally("kalshi")
+        )
 
-    should_route = _assert_completes(
-        lambda: router.should_route_externally("kalshi")
-    )
-
-    assert should_route is True
+        assert should_route is True

@@ -668,3 +668,84 @@ class TestRefinementMetadata(TestScanTriangular):
         # PM YES leg repriced 0.25 -> 0.28 (live ask); Kalshi NO stays 0.30.
         assert opp["prices"] == "polymarket_Y=0.280 kalshi_N=0.300"
         assert opp["total_cost"] == "$0.5800"
+
+    def test_refinement_refreshes_both_polymarket_legs(self):
+        """A PM YES+NO pair must not retain the stale Stage-1 NO midpoint."""
+        mod = _import_triangular()
+        opp = {
+            "_platform_a": "polymarket",
+            "_platform_b": "polymarket",
+            "_side_a": "yes",
+            "_side_b": "no",
+            "_price_a": 0.20,
+            "_price_b": 0.30,
+            "_token_ids": ["tok_yes", "tok_no"],
+            "prices": "polymarket_Y=0.200 polymarket_N=0.300",
+        }
+        book = {
+            "yes_ask": 0.28,
+            "no_ask": 0.67,
+            "yes_ask_size": 40,
+            "no_ask_size": 30,
+        }
+        with (
+            patch.object(mod, "get_clob_prices", return_value=book),
+            patch.object(mod, "net_profit_triangular", side_effect=self._linear_fee),
+        ):
+            refined = mod._refine_triangular_with_clob([opp], min_profit=0.001)
+
+        assert len(refined) == 1
+        assert opp["_price_a"] == pytest.approx(0.28)
+        assert opp["_price_b"] == pytest.approx(0.67)
+        assert opp["prices"] == "polymarket_Y=0.280 polymarket_N=0.670"
+        assert opp["total_cost"] == "$0.9500"
+
+
+class TestBothLegsPolymarketRefinement:
+    """Round-4 review finding: when BOTH legs are Polymarket, refinement
+    refreshed only the YES leg and persisted the stale Stage-1 NO midpoint
+    as _price_b — a false arb could survive and execute at an unverified
+    NO price."""
+
+    def _refine(self, mod, clob, price_a=0.25, price_b=0.60):
+        opp = {
+            "type": "Triangular",
+            "market": "PM-only market",
+            "net_profit": 0.10,
+            "_platform_a": "polymarket",
+            "_platform_b": "polymarket",
+            "_side_a": "yes",
+            "_side_b": "no",
+            "_price_a": price_a,
+            "_price_b": price_b,
+            "_token_ids": ["tok_yes", "tok_no"],
+        }
+        with patch.object(mod, "get_clob_prices", return_value=clob), \
+             patch.object(mod, "net_profit_triangular",
+                          side_effect=lambda y, n, *_a, **_k: {
+                              "gross_spread": 1.0 - y - n, "fees": 0.0,
+                              "net_profit": 1.0 - y - n}):
+            return mod._refine_triangular_with_clob([opp], min_profit=0.001)
+
+    def test_no_leg_is_refreshed_from_live_book(self):
+        """Stage-1 NO midpoint 0.60 looked like an arb (1 - 0.28 - 0.60 > 0)
+        but the live NO ask is 0.75 — both legs must be repriced."""
+        mod = _import_triangular()
+        refined = self._refine(mod, {
+            "yes_ask": 0.28, "yes_ask_size": 40,
+            "no_ask": 0.75, "no_ask_size": 30,
+        })
+        assert len(refined) == 0  # 1 - 0.28 - 0.75 < min_profit: dropped
+
+    def test_both_pm_prices_persisted_from_live_book(self):
+        mod = _import_triangular()
+        refined = self._refine(mod, {
+            "yes_ask": 0.28, "yes_ask_size": 40,
+            "no_ask": 0.55, "no_ask_size": 30,
+        })
+        assert len(refined) == 1
+        opp = refined[0]
+        assert opp["_price_a"] == pytest.approx(0.28)
+        assert opp["_price_b"] == pytest.approx(0.55)  # live NO ask, not 0.60
+        assert opp["prices"] == "polymarket_Y=0.280 polymarket_N=0.550"
+        assert opp["net_profit"] == pytest.approx(1.0 - 0.28 - 0.55)

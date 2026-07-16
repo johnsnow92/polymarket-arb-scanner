@@ -143,3 +143,26 @@ class TestDirectionalLegPricing:
         # min(ask 90, ask 80, BID 7) — the old code read the sell leg's ask
         # size (999) and reported min(90, 80, 999) = 80.
         assert refined[0]["_clob_depth"] == 7
+
+    def test_missing_buy_book_forces_zero_depth(self):
+        """Stage-1 price fallback must not imply verified executable depth."""
+        books = {
+            # Conditional buy leg is missing entirely.
+            "y": _book(bid=0.48, ask=0.52, ask_size=80),
+            "x": _book(bid=0.61, ask=0.69, bid_size=70),
+        }
+        opp = _mk_opp("BUY_CONDITIONAL")
+        with (
+            patch.object(
+                cond_mod, "_fetch_clob_for_market",
+                side_effect=_fake_fetch(books),
+            ),
+            patch(
+                "fees.net_profit_conditional",
+                return_value={"net_profit": 0.1, "net_roi": 0.1},
+            ),
+        ):
+            refined = _refine([opp], {}, min_profit=0.0001)
+
+        assert len(refined) == 1
+        assert refined[0]["_clob_depth"] == 0

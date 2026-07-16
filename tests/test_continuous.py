@@ -498,7 +498,7 @@ class TestCalcRealizedPnl:
         """Should use actual fill prices instead of expected P&L.
 
         Polymarket ``size`` is SHARES (PolymarketTrader.place_order passes it
-        through as the share count), so cost = fill × size and contracts =
+        through as the share count), so cost = fill * size and contracts =
         size. Arb payout = min contracts across legs (guaranteed winner)."""
         opp_id = db.log_opportunity("Binary", "M", "", 0.85, 0.15, 0.176, 50, "traded")
         db.log_trade(opp_id, "polymarket", "BUY", 0.40, 5.0, "filled", fill_price=0.41)
@@ -530,8 +530,90 @@ class TestCalcRealizedPnl:
         # payout = min(5, 5) = 5; P&L = +0.75
         assert realized == pytest.approx(5.0 - 4.25)
 
+    def test_explicit_zero_fill_fails_closed(self, db):
+        """A recorded zero fill is invalid, not a request to reuse limit price."""
+        opp_id = db.log_opportunity("Imbalance", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(
+            opp_id, "polymarket", "BUY", 0.50, 10.0, "filled",
+            fill_price=0.0, outcome="yes",
+        )
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+
+        realized = _calc_realized_pnl(db, pos, winning_side="yes")
+
+        assert realized == pytest.approx(-10.0)
+
+    @pytest.mark.parametrize(
+        "trade",
+        [
+            {"platform": "kalshi", "side": "yes", "price": float("nan"),
+             "fill_price": None, "size": 10.0, "status": "filled"},
+            {"platform": "kalshi", "side": "yes", "price": 0.5,
+             "fill_price": float("inf"), "size": 10.0, "status": "filled"},
+            {"platform": "kalshi", "side": "yes", "price": 0.5,
+             "fill_price": 0.5, "size": float("nan"), "status": "filled"},
+            {"platform": "kalshi", "side": "yes", "price": True,
+             "fill_price": 0.5, "size": 10.0, "status": "filled"},
+        ],
+    )
+    def test_non_finite_or_boolean_money_never_returns_expected_profit(self, trade):
+        """Malformed filled rows must produce a non-positive fail-closed result."""
+        db = MagicMock()
+        db.get_trades_for_opportunity.return_value = [trade]
+        pos = {"opportunity_id": 1, "expected_pnl": 0.25}
+
+        assert _calc_realized_pnl(db, pos, winning_side="yes") <= 0
+
+    def test_zero_size_never_returns_expected_profit(self, db):
+        opp_id = db.log_opportunity("Imbalance", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.50, 0.0, "filled", outcome="yes")
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+
+        assert _calc_realized_pnl(db, pos, winning_side="yes") <= 0
+
+    def test_non_filled_rows_are_excluded(self, db):
+        """Pending and failed requests cannot add settlement cost or payout."""
+        opp_id = db.log_opportunity("Imbalance", "M", "", 0.40, 0.10, 0.25, 50, "traded")
+        db.log_trade(
+            opp_id, "polymarket", "BUY", 0.40, 5.0, "filled",
+            fill_price=0.40, outcome="no",
+        )
+        db.log_trade(opp_id, "polymarket", "BUY", 0.90, 50.0, "pending", outcome="yes")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.90, 50.0, "failed", outcome="yes")
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+
+        realized = _calc_realized_pnl(db, pos, winning_side="no")
+
+        assert realized == pytest.approx(3.0)
+
+    def test_expected_fallback_when_no_filled_rows_remain(self, db):
+        opp_id = db.log_opportunity("Binary", "M", "", 0.85, 0.15, 0.176, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.40, 5.0, "pending")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.45, 5.0, "failed")
+        db.create_position(opp_id, "m1", "polymarket", 0.15)
+        pos = db.get_open_positions()[0]
+
+        assert _calc_realized_pnl(db, pos) == pytest.approx(0.15)
+
+    def test_polymarket_buy_no_settles_from_persisted_outcome(self, db):
+        """BUY is execution direction; the separate NO outcome drives payout."""
+        opp_id = db.log_opportunity("Imbalance", "M", "", 0.40, 0.10, 0.25, 50, "traded")
+        db.log_trade(
+            opp_id, "polymarket", "BUY", 0.40, 10.0, "filled",
+            fill_price=0.40, outcome="no",
+        )
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+
+        realized = _calc_realized_pnl(db, pos, winning_side="no")
+
+        assert realized == pytest.approx(6.0)
+
     def test_directional_winning_yes_bet(self, db):
-        """Directional PM bet on YES that resolved YES: payout = shares × $1.
+        """Directional PM bet on YES that resolved YES: payout = shares * $1.
 
         Polymarket size = SHARES: 10 shares at fill 0.40 → cost $4.00,
         payout $10.00, net +$6.00."""
@@ -554,7 +636,7 @@ class TestCalcRealizedPnl:
         db.create_position(opp_id, "m1", "polymarket", 0.10)
         pos = db.get_open_positions()[0]
         realized = _calc_realized_pnl(db, pos, winning_side="no")
-        # PM YES leg lost; payout = 0; realized = -(0.40 × 10 shares) = -4
+        # PM YES leg lost; payout = 0; realized = -(0.40 * 10 shares) = -4
         assert realized == pytest.approx(-4.0)
 
     def test_directional_handles_buy_alias_for_yes(self, db):
@@ -568,7 +650,7 @@ class TestCalcRealizedPnl:
         assert realized == pytest.approx(2.5)
 
     def test_arbitrage_default_uses_min_contracts_payout(self, db):
-        """Without winning_side, arb payout = min contracts across legs × $1
+        """Without winning_side, arb payout = min contracts across legs * $1
         — whichever leg wins pays $1/contract, and the min contract count is
         the amount guaranteed hedged across both legs."""
         opp_id = db.log_opportunity("Binary", "M", "", 0.85, 0.15, 0.176, 50, "traded")
@@ -634,7 +716,8 @@ class TestLegContractsAndCostVenueSemantics:
         yield trade_db
         trade_db.close()
 
-    # -- stake-sized venues (betfair / matchbook) ---------------------------
+    # ---------------------------------------------------------------------------
+    # Stake-sized venues (Betfair / Matchbook)
 
     def test_betfair_winning_back_bet_pays_stake_over_price(self, db):
         """$10 stake backed at 0.30: win returns 10/0.30 = 33.333, net
@@ -658,7 +741,8 @@ class TestLegContractsAndCostVenueSemantics:
         realized = _calc_realized_pnl(db, pos, winning_side="no")
         assert realized == pytest.approx(-10.46)
 
-    # -- fail-closed: unknown venue -----------------------------------------
+    # ---------------------------------------------------------------------------
+    # Fail-closed: unknown venue
 
     def test_unknown_venue_fails_closed_with_error_log(self, db, caplog):
         """An unrecognized platform must NOT silently take the
@@ -684,7 +768,8 @@ class TestLegContractsAndCostVenueSemantics:
         assert realized == pytest.approx(-10.0)
         assert any("P&L fail-closed" in r.message for r in caplog.records)
 
-    # -- fail-closed: malformed money data -----------------------------------
+    # ---------------------------------------------------------------------------
+    # Fail-closed: malformed money data
 
     def test_zero_price_fails_closed_not_one_phantom_contract(self, db, caplog):
         """price=0 on a dollar-contract venue previously produced a silent
@@ -723,6 +808,111 @@ class TestLegContractsAndCostVenueSemantics:
             realized = _calc_realized_pnl(db, pos)
         # PM leg cost 4.50 + worst-cased leg cost 5.00; payout min(10, 0)=0
         assert realized == pytest.approx(-9.50)
+
+
+class TestRealizedPnlFailClosedData:
+    """Round-4 review findings: invalid money data and trade-status handling.
+
+    `fill_price or price` masked an explicit zero fill, type-only checks
+    accepted NaN/inf/bool, zero-size legs collapsed to (0, 0) and fell
+    through to the (typically positive) expected_pnl fallback, and every
+    trade row — filled, failed, or pending — entered the P&L sums.
+    """
+
+    @pytest.fixture
+    def db(self):
+        trade_db = TradeDB(":memory:")
+        yield trade_db
+        trade_db.close()
+
+    def test_explicit_zero_fill_is_not_masked_by_order_price(self, db, caplog):
+        """A recorded fill_price of 0.0 is invalid money data, not a missing
+        fill — it must NOT silently fall back to the order price. PM worst
+        case: shares cost at most $1/share, so 10 shares read as -$10."""
+        opp_id = db.log_opportunity("Binary", "M", "", 0.50, 0.10, 0.20, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.40, 10.0, "filled", fill_price=0.0)
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+        with caplog.at_level("ERROR", logger="continuous"):
+            realized = _calc_realized_pnl(db, pos, winning_side="yes")
+        assert realized == pytest.approx(-10.0)
+        assert any("P&L fail-closed" in r.message for r in caplog.records)
+
+    def test_nan_fill_fails_closed(self, caplog):
+        """NaN passes isinstance((int, float)) — it must still be rejected."""
+        db = MagicMock()
+        db.get_trades_for_opportunity.return_value = [{
+            "id": 1,
+            "platform": "polymarket",
+            "side": "BUY",
+            "price": 0.40,
+            "fill_price": float("nan"),
+            "size": 10.0,
+            "status": "filled",
+        }]
+        pos = {"opportunity_id": 1, "expected_pnl": 0.10}
+        with caplog.at_level("ERROR", logger="continuous"):
+            realized = _calc_realized_pnl(db, pos, winning_side="yes")
+        assert realized == pytest.approx(-10.0)
+
+    def test_zero_size_leg_never_reaches_expected_pnl_fallback(self, db, caplog):
+        """Regression: a zero-size leg produced (0, 0), total cost 0, and the
+        function returned the POSITIVE expected_pnl for a garbage position.
+        An unpriceable leg must fail closed to -(known cost) instead."""
+        opp_id = db.log_opportunity("Binary", "M", "", 0.50, 5.0, 0.20, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.40, 0.0, "filled", fill_price=0.40)
+        db.create_position(opp_id, "m1", "polymarket", expected_pnl=5.0)
+        pos = db.get_open_positions()[0]
+        with caplog.at_level("ERROR", logger="continuous"):
+            realized = _calc_realized_pnl(db, pos)
+        assert realized <= 0.0  # never the +5.0 expected_pnl fallback
+        assert any("fail-closed" in r.message for r in caplog.records)
+
+    def test_failed_legs_are_excluded_from_pnl(self, db):
+        """Failed legs never reached the venue: no cost, no payout. Before
+        the fix they were priced like fills, corrupting realized P&L."""
+        opp_id = db.log_opportunity("Binary", "M", "", 0.85, 0.15, 0.176, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.40, 5.0, "filled", fill_price=0.41)
+        db.log_trade(opp_id, "polymarket", "BUY", 0.45, 5.0, "failed")
+        db.create_position(opp_id, "m1", "polymarket", 0.15)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos, winning_side="yes")
+        # Only the filled YES leg: payout 5 - cost 2.05 = +2.95
+        assert realized == pytest.approx(5.0 - 0.41 * 5)
+
+    def test_pending_leg_is_excluded_from_realized_pnl(self, db):
+        """Pending rows are not confirmed executions and cannot affect P&L."""
+        opp_id = db.log_opportunity("Binary", "M", "", 0.85, 0.15, 0.176, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.40, 5.0, "filled", fill_price=0.41)
+        db.log_trade(opp_id, "polymarket", "BUY", 0.45, 5.0, "pending")
+        db.create_position(opp_id, "m1", "polymarket", 0.15)
+        pos = db.get_open_positions()[0]
+        realized = _calc_realized_pnl(db, pos)
+        # Only the confirmed filled leg enters realized P&L.
+        assert realized == pytest.approx(5.0 - 0.41 * 5)
+
+    def test_all_legs_failed_preserves_expected_pnl_fallback(self, db):
+        """No executed rows preserves the legacy expected-P&L fallback."""
+        opp_id = db.log_opportunity("Binary", "M", "", 0.85, 5.0, 0.176, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.40, 5.0, "failed")
+        db.create_position(opp_id, "m1", "polymarket", expected_pnl=5.0)
+        pos = db.get_open_positions()[0]
+        assert _calc_realized_pnl(db, pos) == pytest.approx(5.0)
+
+    def test_polymarket_buy_no_settles_by_stored_outcome(self, db):
+        """Regression: PM BUY_NO legs are logged side="BUY", which aliases to
+        winning_side="yes" — a NO bet that WON was scored as a loss (and a
+        NO bet that lost was scored as a win). The traded outcome column
+        must drive settlement when present."""
+        opp_id = db.log_opportunity("Imbalance", "M", "", 0.40, 0.10, 0.25, 50, "traded")
+        db.log_trade(opp_id, "polymarket", "BUY", 0.40, 10.0, "filled",
+                     fill_price=0.40, outcome="no")
+        db.create_position(opp_id, "m1", "polymarket", 0.10)
+        pos = db.get_open_positions()[0]
+        # Market resolved NO: the NO leg WON. payout 10 - cost 4 = +6
+        assert _calc_realized_pnl(db, pos, winning_side="no") == pytest.approx(6.0)
+        # Market resolved YES: the NO leg LOST. payout 0 - cost 4 = -4
+        assert _calc_realized_pnl(db, pos, winning_side="yes") == pytest.approx(-4.0)
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ init_sentry()
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import threading
@@ -245,56 +246,108 @@ _DOLLAR_CONTRACT_VENUES = frozenset({"kalshi", "smarkets", "sxbet", "gemini", "i
 _STAKE_SIZED_VENUES = frozenset({"betfair", "matchbook"})
 
 
-def _leg_contracts_and_cost(trade: dict) -> tuple[float, float]:
+def _money_valid(value) -> bool:
+    """Return whether a value is valid positive money data.
+
+    bool is an int subclass, and NaN/inf pass isinstance checks — all three
+    must be rejected before a value can price a P&L leg.
+
+    Args:
+        value: Candidate numeric value.
+
+    Returns:
+        True only for finite, positive, non-boolean numbers.
+    """
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def _leg_contracts_and_cost(trade: dict) -> tuple[float, float] | None:
     """Return (contracts, dollar_cost) for one trade leg, venue-aware.
 
     FAIL-CLOSED: this feeds realized P&L and therefore the daily-loss halt.
-    An unknown/missing venue or malformed money data (missing or
-    non-positive price/fill/size) must never silently produce an optimistic
-    number — instead we log an error and take the WORST CASE (payout of
-    zero contracts, full recorded cost lost), so the halt can only
-    over-trigger, never under-trigger.
+    An unknown/missing venue or malformed money data (missing, zero,
+    negative, NaN or infinite price/fill/size) must never silently produce
+    an optimistic number:
+
+    - When the recorded size is valid but the prices are not, we take the
+      WORST CASE — zero payout, the venue-consistent worst dollar cost lost
+      (shares are capped at $1/share on Polymarket, stake venues lose the
+      rounded stake, dollar venues lose the dollar size) — so the halt can
+      only over-trigger, never under-trigger.
+    - When the size itself is invalid the leg cannot be priced at all;
+      return ``None`` so the caller can refuse to produce a realized number
+      from garbage instead of falling back to expected profit.
+
+    Args:
+        trade: Persisted trade row. Polymarket records shares, Betfair and
+            Matchbook record stake, and the remaining supported venues record
+            a requested dollar amount converted to integer contracts.
+
+    Returns:
+        ``(contracts, dollar_cost)`` when the leg can be conservatively priced,
+        otherwise ``None`` when even a safe dollar cost cannot be derived.
     """
     platform = (trade.get("platform") or "").lower()
     price = trade.get("price")
-    fill = trade.get("fill_price") or price
+    fill = trade.get("fill_price")
+    if fill is None:  # explicit None check — a recorded zero fill is NOT a
+        fill = price  # missing fill, it is invalid money data (rejected below)
     size = trade.get("size")
 
-    def _worst_case(reason: str) -> tuple[float, float]:
-        # Conservative direction: zero payout, full cost lost. Cost is the
-        # largest plausible interpretation of the recorded size (dollar size
-        # vs shares * fill) so the daily-loss halt can only over-trigger.
-        safe_size = size if isinstance(size, (int, float)) and size > 0 else 0.0
-        safe_fill = fill if isinstance(fill, (int, float)) and fill > 0 else 0.0
-        worst_cost = max(safe_size, safe_fill * safe_size)
+    def _log_fail(reason: str, worst_cost: float | None) -> None:
         logger.error(
             "P&L fail-closed: %s (trade id=%s platform=%r price=%r fill=%r "
-            "size=%r) — assuming worst case: $%.2f lost, zero payout.",
+            "size=%r) — %s.",
             reason, trade.get("id"), trade.get("platform"), price,
-            trade.get("fill_price"), size, worst_cost,
+            trade.get("fill_price"), size,
+            ("leg unpriceable, refusing realized P&L from garbage data"
+             if worst_cost is None
+             else f"assuming worst case: ${worst_cost:.2f} lost, zero payout"),
         )
+
+    def _worst_case(reason: str) -> tuple[float, float] | None:
+        # Conservative direction: zero payout, full cost lost, in the USD
+        # unit the venue actually recorded (`size` is SHARES on Polymarket,
+        # a dollar STAKE on Betfair/Matchbook, dollars elsewhere).
+        if not _money_valid(size):
+            _log_fail(reason, None)
+            return None
+        safe_fill = fill if _money_valid(fill) else None
+        if platform in _SHARE_SIZED_VENUES:
+            # Shares cost at most $1/share; use the fill when it's usable.
+            worst_cost = (safe_fill * size) if safe_fill is not None else float(size)
+        elif platform in _STAKE_SIZED_VENUES:
+            worst_cost = round(size, 2)  # mirrors round(size, 2) at placement
+        elif platform in _DOLLAR_CONTRACT_VENUES:
+            worst_cost = float(size)
+        else:
+            # Unknown venue: sizing semantics unknown, take the largest
+            # plausible interpretation (dollar size vs shares * fill).
+            worst_cost = max(float(size), (safe_fill or 0.0) * size)
+        _log_fail(reason, worst_cost)
         return 0.0, worst_cost
 
-    if not isinstance(size, (int, float)) or size <= 0:
-        return _worst_case("missing or non-positive trade size")
+    if not _money_valid(size):
+        _log_fail("missing or invalid trade size", None)
+        return None
 
     if platform in _SHARE_SIZED_VENUES:
-        if not isinstance(fill, (int, float)) or fill <= 0:
-            return _worst_case("missing or non-positive fill/order price")
+        if not _money_valid(fill):
+            return _worst_case("missing or invalid fill/order price")
         return float(size), fill * size
 
     if platform in _DOLLAR_CONTRACT_VENUES:
-        if (not isinstance(price, (int, float)) or price <= 0
-                or not isinstance(fill, (int, float)) or fill <= 0):
-            return _worst_case("missing or non-positive fill/order price")
+        if not _money_valid(price) or not _money_valid(fill):
+            return _worst_case("missing or invalid fill/order price")
         # Mirror the executor's dollars -> integer-contracts conversion.
         contracts = float(max(1, int(size / price)))
         return contracts, contracts * fill
 
     if platform in _STAKE_SIZED_VENUES:
         stake = round(size, 2)  # mirrors round(size, 2) at placement
-        if not isinstance(fill, (int, float)) or fill <= 0:
-            return _worst_case("missing or non-positive fill/order price")
+        if not _money_valid(fill):
+            return _worst_case("missing or invalid fill/order price")
         # Back bet: stake at decimal odds 1/fill returns stake/fill if it
         # wins — equivalent to stake/fill one-dollar contracts.
         return stake / fill, stake
@@ -325,31 +378,77 @@ def _calc_realized_pnl(db: TradeDB, pos: dict, winning_side: str | None = None) 
     Note:
         Contract counts and dollar costs are derived per venue by
         ``_leg_contracts_and_cost`` — Polymarket logs ``size`` in SHARES,
-        every other venue logs the requested DOLLAR size that the executor
-        converts via ``max(1, int(size / price))``.
+        Betfair and Matchbook log a dollar STAKE, and the remaining supported
+        venues log a requested DOLLAR size converted to contracts via
+        ``max(1, int(size / price))``.
     """
     trades = db.get_trades_for_opportunity(pos["opportunity_id"])
     if not trades:
         return pos.get("expected_pnl", 0)
 
-    legs = [(_leg_contracts_and_cost(t), t) for t in trades]
-    total_fill_cost = sum(cost for (_, cost), _t in legs)
-    if total_fill_cost <= 0:
+    # Realized P&L is based only on confirmed venue fills. Pending, aborted,
+    # failed, cancelled, dry-run, and orphaned rows are not executed legs and
+    # must not affect settlement. If no confirmed fills remain, preserve the
+    # expected-P&L fallback for legacy/incomplete records.
+    trades = [t for t in trades if (t.get("status") or "").lower() == "filled"]
+    if not trades:
         return pos.get("expected_pnl", 0)
+
+    legs: list[tuple[tuple[float, float], dict]] = []
+    invalid = False
+    for t in trades:
+        # Prefer an explicitly persisted executed size when a venue supports
+        # partial fills; otherwise the confirmed row's requested size is the
+        # executor's current full-fill representation.
+        trade = dict(t)
+        if _money_valid(t.get("executed_size")):
+            trade["size"] = t["executed_size"]
+        priced = _leg_contracts_and_cost(trade)
+        if priced is None:
+            invalid = True
+            continue
+        legs.append((priced, trade))
+
+    total_fill_cost = sum(cost for (_, cost), _t in legs)
+
+    if invalid:
+        # Garbage money data on at least one live leg: refuse to synthesize
+        # a payout, and NEVER fall back to (typically positive) expected
+        # profit — report the known cost as lost so the halt over-triggers.
+        logger.error(
+            "Realized P&L fail-closed for opportunity %s: unpriceable trade "
+            "leg(s); reporting -$%.2f (known cost, zero payout).",
+            pos.get("opportunity_id"), total_fill_cost,
+        )
+        expected = pos.get("expected_pnl", 0)
+        expected_loss = (
+            abs(float(expected))
+            if isinstance(expected, (int, float))
+            and not isinstance(expected, bool)
+            and math.isfinite(expected)
+            else 0.0
+        )
+        return -max(total_fill_cost, expected_loss)
 
     if winning_side is None:
         # Arbitrage assumption: exactly one leg settles at $1 per contract.
         # Guaranteed payout = min contracts across legs (whichever leg wins,
         # at least that many contracts pay out).
         contracts_per_leg = [contracts for (contracts, _), _t in legs]
-        if not contracts_per_leg:
-            return pos.get("expected_pnl", 0)
         return min(contracts_per_leg) - total_fill_cost
 
-    # Per-leg payout based on resolved outcome.
+    # Per-leg payout based on resolved outcome. The traded outcome
+    # (yes/no/...) is persisted separately from the execution side because
+    # Polymarket BUY_NO legs are logged with side="BUY"; fall back to side
+    # for legacy rows and venues whose side IS the outcome.
     total_payout = 0.0
     for (contracts, _cost), t in legs:
-        if not _leg_won(t.get("side", ""), winning_side):
+        trade_side = (
+            t.get("outcome")
+            if (t.get("platform") or "").lower() == "polymarket"
+            else t.get("side")
+        )
+        if not _leg_won(trade_side or t.get("side") or "", winning_side):
             continue
         total_payout += contracts  # $1 per winning contract
     return total_payout - total_fill_cost

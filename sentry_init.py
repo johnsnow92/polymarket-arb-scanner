@@ -22,6 +22,13 @@ def _scrub_event(event, hint):
 
     Defense-in-depth behind ``include_local_variables=False`` — if locals ever
     get re-enabled, obvious secret-shaped vars are still redacted.
+
+    Args:
+        event: Mutable Sentry event payload.
+        hint: Sentry capture hint; accepted for the before-send hook contract.
+
+    Returns:
+        The event payload with credential-shaped frame locals redacted.
     """
     for exc in (event.get("exception", {}) or {}).get("values", []) or []:
         frames = (exc.get("stacktrace", {}) or {}).get("frames", []) or []

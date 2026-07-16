@@ -359,6 +359,7 @@ class TestDryRunLog:
         trades = db.get_trades_for_opportunity(opps[0]["id"])
         assert len(trades) == 2
         assert all(t["status"] == "dry_run" for t in trades)
+        assert [t["outcome"] for t in trades] == ["yes", "no"]
 
 
 # ---------------------------------------------------------------------------

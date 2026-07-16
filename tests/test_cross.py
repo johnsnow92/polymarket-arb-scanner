@@ -288,6 +288,21 @@ class TestRefineCrossWithClob:
             result = _refine_cross_with_clob([opp], markets_by_key, 0.005)
             assert result == []
 
+    @patch("scans.cross._fetch_clob_for_market")
+    def test_malformed_nonempty_book_drops_without_keyerror(self, mock_clob):
+        mock_clob.return_value = ({"conditionId": "mk1"}, {"yes_ask": 0.35})
+        opp = {
+            "_market_key": "mk1",
+            "_kalshi_yes": 0.40,
+            "_kalshi_no": 0.40,
+        }
+
+        result = _refine_cross_with_clob(
+            [opp], {"mk1": {"conditionId": "mk1"}}, 0.005,
+        )
+
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
 # scan_cross_platform
@@ -900,6 +915,26 @@ class TestRefineCrossAllDropsUnprofitable:
         }
         opps = [opp]
         _refine_cross_all_with_clob(opps, 0.005)
+        assert opps == []
+
+    @patch("scans.cross._fetch_clob_for_market")
+    def test_missing_selected_side_size_drops_fail_closed(self, mock_fetch):
+        from scans.cross import _refine_cross_all_with_clob
+        mock_fetch.return_value = (None, {
+            "yes_ask": 0.32,
+            "no_ask": 0.68,
+        })
+        opp = {
+            "_platform_a": "polymarket",
+            "_platform_b": "kalshi",
+            "_token_ids": ["tok_y", "tok_n"],
+            "prices": "polymarket_Y=0.30 kalshi_N=0.40",
+            "net_profit": 0.25,
+        }
+        opps = [opp]
+
+        _refine_cross_all_with_clob(opps, 0.005)
+
         assert opps == []
 
     @patch("scans.cross._fetch_clob_for_market")

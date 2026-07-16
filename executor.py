@@ -2506,6 +2506,7 @@ class ArbitrageExecutor:
                 price=leg.get("price", 0),
                 size=size,
                 status="dry_run",
+                outcome=leg.get("outcome") or leg.get("token"),
             )
 
         logger.info(f"[DRY RUN] Logged opportunity #{opp_id} with {len(legs)} legs.")
@@ -2569,6 +2570,7 @@ class ArbitrageExecutor:
                 price=leg.get("price", 0),
                 size=size,
                 status="pending",
+                outcome=leg.get("outcome") or leg.get("token"),
             )
             leg["_trade_id"] = trade_id
 
@@ -2805,6 +2807,7 @@ class ArbitrageExecutor:
                 price=leg.get("price", 0),
                 size=size,
                 status="pending",
+                outcome=leg.get("outcome") or leg.get("token"),
             )
             leg["_trade_id"] = trade_id
 

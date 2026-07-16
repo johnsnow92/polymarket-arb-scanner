@@ -338,17 +338,24 @@ def _refine_conditional_with_clob(
             opp["_p_x"] = p_x
 
             # Depth per leg matches the side actually traded: ask size for
-            # buy legs, bid size for sell legs.
+            # buy legs, bid size for sell legs. Every leg contributes — a
+            # missing book or missing traded-side size is ZERO executable
+            # depth, not a skipped leg (fail-closed).
             depths = []
             for clob, is_buy in [
                 (cond_clob, buy_conditional),
                 (condition_clob, buy_conditional),
                 (uncond_clob, not buy_conditional),
             ]:
-                if clob:
-                    key = "yes_ask_size" if is_buy else "yes_bid_size"
-                    depths.append(clob.get(key, 0))
-            opp["_clob_depth"] = min(depths) if depths else 0
+                price_key = "yes_ask" if is_buy else "yes_bid"
+                size_key = "yes_ask_size" if is_buy else "yes_bid_size"
+                depth = (
+                    ((clob or {}).get(size_key) or 0)
+                    if clob and clob.get(price_key) is not None
+                    else 0
+                )
+                depths.append(depth)
+            opp["_clob_depth"] = min(depths)
 
             refined.append(opp)
 

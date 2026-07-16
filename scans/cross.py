@@ -102,17 +102,24 @@ def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min
             logger.debug("Cross dropped (fail-closed): no CLOB book for %s", market_key)
             continue
 
-        # Use ask price, fall back to bid + 0.01 if ask is missing
-        pm_yes = clob["yes_ask"]
-        pm_no = clob["no_ask"]
+        # Use ask price, fall back to bid + 0.01 if ask is missing. A
+        # malformed book (missing keys entirely) must drop the opportunity,
+        # not raise — .get() so absent fields behave like empty sides.
+        pm_yes = clob.get("yes_ask")
+        pm_no = clob.get("no_ask")
+        pm_yes_depth = clob.get("yes_ask_size")
+        pm_no_depth = clob.get("no_ask_size")
         partial = False
         if pm_yes is None and clob.get("yes_bid") is not None:
             pm_yes = clob["yes_bid"] + 0.01
+            pm_yes_depth = clob.get("yes_bid_size")
             partial = True
         if pm_no is None and clob.get("no_bid") is not None:
             pm_no = clob["no_bid"] + 0.01
+            pm_no_depth = clob.get("no_bid_size")
             partial = True
-        if pm_yes is None or pm_no is None:
+        if (pm_yes is None or pm_no is None
+                or pm_yes_depth is None or pm_no_depth is None):
             logger.debug("Cross dropped (fail-closed): empty book sides for %s", market_key)
             continue
         k_yes = opp.get("_kalshi_yes")
@@ -139,10 +146,7 @@ def _refine_cross_with_clob(opportunities: list[dict], markets_by_key: dict, min
             opp["fees"] = f"${best['fees']:.4f}"
             opp["net_profit"] = best["net_profit"]
             opp["net_roi"] = f"{best['net_profit'] / total_cost * 100:.2f}%"
-            opp["_clob_depth"] = min(
-                clob["yes_ask_size"] or 0,
-                clob["no_ask_size"] or 0,
-            )
+            opp["_clob_depth"] = min(pm_yes_depth or 0, pm_no_depth or 0)
             if partial:
                 opp["_partial_clob"] = True
             refined.append(opp)
@@ -632,7 +636,7 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float,
             continue
 
         clob = clob_cache.get(tuple(token_ids[:2]))
-        if not clob or clob["yes_ask"] is None or clob["no_ask"] is None:
+        if not clob or clob.get("yes_ask") is None or clob.get("no_ask") is None:
             dropped_ids.add(id(o))
             continue
 
@@ -681,9 +685,15 @@ def _refine_cross_all_with_clob(opportunities: list[dict], min_profit: float,
             continue
 
         # Reprice the PM leg from the live book on ITS side only.
-        pm_price = clob["yes_ask"] if pm_side == "yes" else clob["no_ask"]
-        pm_depth = (clob["yes_ask_size"] if pm_side == "yes"
-                    else clob["no_ask_size"]) or 0
+        pm_price = clob.get("yes_ask") if pm_side == "yes" else clob.get("no_ask")
+        pm_depth_raw = (
+            clob.get("yes_ask_size") if pm_side == "yes"
+            else clob.get("no_ask_size")
+        )
+        if pm_price is None or pm_depth_raw is None:
+            dropped_ids.add(id(o))
+            continue
+        pm_depth = pm_depth_raw or 0
 
         # Argument order mirrors Stage 1: (price_a, price_b, side_a, side_b).
         if pa == "polymarket":
