@@ -85,6 +85,10 @@ class FakeKalshiClient:
             self.cancel_fail_count -= 1
             return False
         self.cancelled.append(order_id)
+        self.open_orders_script = [
+            order for order in self.open_orders_script
+            if str(order.get("order_id") or order.get("id") or "") != order_id
+        ]
         return True
 
     def get_fills(self, min_ts=None, raise_on_error=False, **kwargs):
@@ -200,20 +204,21 @@ def build_pilot(clock, client=None, dry_run=False, hedger=None,
     return pilot
 
 
-@pytest.mark.parametrize(("severity", "expected_level"), [
-    ("INFO", logging.INFO),
-    ("WARNING", logging.WARNING),
-    ("CRITICAL", logging.CRITICAL),
-])
-def test_alert_logs_at_declared_severity(clock, caplog, severity,
-                                         expected_level):
-    pilot = build_pilot(clock, dry_run=True)
-    with caplog.at_level(logging.INFO, logger="mm_pilot"):
-        pilot._alert("test_alert", severity, "test message")
+class TestAlertLogging:
+    @pytest.mark.parametrize(("severity", "expected_level"), [
+        ("INFO", logging.INFO),
+        ("WARNING", logging.WARNING),
+        ("CRITICAL", logging.CRITICAL),
+    ])
+    def test_alert_logs_at_declared_severity(self, clock, caplog, severity,
+                                             expected_level):
+        pilot = build_pilot(clock, dry_run=True)
+        with caplog.at_level(logging.INFO, logger="mm_pilot"):
+            pilot._alert("test_alert", severity, "test message")
 
-    record = caplog.records[-1]
-    assert record.levelno == expected_level
-    assert record.getMessage() == "MM pilot test_alert: test message"
+        record = caplog.records[-1]
+        assert record.levelno == expected_level
+        assert record.getMessage() == "MM pilot test_alert: test message"
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +404,7 @@ class TestHedgeLatency:
     def test_unfilled_hedge_order_past_ceiling_halts(self, pilot_env, clock):
         client = FakeKalshiClient()
         pilot = build_pilot(clock, client=client)
+        pilot.inventory.apply_fill(TICKER, "yes", "buy", 10, 0.49)
         hoid = pilot.place_pilot_order(TICKER, "yes", "sell", 10, 0.49,
                                        purpose="hedge", reducing=True)
         assert hoid is not None
@@ -742,6 +748,10 @@ class TestFillPollFailClosed:
         assert pilot._fills_blind is True
         assert pilot.halted is False  # blind, not a full halt — self-heals
         assert oid in client.cancelled  # pull_all fired
+        placed_before = client.place_order_calls
+        assert pilot.refresh_market(TICKER) == []
+        assert pilot.refresh_all() == []
+        assert client.place_order_calls == placed_before
 
     def test_recovery_clears_blind_state(self, pilot_env, clock):
         client = FakeKalshiClient()
@@ -754,6 +764,7 @@ class TestFillPollFailClosed:
         pilot.poll_fills()
         assert pilot._fills_blind is False
         assert pilot._fill_poll_failures == 0
+        assert pilot.refresh_market(TICKER)
 
 
 # ---------------------------------------------------------------------------
@@ -902,18 +913,46 @@ class TestReconciliation:
         assert pilot.inventory.net_contracts(TICKER) == -7
         assert pilot.inventory.avg_cost(TICKER) == pytest.approx(0.5)
 
-    def test_unparsable_position_fp_treated_as_flat_not_fatal(self, pilot_env,
-                                                               clock):
-        """A malformed position_fp must not crash reconciliation — treat
-        that one ticker as flat (conservative: 0 exposure understates risk,
-        but never crashes the safety gate)."""
+    def test_unparsable_position_fp_fails_closed(self, pilot_env, clock):
+        """Malformed venue positions cannot be treated as zero exposure."""
         client = FakeKalshiClient()
         client.positions_script = [
             {"ticker": TICKER, "position_fp": "not-a-number"},
         ]
         pilot = self._direct_pilot(clock, client)
-        assert pilot.reconcile() is True
+        assert pilot.reconcile() is False
+        assert pilot._reconciled is False
         assert pilot.inventory.net_contracts(TICKER) == 0
+
+    def test_cancels_and_confirms_before_position_and_fill_snapshot(
+            self, pilot_env, clock):
+        calls: list[str] = []
+
+        class OrderedClient(FakeKalshiClient):
+            def get_open_orders(self, ticker=None, **kwargs):
+                calls.append("open_orders")
+                return super().get_open_orders(ticker=ticker, **kwargs)
+
+            def cancel_order(self, order_id):
+                calls.append("cancel")
+                return super().cancel_order(order_id)
+
+            def get_positions(self, raise_on_error=False):
+                calls.append("positions")
+                return super().get_positions(raise_on_error=raise_on_error)
+
+            def get_fills(self, min_ts=None, raise_on_error=False, **kwargs):
+                calls.append("fills")
+                return super().get_fills(
+                    min_ts=min_ts, raise_on_error=raise_on_error, **kwargs)
+
+        client = OrderedClient()
+        client.open_orders_script = [{"order_id": "stale_1", "ticker": TICKER}]
+        pilot = self._direct_pilot(clock, client)
+
+        assert pilot.reconcile() is True
+        assert calls == ["open_orders", "cancel", "open_orders",
+                         "positions", "fills"]
 
     def test_missing_exposure_field_assumes_worst_case_not_zero(self,
                                                                  pilot_env,
@@ -1116,6 +1155,7 @@ class TestMonotonicHedgeLatency:
                                                           clock):
         client = FakeKalshiClient()
         pilot = build_pilot(clock, client=client)
+        pilot.inventory.apply_fill(TICKER, "yes", "buy", 10, 0.49)
         hoid = pilot.place_pilot_order(TICKER, "yes", "sell", 10, 0.49,
                                        purpose="hedge", reducing=True)
         assert pilot._orders[hoid]["placed_mono"] == pytest.approx(clock[0])
@@ -1274,3 +1314,152 @@ class TestLockNotHeldDuringNetworkCall:
 
         assert result["oid"] is not None
         assert pilot._book(TICKER)["mid"] == pytest.approx(0.55)
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit round-4 safety regressions
+# ---------------------------------------------------------------------------
+
+class TestInventoryDerivedReduction:
+    def test_reducing_flag_without_inventory_is_rejected(self, pilot_env,
+                                                          clock):
+        pilot = build_pilot(clock, client=FakeKalshiClient())
+
+        result = pilot.authorize_order(
+            TICKER, "yes", "sell", 5, 0.49, reducing=True)
+
+        assert result.allowed is False
+        assert result.reason == "not_reducing"
+
+    def test_reducing_order_is_capped_at_held_contracts(self, pilot_env,
+                                                        clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        pilot.inventory.apply_fill(TICKER, "yes", "buy", 5, 0.49)
+
+        oid = pilot.place_pilot_order(
+            TICKER, "yes", "sell", 50, 0.49,
+            purpose="hedge", reducing=True,
+        )
+
+        assert oid is not None
+        assert client.placed[-1]["count"] == 5
+        assert pilot._orders[oid]["count"] == 5
+
+
+class TestIndeterminatePlacement:
+    @pytest.mark.parametrize("response", [None, {}, {"order": {}}])
+    def test_missing_order_identity_halts_and_requires_reconciliation(
+            self, pilot_env, clock, response, monkeypatch):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        monkeypatch.setattr(client, "place_order", lambda **kwargs: response)
+
+        oid = pilot.place_pilot_order(
+            TICKER, "yes", "buy", 4, 0.49, purpose="quote_bid")
+
+        assert oid is None
+        assert pilot.halted is True
+        assert pilot._reconciled is False
+        assert "indeterminate order placement" in pilot.halt_reason
+
+    def test_placement_exception_takes_same_fail_closed_path(
+            self, pilot_env, clock, monkeypatch):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+
+        def raise_timeout(**kwargs):
+            raise TimeoutError("venue response lost")
+
+        monkeypatch.setattr(client, "place_order", raise_timeout)
+
+        assert pilot.place_pilot_order(
+            TICKER, "yes", "buy", 4, 0.49,
+            purpose="quote_bid") is None
+        assert pilot.halted is True
+        assert pilot._reconciled is False
+
+
+class TestCancelReplaceSafety:
+    def test_failed_cancel_prevents_replacement_quotes(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        old_oid = pilot.place_pilot_order(
+            TICKER, "yes", "buy", 4, 0.49, purpose="quote_bid")
+        placements_before = client.place_order_calls
+        client.cancel_fail_count = 1
+
+        assert pilot.refresh_market(TICKER) == []
+        assert client.place_order_calls == placements_before
+        assert old_oid in pilot._orders
+        assert pilot._orders[old_oid]["pending_cancel"] is True
+
+
+class TestHaltedFillAccounting:
+    def test_known_fill_is_accounted_while_halted(self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(
+            TICKER, "yes", "buy", 4, 0.49, purpose="quote_bid")
+        client.cancel_fail_count = 99
+        pilot.halt_all("test halt with live order")
+        client.fills_script = [kfill(
+            oid, count=4, yes_price=49, trade_id="halted_fill",
+            created=clock[0],
+        )]
+
+        events = pilot.poll_fills()
+
+        assert [event.fill_id for event in events] == ["halted_fill"]
+        assert pilot.inventory.net_contracts(TICKER) == 4
+
+    def test_unparseable_known_fill_requires_reconciliation(
+            self, pilot_env, clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(
+            TICKER, "yes", "buy", 4, 0.49, purpose="quote_bid")
+        bad_fill = kfill(oid, trade_id="bad_fill", created=clock[0])
+        bad_fill.pop("yes_price")
+        client.fills_script = [bad_fill]
+
+        assert pilot.poll_fills() == []
+        assert pilot.halted is True
+        assert pilot._reconciled is False
+        assert "bad_fill" not in pilot._seen_fill_ids
+        assert pilot.inventory.net_contracts(TICKER) == 0
+
+
+class TestToxicityFailClosed:
+    def test_record_failure_halts_affected_market(self, pilot_env, clock):
+        class RaisingToxic(ToxicFlowDetector):
+            def record_fill(self, *args, **kwargs):
+                raise RuntimeError("toxicity store unavailable")
+
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client, detector=RaisingToxic())
+        oid = pilot.place_pilot_order(
+            TICKER, "yes", "buy", 4, 0.49, purpose="quote_bid")
+        client.fills_script = [kfill(oid, created=clock[0])]
+
+        pilot.poll_fills()
+
+        assert TICKER in pilot._market_halted
+        assert "toxicity accounting failed" in pilot._market_halted[TICKER]
+
+
+class TestShutdownCancellation:
+    def test_stop_retries_until_venue_confirms_no_orders(self, pilot_env,
+                                                         clock):
+        client = FakeKalshiClient()
+        pilot = build_pilot(clock, client=client)
+        oid = pilot.place_pilot_order(
+            TICKER, "yes", "buy", 4, 0.49, purpose="quote_bid")
+        client.open_orders_script = [{"order_id": oid, "ticker": TICKER}]
+        client.cancel_fail_count = 2
+
+        pilot.stop()
+
+        assert client.cancel_order_calls >= 3
+        assert client.get_open_orders() == []
+        assert pilot.resting_orders() == []

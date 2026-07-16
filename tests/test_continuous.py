@@ -1287,3 +1287,16 @@ class TestStartupFailureMirrorsCleanupForceStop:
         )
         # is_alive() must be checked strictly before the state is cleared.
         assert block.index("is_alive()") < block.index("_mm_pilot = None")
+        assert "if thread_stopped:" in block
+        assert "retaining references" in block
+
+
+class TestMMPilotModeIsolation:
+    def test_pilot_startup_requires_dedicated_mode(self):
+        """The feature flag alone must never start the order-producing loop."""
+        import inspect
+        import continuous
+
+        source = inspect.getsource(continuous.run_continuous)
+        assert "config.MM_KALSHI_PILOT_ENABLED" in source
+        assert 'getattr(args, "mode", None) == "mm-pilot"' in source

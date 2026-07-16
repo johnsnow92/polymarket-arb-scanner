@@ -21,8 +21,23 @@ from market_maker import ToxicFlowDetector, VolatilityTracker
 from mm_pilot import KalshiMMPilot
 
 from test_mm_pilot import (TICKER, FakeKalshiClient, RecordingHedger,
-                           build_pilot, live_config, make_book, pilot_env,
-                           clock)
+                           build_pilot, live_config, make_book)
+
+
+@pytest.fixture
+def clock():
+    return [1_000_000.0]
+
+
+@pytest.fixture
+def pilot_env(monkeypatch):
+    """Enable pilot preconditions only for tests that request this fixture."""
+    cfg = live_config()
+    monkeypatch.setattr(cfg, "MM_KALSHI_PILOT_ENABLED", True)
+    monkeypatch.setattr(cfg, "MM_TOXIC_FLOW_ENABLED", True)
+    monkeypatch.setattr(cfg, "MM_VOLATILITY_ADJUSTED_ENABLED", True)
+    monkeypatch.setattr(cfg, "MM_AUTO_HEDGE_ENABLED", True)
+    yield cfg
 
 
 def live_market_maker():
@@ -491,6 +506,7 @@ class TestToctouCrossingGuard:
         client = FakeKalshiClient(
             books={TICKER: make_book(yes_bid=0.60, no_bid=0.60)})  # yes_ask=0.40
         pilot = build_pilot(clock, client=client)
+        pilot.inventory.apply_fill(TICKER, "no", "buy", 5, 0.45)
         oid = pilot.place_pilot_order(TICKER, "yes", "buy", 5, 0.55,
                                       purpose="hedge", reducing=True)
         assert oid is not None

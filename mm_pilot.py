@@ -666,11 +666,9 @@ class KalshiMMPilot:
                                  "reconciliation (not fatal by itself)")
                 persisted = None
 
+        since_ts = int((persisted or {}).get(
+            "last_fill_ts", self._time_fn() - RECONCILE_FALLBACK_LOOKBACK_SECONDS))
         try:
-            positions = self._client.get_positions(raise_on_error=True)
-            since_ts = int((persisted or {}).get(
-                "last_fill_ts", self._time_fn() - RECONCILE_FALLBACK_LOOKBACK_SECONDS))
-            fills = self._client.get_fills(min_ts=since_ts, raise_on_error=True)
             open_orders = self._client.get_open_orders()
         except Exception:
             logger.exception("MM pilot reconcile: venue query failed — "
@@ -682,6 +680,9 @@ class KalshiMMPilot:
         for order in open_orders or []:
             oid = str(order.get("order_id") or order.get("id") or "")
             if not oid:
+                cancel_failures += 1
+                logger.error("MM pilot reconcile: startup order has no id — "
+                             "cannot confirm cancellation")
                 continue
             try:
                 ok = bool(self._client.cancel_order(oid))
@@ -698,6 +699,37 @@ class KalshiMMPilot:
                         f"fail closed, quoting stays disabled until this is "
                         f"resolved manually on the Kalshi UI",
                         {"cancel_failures": cancel_failures})
+            self._reconciled = False
+            return False
+
+        # A successful cancel response is not enough: establish a stable,
+        # order-free point at the venue before snapshotting positions/fills.
+        # Otherwise a late fill can appear in the fills response while being
+        # absent from a position snapshot fetched before cancellation.
+        try:
+            remaining_orders = self._client.get_open_orders()
+        except Exception:
+            logger.exception("MM pilot reconcile: post-cancel confirmation "
+                             "failed — fail closed")
+            self._reconciled = False
+            return False
+        if remaining_orders:
+            self._alert(
+                "MM_PILOT_RECONCILE_FAILED", "CRITICAL",
+                f"MM pilot startup reconciliation still sees "
+                f"{len(remaining_orders)} resting order(s) after cancellation "
+                f"— quoting stays disabled",
+                {"remaining_orders": len(remaining_orders)},
+            )
+            self._reconciled = False
+            return False
+
+        try:
+            positions = self._client.get_positions(raise_on_error=True)
+            fills = self._client.get_fills(min_ts=since_ts, raise_on_error=True)
+        except Exception:
+            logger.exception("MM pilot reconcile: stable venue snapshot failed "
+                             "— fail closed, quoting stays disabled")
             self._reconciled = False
             return False
 
@@ -719,10 +751,11 @@ class KalshiMMPilot:
             try:
                 net = int(float(pos.get("position_fp", 0) or 0))
             except (TypeError, ValueError):
-                logger.warning("MM pilot reconcile: unparsable position_fp "
-                               "%r for %s — treating as flat",
-                               pos.get("position_fp"), ticker)
-                net = 0
+                logger.error("MM pilot reconcile: unparsable position_fp %r "
+                             "for %s — fail closed",
+                             pos.get("position_fp"), ticker)
+                self._reconciled = False
+                return False
             if net == 0:
                 continue
             net_map[ticker] = net
@@ -832,12 +865,9 @@ class KalshiMMPilot:
         # 2. Platform allowlist + hardcoded venue
         if PLATFORM not in config.ENABLED_EXECUTION_PLATFORMS:
             return GateResult(False, "platform_not_allowlisted")
-        # 3. Halted flags
-        if self.halted:
-            return GateResult(False, "pilot_halted")
-        if ticker in self._market_halted and not reducing:
-            return GateResult(False, "market_halted")
-        # 4. Per-order size
+        if self._fills_blind:
+            return GateResult(False, "fills_blind")
+        # 3. Per-order size and inventory-derived reduction status.
         if count < 1:
             return GateResult(False, "order_size")
         if price <= 0 or price >= 1:
@@ -845,16 +875,32 @@ class KalshiMMPilot:
         notional = count * price
         if notional > config.MM_MAX_GROSS_PER_MARKET_USD:
             return GateResult(False, "order_size")
+        signed = PilotInventory.signed_contracts(side, action, count)
+        net_ct = self.inventory.net_contracts(ticker)
+        derived_reducing = (
+            net_ct != 0
+            and (signed > 0) != (net_ct > 0)
+            and count <= abs(net_ct)
+        )
+        # 4. Halted flags. Caller-provided ``reducing=True`` never bypasses
+        # a market halt unless direction and size prove it reduces inventory.
+        if self.halted:
+            return GateResult(False, "pilot_halted")
+        if ticker in self._market_halted and not derived_reducing:
+            return GateResult(False, "market_halted")
         if reducing:
-            # Inventory checks are bypassed for reducing orders only —
-            # caps must never block the exit.
+            if not derived_reducing:
+                reason = ("reducing_oversize" if net_ct != 0
+                          and (signed > 0) != (net_ct > 0)
+                          else "not_reducing")
+                return GateResult(False, reason)
+            # Inventory checks are bypassed only after reduction is derived
+            # from current holdings; caps must never block a valid exit.
             return GateResult(True, "ok_reducing")
         # 5. Per-market inventory caps — both units, most restrictive wins.
         # An order whose fill moves |net| toward zero is reducing-direction
         # (the one-sided quote the section-5 table keeps alive at cap): it
         # passes the inventory checks; accumulating orders are capped.
-        signed = PilotInventory.signed_contracts(side, action, count)
-        net_ct = self.inventory.net_contracts(ticker)
         net_usd = abs(self.inventory.net_usd(ticker))
         projected_ct = net_ct + signed
         accumulating = abs(projected_ct) > abs(net_ct)
@@ -896,6 +942,15 @@ class KalshiMMPilot:
         prevented, and would need its own de-duplication if introduced.
         """
         with self._lock:
+            if reducing:
+                # Clamp at the held position before authorization and before
+                # the venue call. A caller cannot turn ``reducing=True`` into
+                # a position flip by asking to sell more than is held.
+                net_ct = self.inventory.net_contracts(ticker)
+                unit_delta = PilotInventory.signed_contracts(
+                    side, action, 1)
+                if net_ct != 0 and (unit_delta > 0) != (net_ct > 0):
+                    count = min(count, abs(net_ct))
             verdict = self.authorize_order(ticker, side, action, count, price,
                                            reducing=reducing)
             if not verdict.allowed:
@@ -942,18 +997,30 @@ class KalshiMMPilot:
             # Quotes rest GTC; hedges are IOC-style fill_or_kill at touch
             # (unfilled hedges are caught by _check_pending_hedges).
             tif = "fill_or_kill" if purpose == "hedge" else "gtc"
-            resp = self._client.place_order(
-                ticker=ticker, side=side, action=action, count=count,
-                price_dollars=price, time_in_force=tif,
-            )
+            try:
+                resp = self._client.place_order(
+                    ticker=ticker, side=side, action=action, count=count,
+                    price_dollars=price, time_in_force=tif,
+                )
+            except Exception:
+                logger.exception("MM pilot place_order outcome indeterminate "
+                                 "on %s", ticker)
+                self._require_reconciliation(
+                    f"indeterminate order placement on {ticker}")
+                return None
             if resp is None:
-                logger.warning("MM pilot place_order failed on %s", ticker)
+                logger.error("MM pilot place_order returned no response on %s "
+                             "— acceptance is indeterminate", ticker)
+                self._require_reconciliation(
+                    f"indeterminate order placement on {ticker}")
                 return None
             order = resp.get("order", resp) if isinstance(resp, dict) else {}
             order_id = order.get("order_id") or order.get("id")
             if not order_id:
-                logger.warning("MM pilot place_order returned no id on %s",
-                               ticker)
+                logger.error("MM pilot place_order returned no id on %s — "
+                             "acceptance is indeterminate", ticker)
+                self._require_reconciliation(
+                    f"indeterminate order placement on {ticker}")
                 return None
 
         with self._lock:
@@ -1095,6 +1162,12 @@ class KalshiMMPilot:
                     {"reason": reason})
         self._write_decision("halt_all", "*", False, reason)
 
+    def _require_reconciliation(self, reason: str) -> None:
+        """Halt and invalidate venue truth after an indeterminate event."""
+        with self._lock:
+            self._reconciled = False
+        self.halt_all(reason)
+
     # -- gate chain (spec section 6) ------------------------------------------
 
     def _evaluate_gates(self, ticker: str) -> dict:
@@ -1119,6 +1192,9 @@ class KalshiMMPilot:
         if not self._reconciled:
             gate("G0_reconciled", False, "not_reconciled")
             return {"action": "pull", "reason": "not_reconciled"}
+        if self._fills_blind:
+            gate("G0b_fill_sight", False, "fills_blind")
+            return {"action": "pull", "reason": "fills_blind"}
         # G1 kill switch
         g1 = config.MM_KALSHI_PILOT_ENABLED and self._controls.is_enabled()
         if not gate("G1_kill_switch", g1, "ok" if g1 else "kill_switch"):
@@ -1321,7 +1397,11 @@ class KalshiMMPilot:
         # Cancel/replace: pull existing quote orders, then place fresh GTC.
         for order in self.resting_orders(ticker):
             if order["purpose"] in ("quote_bid", "quote_ask"):
-                self._cancel_order(order["order_id"])
+                if not self._cancel_order(order["order_id"]):
+                    logger.warning("MM pilot quote refresh aborted on %s: "
+                                   "existing order %s is still live",
+                                   ticker, order["order_id"])
+                    return []
 
         placed: list[str] = []
         if bid_count >= 1:
@@ -1339,6 +1419,8 @@ class KalshiMMPilot:
         return placed
 
     def refresh_all(self) -> list[str]:
+        if self._fills_blind:
+            return []
         placed: list[str] = []
         for ticker in self.pilot_tickers():
             if self.halted:
@@ -1365,8 +1447,6 @@ class KalshiMMPilot:
 
     def poll_fills(self) -> list[FillEvent]:
         """One fill-poll cycle: fetch, dedupe, attribute, process."""
-        if self.halted:
-            return []
         if self.dry_run:
             raw_fills = self._simulate_dry_fills()
         else:
@@ -1414,18 +1494,18 @@ class KalshiMMPilot:
                                   f"pilot market {ticker}")
                     return events
                 continue  # someone else's market — not ours to account
-            self._mark_seen(fid)
             detect_wall = self._time_fn()
             detect_mono = self._mono_fn()
             event = self._build_event(fid, fill, info)
             if event is None:
-                continue
+                self._require_reconciliation(
+                    f"unparseable fill {fid} on known order {order_id}")
+                return events
+            self._mark_seen(fid)
             self._last_fill_ts = max(self._last_fill_ts, event.created_ts)
             events.append(event)
             self._process_fill(event, info, detect_wall=detect_wall,
                                detect_mono=detect_mono)
-            if self.halted:
-                break
         if not self.halted:
             self._check_pending_hedges()
         self._persist_state()
@@ -1546,6 +1626,12 @@ class KalshiMMPilot:
         # on restart, not from whatever was last saved before this fill.
         self._persist_state()
 
+        # A halt suppresses future quoting and hedging, but not accounting.
+        # poll_fills continues to feed every known-order fill through the
+        # unconditional registry/inventory/log block above.
+        if self.halted:
+            return
+
         # Canary deviation: a resting quote should never be the taker.
         # Fill accounting above already ran and was persisted, so halting
         # here only stops FUTURE activity (quoting, hedging, toxicity/
@@ -1556,6 +1642,7 @@ class KalshiMMPilot:
             return
 
         # 2. Toxicity feed (quote fills only — hedges are deliberate takers).
+        toxicity_failed = False
         if not is_hedge:
             quote_side = "bid" if purpose == "quote_bid" else "ask"
             try:
@@ -1565,7 +1652,12 @@ class KalshiMMPilot:
                         >= config.MM_TOXIC_FLOW_THRESHOLD):
                     self._toxic.trigger_pause(event.ticker)
             except Exception:
-                logger.exception("MM pilot toxicity record failed")
+                logger.exception("MM pilot toxicity record failed for %s",
+                                 event.ticker)
+                self.halt_market(event.ticker, "toxicity accounting failed")
+                toxicity_failed = True
+                if self.halted:
+                    return
 
         # 3. Canary accounting (deviation checks halt the whole pilot).
         # Realized-loss ceiling considers ALL fills — hedge exits are where
@@ -1587,7 +1679,7 @@ class KalshiMMPilot:
             return
 
         # Multi-market toxicity deviation.
-        if self._multi_market_toxicity():
+        if not toxicity_failed and self._multi_market_toxicity():
             self.halt_all("toxicity over threshold on >=2 pilot markets")
             return
 
@@ -1673,8 +1765,9 @@ class KalshiMMPilot:
                 if self._toxic.get_toxicity(ticker) >= config.MM_TOXIC_FLOW_THRESHOLD:
                     toxic += 1
             except Exception as exc:
-                logger.debug("MM pilot toxicity check failed for %s: %s",
-                             ticker, exc)
+                logger.error("MM pilot toxicity check failed for %s: %s — "
+                             "halting market", ticker, exc)
+                self.halt_market(ticker, "toxicity state unavailable")
                 continue
         return toxic >= 2
 
@@ -1865,7 +1958,8 @@ class KalshiMMPilot:
                 if now - last_fills >= config.MM_FILL_POLL_SECONDS:
                     last_fills = now
                     self.poll_fills()
-                if now - last_refresh >= config.MM_REFRESH_INTERVAL:
+                if (not self._fills_blind
+                        and now - last_refresh >= config.MM_REFRESH_INTERVAL):
                     last_refresh = now
                     self.refresh_all()
                 self._loop_error_streak = 0
@@ -1878,9 +1972,63 @@ class KalshiMMPilot:
         self.stop()
 
     def stop(self) -> None:
-        """Cancel all resting pilot orders (SIGTERM / shutdown path)."""
-        cancelled = self.pull_all("pilot stop")
-        logger.info("MM pilot stopped: cancelled %d resting orders", cancelled)
+        """Cancel and verify resting orders with bounded shutdown retries."""
+        cancelled = 0
+        confirmed = False
+        remaining_count = len(self.resting_orders())
+
+        for attempt in range(1, self.MAX_CANCEL_ATTEMPTS + 1):
+            cancelled += self.pull_all("pilot stop")
+            if self.dry_run:
+                remaining_count = len(self.resting_orders())
+                confirmed = remaining_count == 0
+            elif self._client is None:
+                remaining_count = len(self.resting_orders())
+            else:
+                try:
+                    live_orders = list(self._client.get_open_orders() or [])
+                except Exception:
+                    logger.exception("MM pilot shutdown verification failed "
+                                     "on attempt %d", attempt)
+                    live_orders = []
+                    remaining_count = max(1, len(self.resting_orders()))
+                else:
+                    remaining_count = len(live_orders)
+                    confirmed = remaining_count == 0
+                    # Venue-only orders can exist after an indeterminate
+                    # placement response and therefore have no registry row.
+                    # Cancel them directly, then re-query on the next bounded
+                    # attempt before declaring shutdown complete.
+                    for order in live_orders:
+                        oid = str(order.get("order_id") or order.get("id") or "")
+                        if not oid:
+                            continue
+                        with self._lock:
+                            tracked = oid in self._orders
+                        if tracked:
+                            self._cancel_order(oid)
+                        else:
+                            try:
+                                self._client.cancel_order(oid)
+                            except Exception:
+                                logger.exception("MM pilot shutdown cancel "
+                                                 "raised for venue order %s", oid)
+            if confirmed:
+                break
+            logger.warning("MM pilot shutdown cancellation not confirmed "
+                           "(attempt %d/%d, remaining=%d)",
+                           attempt, self.MAX_CANCEL_ATTEMPTS, remaining_count)
+
+        if not confirmed:
+            self._alert(
+                "MM_PILOT_SHUTDOWN_UNCONFIRMED", "CRITICAL",
+                f"MM pilot shutdown exhausted {self.MAX_CANCEL_ATTEMPTS} "
+                f"cancellation attempts with {remaining_count} order(s) "
+                f"possibly live; manual venue verification required",
+                {"remaining_orders": remaining_count},
+            )
+        logger.info("MM pilot stopped: cancellation_confirmed=%s, "
+                    "cancel_attempts=%d", confirmed, cancelled)
         with self._decision_lock:
             if self._decision_fh is not None and not self._decision_fh.closed:
                 self._decision_fh.close()

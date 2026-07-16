@@ -996,7 +996,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     # are not tied to the scan interval. Fails closed at every gate.
     # _mm_pilot / _mm_pilot_thread / _mm_pilot_stop are declared earlier in
     # this function (with the signal handler) — not re-declared here.
-    if config.MM_KALSHI_PILOT_ENABLED:
+    if (config.MM_KALSHI_PILOT_ENABLED
+            and getattr(args, "mode", None) == "mm-pilot"):
         try:
             from mm_pilot import ControlsPoller, KalshiMMPilot
             try:
@@ -1051,8 +1052,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             # If the failure landed after the thread started, signal it now
             # so it cancels any resting orders and exits (fail closed).
             _mm_pilot_stop.set()
+            thread_stopped = True
             if _mm_pilot_thread is not None:
-                _mm_pilot_thread.join(timeout=15)
+                # Thread.start() itself can fail; only join a thread that
+                # actually started.
+                if _mm_pilot_thread.ident is not None:
+                    _mm_pilot_thread.join(timeout=15)
                 # Mirror the end-of-run cleanup path's force-stop symmetry
                 # (CodeRabbit round-2): a thread that started enough to
                 # place live orders but didn't unwind within the join
@@ -1064,8 +1069,16 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         "MM pilot startup-failure thread did not stop in "
                         "15s; forcing order cancel directly.")
                     _mm_pilot.stop()
-            _mm_pilot = None
-            _mm_pilot_thread = None
+                    _mm_pilot_thread.join(timeout=15)
+                thread_stopped = not _mm_pilot_thread.is_alive()
+            if thread_stopped:
+                _mm_pilot = None
+                _mm_pilot_thread = None
+            else:
+                logger.critical(
+                    "MM pilot startup-failure thread is still alive after "
+                    "stop/join; retaining references and keeping the stop "
+                    "signal asserted (fail closed).")
 
     # Initialize reward trackers for liquidity rewards (Layer 3)
     _reward_tracker = None
@@ -2520,6 +2533,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     logger.warning("MM pilot thread did not stop in 15s; "
                                    "forcing order cancel directly.")
                     _mm_pilot.stop()
+                    _mm_pilot_thread.join(timeout=15)
+                    if _mm_pilot_thread.is_alive():
+                        logger.critical(
+                            "MM pilot thread remains alive after forced "
+                            "stop; cancellation retries exhausted or venue "
+                            "call still blocked.")
 
         logger.info("Stopping WebSocket feeds...")
         feed_manager.stop()
