@@ -232,7 +232,7 @@ class WebhookNotifier:
             if resp.status_code < 300:
                 logger.debug("Telegram sent: %s", text[:60])
             else:
-                logger.warning("Telegram returned %d: %s", resp.status_code, _redact_secrets(resp.text[:200]))
+                logger.warning("Telegram returned %d: %s", resp.status_code, _redact_secrets(resp.text)[:200])
         except requests.RequestException as e:
             logger.warning("Telegram request failed: %s", _redact_secrets(str(e)))
 

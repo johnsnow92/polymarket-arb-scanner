@@ -23,7 +23,7 @@ accumulated resolved history.
 
 Fail-closed on partial failures, at two levels:
   - Per-ticker: a market whose candlestick fetch itself FAILS (network/HTTP
-    error — earnings_mention.CandleFetchError) is neither marked seen nor
+    error — signaled by a RuntimeError) is neither marked seen nor
     counted, and the watermark rolls back so it's retried next cycle. This
     is distinct from a market that has NO usable candle because it
     genuinely never traded in the T-24h window (e.g. its whole lifetime was
@@ -33,7 +33,7 @@ Fail-closed on partial failures, at two levels:
     identical — "returns None either way" — which permanently stuck a
     market that could never resolve in the retry queue).
   - Whole-cycle: kalshi_api.fetch_settled_markets raises
-    PaginationIncompleteError rather than returning a silently-partial
+    RuntimeError rather than returning a silently-partial
     list if a page fails or the page budget is exhausted with more data
     available. main() treats that as a total cycle failure: no state
     change, no alert, try again next scheduled run.
@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -82,7 +83,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from earnings_mention import (  # noqa: E402
-    CandleFetchError,
     OosStats,
     Resolved,
     _close_time,
@@ -93,7 +93,7 @@ from earnings_mention import (  # noqa: E402
     price_at_t24h,
     verdict,
 )
-from kalshi_api import KalshiClient, PaginationIncompleteError  # noqa: E402
+from kalshi_api import KalshiClient  # noqa: E402
 from notifier import WebhookNotifier  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -153,25 +153,59 @@ def _close_ts(market: dict) -> int | None:
 def load_state(path: Path | None) -> dict:
     """Load {watermark_ts, seen, resolved, last_verdict, first_seen_ts}.
 
-    A missing file or corrupt JSON degrades to an empty state rather than
-    crashing the cron — the OOS sample just starts (or restarts) from zero.
+    Only a missing file is fresh state. Corrupt or schema-invalid state raises
+    so the scheduled job cannot silently discard accumulated OOS evidence.
     """
     if not path or not path.exists():
         return _empty_state()
-    try:
-        data = json.loads(path.read_text())
-    except (ValueError, OSError) as exc:
-        logger.warning("OOS state read failed (%s) — treating as empty", exc)
-        return _empty_state()
+    data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        return _empty_state()
-    return {
+        raise ValueError("OOS state must be a JSON object")
+    state = {
         "watermark_ts": data.get("watermark_ts"),
         "seen": data.get("seen", []),
         "resolved": data.get("resolved", []),
         "last_verdict": data.get("last_verdict", "continue"),
         "first_seen_ts": data.get("first_seen_ts"),
     }
+    watermark = state["watermark_ts"]
+    if watermark is not None and (
+        isinstance(watermark, bool) or not isinstance(watermark, int) or watermark < 0
+    ):
+        raise ValueError("OOS state watermark_ts must be null or a non-negative integer")
+    if not isinstance(state["seen"], list) or not all(
+        isinstance(ticker, str) and ticker for ticker in state["seen"]
+    ):
+        raise ValueError("OOS state seen must be a list of non-empty ticker strings")
+    if len(state["seen"]) != len(set(state["seen"])):
+        raise ValueError("OOS state seen contains duplicate tickers")
+    if not isinstance(state["resolved"], list):
+        raise ValueError("OOS state resolved must be a list")
+    for item in state["resolved"]:
+        if not isinstance(item, dict) or not {
+            "ticker", "yes_price", "outcome", "series", "resolved_ts",
+        }.issubset(item):
+            raise ValueError("OOS state contains a malformed resolved row")
+        for name in ("ticker", "series", "resolved_ts"):
+            if not isinstance(item[name], str) or not item[name]:
+                raise ValueError(f"OOS resolved row {name} must be a non-empty string")
+        for name in ("yes_price", "outcome"):
+            value = item[name]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"OOS resolved row {name} must be a finite number")
+        if not 0.0 <= float(item["yes_price"]) <= 1.0 or float(item["outcome"]) not in (0.0, 1.0):
+            raise ValueError("OOS resolved row has an invalid price or outcome")
+        _resolved_from_dict(item)
+        if not isinstance(item["resolved_ts"], str):
+            raise ValueError("OOS resolved_ts must be a string")
+    if state["last_verdict"] not in {"continue", "pursue", "kill"}:
+        raise ValueError("OOS state last_verdict is invalid")
+    first_seen = state["first_seen_ts"]
+    if first_seen is not None:
+        parsed = datetime.fromisoformat(first_seen)
+        if parsed.tzinfo is None:
+            raise ValueError("OOS state first_seen_ts must include a timezone")
+    return state
 
 
 def save_state(path: Path | None, state: dict) -> None:
@@ -183,12 +217,15 @@ def save_state(path: Path | None, state: dict) -> None:
     """
     if not path:
         return
+    tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(state))
+        tmp.write_text(
+            json.dumps(state, sort_keys=True, allow_nan=False), encoding="utf-8"
+        )
         os.replace(tmp, path)
-    except OSError as exc:
-        logger.warning("OOS state write failed: %s", exc)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _check_state_anomaly(state: dict, now: datetime, min_age_days: float = ANOMALY_MIN_AGE_DAYS) -> str | None:
@@ -264,12 +301,11 @@ def run_cycle(client, now: datetime, state: dict) -> dict:
 
     for market in raw_markets:
         ticker = str(market.get("ticker", ""))
-        if not ticker or ticker in seen:
-            continue
-
         close_ts = _close_ts(market)
         if close_ts is not None:
             max_close_ts = max(max_close_ts, close_ts + 1)
+        if not ticker or ticker in seen:
+            continue
 
         if not classify_market(market):
             continue  # not mention/KPI -- watermark advancement above is enough
@@ -280,7 +316,7 @@ def run_cycle(client, now: datetime, state: dict) -> dict:
 
         try:
             price = price_at_t24h(client, market)
-        except CandleFetchError as exc:
+        except RuntimeError as exc:
             # Transient: the candlestick request itself failed. Not seen,
             # not counted -- retried next cycle via the watermark rollback
             # below.
@@ -317,16 +353,18 @@ def run_cycle(client, now: datetime, state: dict) -> dict:
     new_watermark = (min_failed_close_ts - 1) if min_failed_close_ts is not None else max_close_ts
 
     stats = compute_oos_stats(resolved_objs)
+    prev_verdict = state.get("last_verdict", "continue")
     verdict_str = verdict(stats)
+    persisted_verdict = prev_verdict if failed_tickers else verdict_str
 
     return {
         "watermark_ts": new_watermark,
         "seen": sorted(seen),
         "resolved": resolved_dicts,
-        "last_verdict": verdict_str,
+        "last_verdict": persisted_verdict,
         "first_seen_ts": state.get("first_seen_ts") or now.isoformat(),
         "_stats": stats,
-        "_prev_verdict": state.get("last_verdict", "continue"),
+        "_prev_verdict": prev_verdict,
         "_new_resolved": len(newly_resolved),
         "_failed_tickers": failed_tickers,
     }
@@ -415,7 +453,7 @@ def main() -> None:
 
     try:
         result = run_cycle(client, now, state)
-    except PaginationIncompleteError as exc:
+    except RuntimeError as exc:
         # The discovery step itself couldn't retrieve a complete result set
         # this cycle (a page failed, or the page budget ran out with more
         # data available). Treating a partial list as complete risks a

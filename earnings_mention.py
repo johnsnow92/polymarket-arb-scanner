@@ -82,21 +82,6 @@ class _MarketClient(Protocol):
                            *a, **k) -> list[dict] | None: ...
 
 
-class CandleFetchError(Exception):
-    """Raised by price_at_t24h when the candlestick request itself failed
-    (network/HTTP error, signaled by fetch_candlesticks returning None) —
-    a TRANSIENT condition the caller should retry.
-
-    Distinct from a plain ``None`` return from price_at_t24h, which means
-    the request succeeded (or wasn't attempted because close_time/ticker/
-    series couldn't be determined) but there is definitively no usable
-    price — e.g. a market whose entire lifetime was shorter than the T-24h
-    lookback window. That is a PERMANENT condition: retrying can never
-    produce different data, so the caller should mark the ticker
-    seen/excluded rather than retry it forever.
-    """
-
-
 @dataclass(frozen=True)
 class Resolved:
     """A snapshot joined to its realized binary settlement outcome."""
@@ -231,7 +216,7 @@ def price_at_t24h(client: _MarketClient, market: dict) -> float | None:
     still open.
 
     Raises:
-        CandleFetchError: if fetch_candlesticks signals the request itself
+        RuntimeError: if fetch_candlesticks signals the request itself
             failed (returns None) — transient, caller should retry.
 
     Returns:
@@ -241,7 +226,7 @@ def price_at_t24h(client: _MarketClient, market: dict) -> float | None:
         market whose entire lifetime was shorter than the T-24h lookback
         window (a genuinely empty candle list from a successful request) or
         an unusable candle. This is PERMANENT: retrying will never produce
-        different data, unlike a CandleFetchError.
+        different data, unlike the transient RuntimeError path.
     """
     close = _close_time(market)
     ticker = str(market.get("ticker", ""))
@@ -252,7 +237,7 @@ def price_at_t24h(client: _MarketClient, market: dict) -> float | None:
     end_ts = int((close - timedelta(hours=CANDLE_WINDOW_END_H)).timestamp())
     candles = client.fetch_candlesticks(series, ticker, start_ts, end_ts, CANDLE_PERIOD_MIN)
     if candles is None:
-        raise CandleFetchError(f"candlestick fetch failed for {ticker}")
+        raise RuntimeError(f"candlestick fetch failed for {ticker}")
     if not candles:
         return None  # permanent -- request succeeded, genuinely no data in window
     return _candle_yes_price(candles[-1])
@@ -300,8 +285,8 @@ def compute_oos_stats(resolved: Iterable[Resolved]) -> OosStats:
     }
     return OosStats(
         n=n,
-        mean_richness_pts=round(mean_pts, 3),
-        z=round(z, 3),
+        mean_richness_pts=mean_pts,
+        z=z,
         by_category=cat_stats,
     )
 

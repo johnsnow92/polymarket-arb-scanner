@@ -461,7 +461,7 @@ class TestKalshiFetchData:
         complete -- a caller advancing a time watermark off a silently
         partial list could skip markets forever."""
         client.session.request.return_value = _mock_response(500)
-        with pytest.raises(kalshi_api.PaginationIncompleteError):
+        with pytest.raises(RuntimeError):
             client.fetch_settled_markets(min_close_ts=1000)
 
     @patch("kalshi_api._rate_limit")
@@ -471,7 +471,7 @@ class TestKalshiFetchData:
         page1 = _mock_response(200, {"markets": [{"ticker": "M1"}], "cursor": "abc"})
         page2 = _mock_response(500)
         client.session.request.side_effect = [page1, page2]
-        with pytest.raises(kalshi_api.PaginationIncompleteError):
+        with pytest.raises(RuntimeError):
             client.fetch_settled_markets(min_close_ts=1000)
 
     @patch("kalshi_api._rate_limit")
@@ -481,9 +481,17 @@ class TestKalshiFetchData:
         a silently-truncated list."""
         page = _mock_response(200, {"markets": [{"ticker": "M1"}], "cursor": "still-more"})
         client.session.request.return_value = page
-        with pytest.raises(kalshi_api.PaginationIncompleteError):
+        with pytest.raises(RuntimeError):
             client.fetch_settled_markets(min_close_ts=1000, max_pages=3)
         assert client.session.request.call_count == 3
+
+    @patch("kalshi_api._rate_limit")
+    def test_fetch_settled_markets_continues_through_empty_live_cursor(self, mock_rl, client):
+        page1 = _mock_response(200, {"markets": [], "cursor": "abc"})
+        page2 = _mock_response(200, {"markets": [{"ticker": "M2"}], "cursor": ""})
+        client.session.request.side_effect = [page1, page2]
+        assert client.fetch_settled_markets(min_close_ts=1000) == [{"ticker": "M2"}]
+        assert client.session.request.call_count == 2
 
     @patch("kalshi_api._rate_limit")
     def test_fetch_settled_markets_sends_status_and_min_close_ts(self, mock_rl, client):

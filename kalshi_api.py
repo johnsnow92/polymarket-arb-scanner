@@ -82,20 +82,6 @@ class _RateLimitError(Exception):
     pass
 
 
-class PaginationIncompleteError(Exception):
-    """Raised when a paginated fetch could not retrieve the complete result
-    set — either a page request failed partway through pagination, or the
-    max_pages budget was exhausted while the cursor was still live.
-
-    Callers must treat this as a total failure for the call, never as
-    "here's what we got so far": cursor order is not guaranteed to be
-    sorted by any caller-meaningful field (e.g. close_time), so a silently
-    partial result could be missing entries earlier than ones already
-    fetched. A caller that advances a time-based watermark off a partial
-    result could permanently skip the missed entries.
-    """
-
-
 class KalshiClient:
     """Kalshi API client with RSA-PSS API key authentication."""
 
@@ -273,7 +259,7 @@ class KalshiClient:
             'result', 'ticker', 'event_ticker', 'close_time', etc.).
 
         Raises:
-            PaginationIncompleteError: if any page request fails, or if
+            RuntimeError: if any page request fails, or if
                 max_pages is exhausted while the cursor is still live —
                 never returns a silently-partial list.
         """
@@ -285,7 +271,7 @@ class KalshiClient:
                 params["cursor"] = cursor
             resp = self._request("GET", "/markets", params=params)
             if not resp or resp.status_code != 200:
-                raise PaginationIncompleteError(
+                raise RuntimeError(
                     f"Kalshi settled-markets request failed mid-pagination: "
                     f"{resp.status_code if resp else 'no response'} ({len(out)} markets fetched so far)"
                 )
@@ -293,10 +279,10 @@ class KalshiClient:
             markets = data.get("markets", [])
             out.extend(markets)
             cursor = data.get("cursor")
-            if not cursor or not markets:
+            if not cursor:
                 break
         else:
-            raise PaginationIncompleteError(
+            raise RuntimeError(
                 f"Kalshi settled-markets pagination did not finish within max_pages={max_pages} "
                 f"({len(out)} markets fetched, cursor still live) — raise max_pages or narrow min_close_ts"
             )

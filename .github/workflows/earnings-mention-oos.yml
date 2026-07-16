@@ -5,8 +5,8 @@ name: Earnings-Mention OOS Logger
 # earnings-mention markets that have SETTLED since the last watermark,
 # reconstructs each one's T-24h YES price via candlesticks, and accumulates
 # the OOS richness verdict toward the pre-registered 8/3 gate.
-# Detection/logging only — no order ever places here. Runs Sundays ~09:30 ET
-# (13:30 UTC), offset from the LIP scan (12:13 UTC) to avoid runner
+# Detection/logging only — no order ever places here. Runs Sundays at a fixed
+# 13:30 UTC, offset from the LIP scan (12:13 UTC) to avoid runner
 # contention.
 #
 # State durability: the primary restore path is actions/cache (this repo's

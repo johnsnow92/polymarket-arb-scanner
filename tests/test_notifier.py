@@ -192,6 +192,19 @@ class TestSecretRedaction:
             n._send_telegram("test message")
         assert "PLACEHOLDERNOTREALXXTOKEN" not in caplog.text
 
+    def test_telegram_redacts_before_response_truncation(self, caplog):
+        n = WebhookNotifier("telegram")
+        token = "123456:BOUNDARYPLACEHOLDERNOTREALTOKEN"
+        n._telegram_token = token
+        n._telegram_chat_id = "999"
+        n._session = MagicMock()
+        resp = MagicMock(status_code=404)
+        resp.text = "x" * 180 + f"/bot{token}/sendMessage"
+        n._session.post.return_value = resp
+        with caplog.at_level(logging.WARNING):
+            n._send_telegram("test message")
+        assert "BOUNDARYPLACEHOLDER" not in caplog.text
+
     def test_callmebot_connection_error_does_not_leak_apikey_or_phone(self, caplog):
         n = WebhookNotifier("callmebot")
         n._callmebot_phone = "15551234567"

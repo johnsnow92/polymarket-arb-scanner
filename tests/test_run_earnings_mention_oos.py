@@ -10,15 +10,16 @@ failure. All network is faked via a duck-typed client — no live Kalshi calls.
 from __future__ import annotations
 
 import os
+import json
 import sys
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from earnings_mention import OosStats
-from kalshi_api import PaginationIncompleteError
 from scripts.run_earnings_mention_oos import (
     _check_state_anomaly,
     _format_failure_notice,
@@ -35,7 +36,7 @@ from scripts.run_earnings_mention_oos import (
 #
 # fetch_candlesticks contract (matches kalshi_api.KalshiClient after the
 # CodeRabbit/Codex fixes): a ticker mapped to None simulates a TRANSIENT
-# request failure (price_at_t24h raises CandleFetchError); a ticker mapped
+# request failure (price_at_t24h raises RuntimeError); a ticker mapped
 # to [] (or simply absent from the table) simulates a successful request
 # that found no candles in the window -- PERMANENT, price_at_t24h returns
 # None without raising. These are NOT interchangeable.
@@ -49,7 +50,7 @@ class FakeClient:
 
     def fetch_settled_markets(self, min_close_ts, *a, **k):
         if self._raise_pagination_error:
-            raise PaginationIncompleteError("simulated incomplete pagination")
+            raise RuntimeError("simulated incomplete pagination")
         return self._settled
 
     def fetch_candlesticks(self, series_ticker, ticker, start_ts, end_ts, period_interval=60):
@@ -94,15 +95,32 @@ class TestState:
     def test_load_state_none_path_returns_empty(self):
         assert load_state(None) == _fresh_state()
 
-    def test_load_state_corrupt_json_returns_empty(self, tmp_path):
+    def test_load_state_corrupt_json_aborts(self, tmp_path):
         path = tmp_path / "state.json"
         path.write_text("{not valid json")
-        assert load_state(path) == _fresh_state()
+        with pytest.raises(ValueError):
+            load_state(path)
 
-    def test_load_state_non_dict_json_returns_empty(self, tmp_path):
+    def test_load_state_non_dict_json_aborts(self, tmp_path):
         path = tmp_path / "state.json"
         path.write_text("[1, 2, 3]")
-        assert load_state(path) == _fresh_state()
+        with pytest.raises(ValueError, match="JSON object"):
+            load_state(path)
+
+    @pytest.mark.parametrize("key,value", [
+        ("seen", None),
+        ("seen", {"M1": True}),
+        ("resolved", {}),
+        ("watermark_ts", True),
+        ("last_verdict", "maybe"),
+    ])
+    def test_load_state_schema_invalid_aborts(self, tmp_path, key, value):
+        path = tmp_path / "state.json"
+        state = _fresh_state()
+        state[key] = value
+        path.write_text(json.dumps(state))
+        with pytest.raises(ValueError):
+            load_state(path)
 
     def test_save_and_load_roundtrip(self, tmp_path):
         path = tmp_path / "state.json"
@@ -124,6 +142,17 @@ class TestState:
         path = tmp_path / "state.json"
         save_state(path, _fresh_state())
         assert path.exists()
+        assert not (tmp_path / "state.json.tmp").exists()
+
+    def test_save_failure_preserves_existing_state(self, tmp_path, monkeypatch):
+        path = tmp_path / "state.json"
+        path.write_text('{"original": true}')
+        monkeypatch.setattr("scripts.run_earnings_mention_oos.os.replace", MagicMock(
+            side_effect=OSError("disk full")
+        ))
+        with pytest.raises(OSError, match="disk full"):
+            save_state(path, _fresh_state())
+        assert path.read_text() == '{"original": true}'
         assert not (tmp_path / "state.json.tmp").exists()
 
 
@@ -211,11 +240,19 @@ class TestRunCycle:
         result = run_cycle(client, NOW, state)
         assert result["resolved"] == []
         assert client.candlestick_tickers == []  # never even attempted
-        assert result["watermark_ts"] == 0  # unchanged -- the only candidate was already seen
+        assert result["watermark_ts"] == CLOSE_TS + 1
+
+    def test_seen_later_market_advances_watermark_during_rollback_catchup(self):
+        earlier = _market("M1", "2026-07-05T00:00:00Z", result="yes")
+        later = _market("M2", CLOSE_ISO, result="yes")
+        client = FakeClient(settled=[earlier, later], candles={"M1": [_candle("0.30")]})
+        state = {**_fresh_state(), "watermark_ts": 0, "seen": ["M2"]}
+        result = run_cycle(client, NOW, state)
+        assert result["watermark_ts"] == CLOSE_TS + 1
 
     def test_candlestick_request_failure_is_not_marked_seen_and_rolls_back_watermark(self):
         """candles={"M1": None} simulates a TRANSIENT request failure
-        (price_at_t24h raises CandleFetchError) -- must be retried, not
+        (price_at_t24h raises RuntimeError) -- must be retried, not
         excluded."""
         market = _market("M1", CLOSE_ISO, result="yes")
         client = FakeClient(settled=[market], candles={"M1": None})
@@ -263,8 +300,16 @@ class TestRunCycle:
         markets fetch risks a biased verdict or a watermark advanced past
         markets never actually seen."""
         client = FakeClient(raise_pagination_error=True)
-        with pytest.raises(PaginationIncompleteError):
+        with pytest.raises(RuntimeError):
             run_cycle(client, NOW, _fresh_state())
+
+    def test_failed_cycle_preserves_previous_verdict(self):
+        market = _market("M1", CLOSE_ISO, result="yes")
+        client = FakeClient(settled=[market], candles={"M1": None})
+        state = {**_fresh_state(), "watermark_ts": 0, "last_verdict": "pursue"}
+        result = run_cycle(client, NOW, state)
+        assert result["_failed_tickers"] == ["M1"]
+        assert result["last_verdict"] == "pursue"
 
     def test_resolved_history_accumulates_across_cycles(self):
         market1 = _market("M1", CLOSE_ISO, result="yes")
