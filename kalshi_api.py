@@ -231,7 +231,11 @@ class KalshiClient:
             The market dict (includes 'status' and, once resolved, 'result')
             or None on failure/not-found.
         """
-        resp = self._request("GET", f"/markets/{ticker}")
+        try:
+            resp = self._request("GET", f"/markets/{ticker}")
+        except Exception as exc:
+            logger.warning("Kalshi fetch_market failed for %s: %s", ticker, exc)
+            return None
         if resp is not None and resp.status_code == 200:
             data = resp.json()
             return data.get("market", data)
@@ -269,7 +273,13 @@ class KalshiClient:
             params: dict = {"status": "settled", "limit": limit, "min_close_ts": min_close_ts}
             if cursor:
                 params["cursor"] = cursor
-            resp = self._request("GET", "/markets", params=params)
+            try:
+                resp = self._request("GET", "/markets", params=params)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Kalshi settled-markets request failed mid-pagination: "
+                    f"{type(exc).__name__} ({len(out)} markets fetched so far)"
+                ) from exc
             if not resp or resp.status_code != 200:
                 raise RuntimeError(
                     f"Kalshi settled-markets request failed mid-pagination: "

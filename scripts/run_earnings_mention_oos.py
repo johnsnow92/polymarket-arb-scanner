@@ -181,6 +181,7 @@ def load_state(path: Path | None) -> dict:
         raise ValueError("OOS state seen contains duplicate tickers")
     if not isinstance(state["resolved"], list):
         raise ValueError("OOS state resolved must be a list")
+    resolved_tickers: set[str] = set()
     for item in state["resolved"]:
         if not isinstance(item, dict) or not {
             "ticker", "yes_price", "outcome", "series", "resolved_ts",
@@ -189,6 +190,9 @@ def load_state(path: Path | None) -> dict:
         for name in ("ticker", "series", "resolved_ts"):
             if not isinstance(item[name], str) or not item[name]:
                 raise ValueError(f"OOS resolved row {name} must be a non-empty string")
+        if item["ticker"] in resolved_tickers:
+            raise ValueError("OOS state contains duplicate resolved tickers")
+        resolved_tickers.add(item["ticker"])
         for name in ("yes_price", "outcome"):
             value = item[name]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -198,6 +202,8 @@ def load_state(path: Path | None) -> dict:
         _resolved_from_dict(item)
         if not isinstance(item["resolved_ts"], str):
             raise ValueError("OOS resolved_ts must be a string")
+    if not resolved_tickers.issubset(set(state["seen"])):
+        raise ValueError("OOS resolved tickers must also be present in seen")
     if state["last_verdict"] not in {"continue", "pursue", "kill"}:
         raise ValueError("OOS state last_verdict is invalid")
     first_seen = state["first_seen_ts"]
@@ -296,6 +302,7 @@ def run_cycle(client, now: datetime, state: dict) -> dict:
     newly_resolved: list[Resolved] = []
     newly_seen: set[str] = set()
     failed_tickers: list[str] = []
+    processed_tickers: set[str] = set()
     max_close_ts = watermark
     min_failed_close_ts: int | None = None
 
@@ -304,8 +311,9 @@ def run_cycle(client, now: datetime, state: dict) -> dict:
         close_ts = _close_ts(market)
         if close_ts is not None:
             max_close_ts = max(max_close_ts, close_ts + 1)
-        if not ticker or ticker in seen:
+        if not ticker or ticker in seen or ticker in processed_tickers:
             continue
+        processed_tickers.add(ticker)
 
         if not classify_market(market):
             continue  # not mention/KPI -- watermark advancement above is enough

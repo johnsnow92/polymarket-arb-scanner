@@ -425,6 +425,10 @@ class TestKalshiFetchData:
         client.session.request.return_value = _mock_response(404)
         assert client.fetch_market("NOPE") is None
 
+    def test_fetch_market_returns_none_when_request_raises(self, client):
+        client._request = MagicMock(side_effect=RuntimeError("transport failed"))
+        assert client.fetch_market("NOPE") is None
+
     @patch("kalshi_api._rate_limit")
     def test_fetch_market_handles_unwrapped_response(self, mock_rl, client):
         """Some responses may not nest under 'market' — falls back to the raw dict."""
@@ -462,6 +466,11 @@ class TestKalshiFetchData:
         partial list could skip markets forever."""
         client.session.request.return_value = _mock_response(500)
         with pytest.raises(RuntimeError):
+            client.fetch_settled_markets(min_close_ts=1000)
+
+    def test_fetch_settled_markets_translates_request_exception(self, client):
+        client._request = MagicMock(side_effect=RuntimeError("transport failed"))
+        with pytest.raises(RuntimeError, match="0 markets fetched"):
             client.fetch_settled_markets(min_close_ts=1000)
 
     @patch("kalshi_api._rate_limit")

@@ -135,6 +135,30 @@ class TestState:
         save_state(path, state)
         assert load_state(path) == state
 
+    def test_load_state_rejects_duplicate_resolved_tickers(self, tmp_path):
+        path = tmp_path / "state.json"
+        row = {
+            "ticker": "M1", "yes_price": 0.3, "outcome": 1.0,
+            "series": "S", "resolved_ts": NOW.isoformat(),
+        }
+        state = {**_fresh_state(), "seen": ["M1"], "resolved": [row, row]}
+        path.write_text(json.dumps(state))
+        with pytest.raises(ValueError, match="duplicate resolved"):
+            load_state(path)
+
+    def test_load_state_requires_resolved_ticker_in_seen(self, tmp_path):
+        path = tmp_path / "state.json"
+        state = {
+            **_fresh_state(),
+            "resolved": [{
+                "ticker": "M1", "yes_price": 0.3, "outcome": 1.0,
+                "series": "S", "resolved_ts": NOW.isoformat(),
+            }],
+        }
+        path.write_text(json.dumps(state))
+        with pytest.raises(ValueError, match="also be present in seen"):
+            load_state(path)
+
     def test_save_state_noop_when_path_none(self):
         save_state(None, _fresh_state())  # must not raise
 
@@ -213,6 +237,16 @@ class TestRunCycle:
         assert result["seen"] == ["M1"]
         assert result["_new_resolved"] == 1
         assert result["watermark_ts"] == CLOSE_TS + 1
+
+    def test_duplicate_discovery_row_is_counted_once(self):
+        market = _market("M1", CLOSE_ISO, result="yes")
+        client = FakeClient(
+            settled=[market, dict(market)], candles={"M1": [_candle("0.30")]}
+        )
+        result = run_cycle(client, NOW, {**_fresh_state(), "watermark_ts": 0})
+        assert [row["ticker"] for row in result["resolved"]] == ["M1"]
+        assert result["_stats"].n == 1
+        assert client.candlestick_tickers == ["M1"]
 
     def test_non_mention_market_advances_watermark_but_is_not_tracked_seen(self):
         market = _market("BTC1", CLOSE_ISO, result="yes", title="Will BTC hit 100k?", series_ticker="KXBTC")
