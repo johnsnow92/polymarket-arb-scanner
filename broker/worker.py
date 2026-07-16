@@ -199,10 +199,10 @@ def main() -> int:
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_args: stop.set())
-    poll = float(os.getenv("BROKER_POLL_SECONDS", "5"))
-    if not math.isfinite(poll) or poll <= 0:
-        raise RuntimeError("BROKER_POLL_SECONDS must be finite and > 0")
     try:
+        poll = float(os.getenv("BROKER_POLL_SECONDS", "5"))
+        if not math.isfinite(poll) or poll <= 0:
+            raise RuntimeError("BROKER_POLL_SECONDS must be finite and > 0")
         while not stop.is_set():
             result = worker.run_once()
             if result < 0:

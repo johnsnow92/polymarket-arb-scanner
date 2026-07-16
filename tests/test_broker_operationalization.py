@@ -21,6 +21,7 @@ from broker.adapters import (
 from broker.broker import ExecutionResult, IntentExecutors, PolicyBroker
 from broker.queue import HALT_SCOPE_CAPITAL, STATUS_EXECUTED, Intent, IntentQueue
 from broker.worker import BrokerWorker
+import broker.worker as worker_module
 from broker_helpers import GATE_CONFIG, healthy_sources, make_policy
 
 
@@ -157,6 +158,20 @@ class TestStoredProcessing:
         broker.escalate.assert_called_once()
 
 
+class TestWorkerEntrypoint:
+    def test_invalid_poll_still_releases_lease(self, monkeypatch):
+        worker = MagicMock()
+        worker.acquire.return_value = True
+        monkeypatch.setattr(worker_module, "build_worker", lambda: worker)
+        monkeypatch.setattr(sys, "argv", ["policy-broker"])
+        monkeypatch.setenv("BROKER_POLL_SECONDS", "nan")
+
+        with pytest.raises(RuntimeError, match="finite and > 0"):
+            worker_module.main()
+
+        worker.close.assert_called_once()
+
+
 class TestAuthoritySnapshot:
     def _snapshot(self):
         now = datetime.now(timezone.utc).isoformat()
@@ -195,6 +210,13 @@ class TestAuthoritySnapshot:
         link.symlink_to(target)
         with pytest.raises(RuntimeError, match="symlink"):
             JsonAuthoritySource(link, repo_root)
+
+    def test_missing_snapshot_is_reported_as_runtime_error(self, tmp_path):
+        with pytest.raises(RuntimeError, match="cannot be resolved"):
+            JsonAuthoritySource(
+                tmp_path / "missing-authority.json",
+                Path(__file__).parents[1],
+            )
 
 
 class TestCommandExecutors:

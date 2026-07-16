@@ -25,7 +25,10 @@ def _outside_repo(path: str | Path, repo_root: Path, what: str) -> Path:
     raw = Path(path).expanduser()
     if raw.is_symlink():
         raise RuntimeError(f"{what} must not be a symlink: {raw}")
-    resolved = raw.resolve(strict=True)
+    try:
+        resolved = raw.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"{what} cannot be resolved: {raw}: {exc}") from exc
     try:
         resolved.relative_to(repo_root.resolve())
     except ValueError:
