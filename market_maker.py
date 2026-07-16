@@ -258,15 +258,26 @@ class QuoteManager:
         Before this, "cancelling" only cleared the local dict — a live
         resting order would survive process death. Dry-run order IDs
         (``dry_`` prefix) never reach the exchange.
+
+        Args:
+            order_id: Venue order identifier, or a ``dry_`` synthetic ID.
+            trader: Venue client whose ``cancel_order`` must explicitly
+                confirm a live cancellation.
+
+        Returns:
+            True for a synthetic dry-run cancellation or an explicitly
+            confirmed live cancellation; False otherwise.
         """
-        if trader is None or order_id.startswith("dry_"):
+        if order_id.startswith("dry_"):
             return True
+        if trader is None:
+            return False
         try:
             result = trader.cancel_order(order_id)
-        except Exception as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("Live cancel failed for %s: %s", order_id, exc)
             return False
-        return result is not False
+        return result is True
 
     def cancel_quote(self, order_id: str, trader=None) -> bool:
         """Cancel a resting order.
@@ -657,7 +668,18 @@ class CrossPlatformMaker:
         self.auto_hedge_enabled = auto_hedge_enabled
         self.dry_run = dry_run
         self._pairs: dict[str, dict] = {}
+        self._traders: dict[str, object] = {}
         self._lock = threading.Lock()
+
+    def _cancel_market_orders(self, market_key: str) -> bool:
+        """Cancel tracked legs without forgetting unconfirmed live orders."""
+        all_cancelled = True
+        for order in self.quote_manager.get_active_orders(market_key):
+            trader = (None if self.dry_run
+                      else self._traders.get(order["platform"]))
+            if not self.quote_manager.cancel_quote(order["order_id"], trader):
+                all_cancelled = False
+        return all_cancelled
 
     def add_pair(
         self,
@@ -683,7 +705,10 @@ class CrossPlatformMaker:
 
     def remove_pair(self, market_key: str) -> None:
         """Stop quoting a paired market; cancel any open legs."""
-        self.quote_manager.cancel_all(market_key)
+        if not self._cancel_market_orders(market_key):
+            logger.warning("CrossPlatformMM retained pair %s because one or "
+                           "more live cancels were unconfirmed", market_key)
+            return
         with self._lock:
             self._pairs.pop(market_key, None)
 
@@ -709,6 +734,8 @@ class CrossPlatformMaker:
                 Pass ``None`` (default) for dry-run.
         """
         traders = traders or {}
+        if not self.dry_run:
+            self._traders.update(traders)
         with self._lock:
             pairs = dict(self._pairs)
         if market_key:
@@ -724,7 +751,10 @@ class CrossPlatformMaker:
             quotes_b = self.quote_engine.calculate_quotes(
                 pair["mid_b"], inv_b, self.max_inventory)
 
-            self.quote_manager.cancel_all(mk)
+            if not self._cancel_market_orders(mk):
+                logger.warning("CrossPlatformMM skipped refresh for %s because "
+                               "a prior live order remains unconfirmed", mk)
+                continue
 
             trader_a = traders.get(pair["platform_a"]) if not self.dry_run else None
             trader_b = traders.get(pair["platform_b"]) if not self.dry_run else None
@@ -778,10 +808,12 @@ class CrossPlatformMaker:
 
         self.quote_manager.record_fill(order_id, size, price)
 
-        # Cancel the sibling leg so we don't accidentally double-fill
-        for other in self.quote_manager.get_active_orders(market_key):
-            if other["order_id"] != order_id:
-                self.quote_manager.cancel_quote(other["order_id"])
+        # Cancel every residual leg (including a partially-filled source
+        # order) so we do not accidentally double-fill. Missing traders or
+        # failed venue cancels retain local truth for retry/escalation.
+        if not self._cancel_market_orders(market_key):
+            logger.error("CrossPlatformMM fill left one or more unconfirmed "
+                         "live orders for %s", market_key)
 
         logger.info(
             "CrossPlatformMM fill: %s %s %s @ %.4f ($%.2f) | inv_a=%.2f inv_b=%.2f",

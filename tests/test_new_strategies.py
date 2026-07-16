@@ -290,6 +290,8 @@ class TestMarketMaker:
         trader = MagicMock()
         trader.cancel_order.side_effect = RuntimeError("venue unavailable")
 
+        assert mgr.cancel_all() == 0
+        assert [order["order_id"] for order in mgr.get_active_orders()] == [oid]
         assert mgr.cancel_all(trader=trader) == 0
         assert [order["order_id"] for order in mgr.get_active_orders()] == [oid]
 
