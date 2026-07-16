@@ -96,12 +96,14 @@ from scans import (
 logger = logging.getLogger(__name__)
 
 
-def _install_asyncio_signal_wakeup(loop, handler) -> bool:
-    """Register signal callbacks through asyncio's selector wakeup pipe."""
+def _wake_asyncio_selector(loop, event) -> bool:
+    """Wake a running asyncio selector without replacing OS signal handlers."""
+    if loop is None:
+        return False
     try:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, handler, sig, None)
-    except (NotImplementedError, RuntimeError, ValueError):
+        loop.call_soon_threadsafe(event.set)
+    except RuntimeError:
+        # The loop may already be closed during repeated shutdown signals.
         return False
     return True
 
@@ -926,6 +928,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     rescan_interval = getattr(args, 'interval', None) or CONFIG_RESCAN_INTERVAL
 
     shutdown_event = asyncio.Event()
+    _signal_loop = None
 
     # Plan 10 / Codex round-2 finding #3: declared here (not later, where
     # the MM pilot setup block used to create them) so the signal handler
@@ -951,6 +954,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         # all resting orders via stop() as soon as it notices — idempotent
         # and safe to set here even when the pilot was never enabled.
         _mm_pilot_stop.set()
+        # Keep the direct ``signal.signal`` path above so the pilot stop flag
+        # is asserted even while the event loop is inside synchronous work.
+        # Then wake asyncio's selector through its self-pipe so the outer loop
+        # enters cleanup immediately instead of sleeping until its timeout.
+        _wake_asyncio_selector(_signal_loop, shutdown_event)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -1451,16 +1459,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 await asyncio.sleep(1800)  # Retry after 30 minutes
 
     async def _continuous_loop():
-        # ``signal.signal`` above updates the Events, but a synchronous Python
-        # signal handler does not reliably wake an asyncio selector that is
-        # blocked in ``wait_for`` on macOS.  Register the same callback through
-        # the running loop as well: asyncio's self-pipe wakes the selector
-        # immediately, so SIGINT/SIGTERM can enter the order-cancellation and
-        # task-cleanup path without waiting for a scan/monitor timeout.
-        # Windows and non-main-thread event loops do not support this; the
-        # synchronous handlers remain installed as the portable fallback.
-        _install_asyncio_signal_wakeup(
-            asyncio.get_running_loop(), _signal_handler)
+        # Capture the running loop for the direct OS signal handler.  Its
+        # call_soon_threadsafe wakeup preserves immediate pilot cancellation
+        # while also interrupting a selector wait on macOS.
+        nonlocal _signal_loop
+        _signal_loop = asyncio.get_running_loop()
 
         ws_task = None
         priority_consumer_task = None

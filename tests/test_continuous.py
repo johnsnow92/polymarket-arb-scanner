@@ -1252,27 +1252,25 @@ class TestSignalHandlerStopsMMPilotImmediately:
 
 
 class TestAsyncioSignalWakeup:
-    def test_registers_both_wakeup_handlers(self):
-        """The loop must own SIGINT/SIGTERM to wake its selector."""
+    def test_wakes_selector_without_replacing_signal_handler(self):
         import continuous
         loop = MagicMock()
-        handler = MagicMock()
+        event = MagicMock()
 
-        assert continuous._install_asyncio_signal_wakeup(loop, handler) is True
-        assert loop.add_signal_handler.call_args_list == [
-            ((continuous.signal.SIGINT, handler,
-              continuous.signal.SIGINT, None), {}),
-            ((continuous.signal.SIGTERM, handler,
-              continuous.signal.SIGTERM, None), {}),
-        ]
+        assert continuous._wake_asyncio_selector(loop, event) is True
+        loop.call_soon_threadsafe.assert_called_once_with(event.set)
+        loop.add_signal_handler.assert_not_called()
 
-    def test_unsupported_loop_preserves_fallback(self):
+    def test_closed_loop_preserves_direct_fallback(self):
         import continuous
         loop = MagicMock()
-        loop.add_signal_handler.side_effect = NotImplementedError
+        loop.call_soon_threadsafe.side_effect = RuntimeError
 
-        assert continuous._install_asyncio_signal_wakeup(
-            loop, MagicMock()) is False
+        assert continuous._wake_asyncio_selector(loop, MagicMock()) is False
+
+    def test_missing_loop_preserves_direct_fallback(self):
+        import continuous
+        assert continuous._wake_asyncio_selector(None, MagicMock()) is False
 
 
 # ---------------------------------------------------------------------------
