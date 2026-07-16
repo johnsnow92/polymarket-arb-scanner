@@ -447,6 +447,7 @@ def _refine_triangular_with_clob(opportunities: list[dict], min_profit: float) -
             )
 
         if result["net_profit"] >= min_profit:
+            o["gross_spread"] = f"{result['gross_spread']:.4f}"
             o["net_profit"] = result["net_profit"]
             o["fees"] = f"${result['fees']:.4f}"
             total_cost = pm_ask + other_price

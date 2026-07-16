@@ -668,6 +668,7 @@ class TestRefinementMetadata(TestScanTriangular):
         # PM YES leg repriced 0.25 -> 0.28 (live ask); Kalshi NO stays 0.30.
         assert opp["prices"] == "polymarket_Y=0.280 kalshi_N=0.300"
         assert opp["total_cost"] == "$0.5800"
+        assert opp["gross_spread"] == "0.4200"
 
     def test_refinement_refreshes_both_polymarket_legs(self):
         """A PM YES+NO pair must not retain the stale Stage-1 NO midpoint."""

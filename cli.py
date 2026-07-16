@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 
 # Fix Windows console encoding for Unicode market names
 if sys.stdout.encoding != "utf-8":
@@ -104,7 +105,7 @@ from config import (
 
 # Project-local .env only — never merge personal/global env files (e.g.
 # ~/.claude/.env) into the bot environment.
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 
 def _run_oneshot(args, min_profit, kalshi_client, executor, db, extra_clients=None,

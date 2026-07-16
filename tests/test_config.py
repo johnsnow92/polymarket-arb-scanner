@@ -599,14 +599,14 @@ class TestEnvFileHygiene:
             f"{module_file} loads a dotenv file outside the project directory "
             "— personal env files must never be merged into the bot environment"
         )
-        assert 'load_dotenv("' not in source and "load_dotenv('" not in source, (
-            f"{module_file} loads a dotenv file from an explicit path — only "
-            "the project-local .env (bare load_dotenv()) is allowed"
+        assert "find_dotenv" not in source, (
+            f"{module_file} must not search parent directories for dotenv files"
         )
 
     @pytest.mark.parametrize("module_file", ["config.py", "cli.py"])
     def test_project_local_dotenv_still_loaded(self, module_file):
         source = self._module_source(module_file)
-        assert "load_dotenv()" in source, (
-            f"{module_file} must keep loading the project-local .env"
+        assert 'Path(__file__).resolve().parent / ".env"' in source, (
+            f"{module_file} must load only the .env adjacent to the module"
         )
+        assert "load_dotenv(dotenv_path=" in source

@@ -3,12 +3,13 @@
 import logging
 import os
 import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Project-local .env only. Never merge personal/global env files (e.g.
 # ~/.claude/.env) into the bot environment — that leaks unrelated personal
 # credentials into the trading process.
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger(__name__)
 
