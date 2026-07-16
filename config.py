@@ -145,12 +145,6 @@ ENABLED_EXECUTION_PLATFORMS: frozenset[str] = frozenset(
     p.strip().lower() for p in _raw_enabled.split(",") if p.strip()
 )
 
-# Strategy truth reset (2026-07-16): international Polymarket remains
-# public-data/shadow-only. This is deliberately a code-level breaker rather
-# than an environment toggle so a stale deployment variable cannot re-enable
-# authenticated order placement.
-POLYMARKET_EXECUTION_ENABLED = False
-
 # Platform minimum order sizes (USD). Orders below these are rejected
 # client-side to prevent API rejections and costly partial-fill hedging.
 PLATFORM_MIN_ORDER_SIZE: dict[str, float] = {
