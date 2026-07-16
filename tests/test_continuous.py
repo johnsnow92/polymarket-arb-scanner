@@ -1138,3 +1138,165 @@ class TestBankrollRefresh:
         assert error_caught is True
         # In production the except block logs and continues — update_bankroll never called
         executor.position_sizer.update_bankroll.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Codex round-2 finding #3: SIGINT/SIGTERM must signal the MM pilot to stop
+# IMMEDIATELY (set _mm_pilot_stop directly from the signal handler), not
+# only via the end-of-cycle cleanup path further down run_continuous, which
+# only runs after the CURRENT scan cycle finishes. A long synchronous scan
+# cycle, or a hard kill before cleanup completes, could otherwise leave live
+# GTC orders resting on Kalshi with nothing cancelling them.
+#
+# run_continuous is a large synchronous orchestrator that registers signal
+# handlers early and then drives an asyncio event loop end-to-end — too
+# complex and stateful to run to completion in a unit test (no test in this
+# file does). This captures the REAL closure Python registers via
+# signal.signal (not a reimplementation of its logic): signal.signal is
+# monkeypatched to record its arguments, and the very next call
+# run_continuous makes (constructing OpportunityIndex) is monkeypatched to
+# raise a sentinel exception, so the function returns immediately after
+# registering the handler and before the untestable async orchestration
+# starts. The captured handler function's closure cells are then inspected
+# directly (co_freevars / __closure__) to reach the REAL _mm_pilot_stop
+# threading.Event object it holds, and the handler is invoked exactly as
+# the OS would, observing its actual effect on that real object.
+#
+# Fail-before: the handler only called shutdown_event.set() — the captured
+# handler's _mm_pilot_stop stayed unset after being invoked.
+# ---------------------------------------------------------------------------
+
+class _StopEarly(Exception):
+    """Sentinel used to abort run_continuous right after it registers
+    signal handlers, before the async orchestration loop starts."""
+
+
+class TestSignalHandlerStopsMMPilotImmediately:
+    def _run_until_signal_registered(self, monkeypatch):
+        import continuous
+        import signal as signal_module
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            continuous.signal, "signal",
+            lambda sig, handler: captured.__setitem__(sig, handler))
+        monkeypatch.setattr(
+            continuous, "OpportunityIndex",
+            lambda: (_ for _ in ()).throw(_StopEarly()))
+
+        args = MagicMock()
+        args.interval = None
+        with pytest.raises(_StopEarly):
+            continuous.run_continuous(
+                args=args, min_profit=0.01, kalshi_client=None,
+                kalshi_api_key_id=None, kalshi_private_key_path=None,
+                executor=MagicMock(), db=MagicMock(), price_cache={},
+            )
+        assert signal_module.SIGTERM in captured, (
+            "SIGTERM handler was never registered before the sentinel fired")
+        return captured[signal_module.SIGTERM]
+
+    @staticmethod
+    def _closure_var(func, name):
+        freevars = func.__code__.co_freevars
+        cells = dict(zip(freevars, func.__closure__ or ()))
+        assert name in cells, (
+            f"{name!r} is not a free variable of the captured handler "
+            f"(found: {sorted(cells)}) — signature of _signal_handler "
+            f"may have changed"
+        )
+        return cells[name].cell_contents
+
+    def test_sigterm_sets_mm_pilot_stop_immediately(self, monkeypatch):
+        handler = self._run_until_signal_registered(monkeypatch)
+        mm_pilot_stop = self._closure_var(handler, "_mm_pilot_stop")
+        shutdown_event = self._closure_var(handler, "shutdown_event")
+        assert isinstance(mm_pilot_stop, threading.Event)
+        assert mm_pilot_stop.is_set() is False  # not yet — signal hasn't fired
+
+        import signal as signal_module
+        handler(signal_module.SIGTERM, None)
+
+        assert mm_pilot_stop.is_set() is True, (
+            "signal handler must set _mm_pilot_stop directly, not only "
+            "shutdown_event — otherwise the MM pilot only notices a "
+            "shutdown once the current scan cycle's end-of-loop cleanup "
+            "runs, which can take arbitrarily long"
+        )
+        assert shutdown_event.is_set() is True  # pre-existing behavior kept
+
+    def test_mm_pilot_stop_is_idempotent_across_repeated_signals(
+            self, monkeypatch):
+        """SIGINT then SIGTERM (or a repeated SIGTERM) must not raise —
+        threading.Event.set() is idempotent, matching shutdown_event's
+        existing behavior."""
+        handler = self._run_until_signal_registered(monkeypatch)
+        import signal as signal_module
+        handler(signal_module.SIGINT, None)
+        handler(signal_module.SIGTERM, None)
+        mm_pilot_stop = self._closure_var(handler, "_mm_pilot_stop")
+        assert mm_pilot_stop.is_set() is True
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit finding (adjacent to Codex round-2 #3, fixed opportunistically
+# while already in this exact shutdown-safety code): the MM pilot
+# startup-failure exception handler must mirror the end-of-run cleanup
+# path's force-stop symmetry — a thread that started enough to place live
+# orders but doesn't unwind within the join timeout must still have those
+# orders cancelled directly via _mm_pilot.stop(), not silently dropped when
+# _mm_pilot/_mm_pilot_thread are cleared to None.
+#
+# A full behavioral test here would need to drive run_continuous past
+# OpportunityIndex() into the MM-pilot try block, start a real thread, and
+# force it to outlive a 15s join timeout — too slow and heavyweight for a
+# unit test. This checks the fix structurally instead (same technique
+# tests/test_mm_pilot_gates.py::TestNoBypass already uses for a similarly
+# hard-to-exercise invariant): the startup-failure except block must
+# contain the same is_alive() + _mm_pilot.stop() pattern the cleanup path
+# uses, not just an unconditional join.
+# ---------------------------------------------------------------------------
+
+class TestStartupFailureMirrorsCleanupForceStop:
+    @staticmethod
+    def _exception_handler_source():
+        import re
+        src_path = os.path.join(os.path.dirname(__file__), "..", "continuous.py")
+        with open(src_path, encoding="utf-8") as fh:
+            source = fh.read()
+        marker = 'logger.exception("MM pilot failed to start: %s", exc)'
+        start = source.index(marker)
+        # The except block ends at the next top-level (8-space-indented)
+        # statement after this point, i.e. `_mm_pilot = None` immediately
+        # followed by `_mm_pilot_thread = None` and a blank line.
+        end = source.index("\n\n", start)
+        return source[start:end]
+
+    def test_startup_failure_checks_is_alive_before_clearing_state(self):
+        block = self._exception_handler_source()
+        assert "_mm_pilot_thread.join(timeout=15)" in block
+        assert "_mm_pilot_thread.is_alive()" in block, (
+            "startup-failure handler must check is_alive() after the join "
+            "timeout, mirroring the end-of-run cleanup path, instead of "
+            "silently clearing _mm_pilot/_mm_pilot_thread regardless of "
+            "whether the thread actually stopped"
+        )
+        assert "_mm_pilot.stop()" in block, (
+            "a thread still alive after the join timeout must have its "
+            "resting orders force-cancelled directly"
+        )
+        # is_alive() must be checked strictly before the state is cleared.
+        assert block.index("is_alive()") < block.index("_mm_pilot = None")
+        assert "if thread_stopped:" in block
+        assert "retaining references" in block
+
+
+class TestMMPilotModeIsolation:
+    def test_pilot_startup_requires_dedicated_mode(self):
+        """The feature flag alone must never start the order-producing loop."""
+        import inspect
+        import continuous
+
+        source = inspect.getsource(continuous.run_continuous)
+        assert "config.MM_KALSHI_PILOT_ENABLED" in source
+        assert 'getattr(args, "mode", None) == "mm-pilot"' in source

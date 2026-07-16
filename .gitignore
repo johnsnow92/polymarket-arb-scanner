@@ -8,6 +8,7 @@ trades.db
 snapshots.db
 data/discovery/pmarb.db
 decisions.jsonl
+artifacts/mm-d0/
 *.log
 *.code-workspace
 .opencode/

@@ -72,6 +72,17 @@ Each first-class strategy has a feature flag defaulting to `false`. The four fla
 | `CROSS_MM_ENABLED` | #11 cross-platform MM | `scans/cross_mm.py`, `market_maker.CrossPlatformMaker` |
 | `AUTO_REBALANCE_ENABLED` | #18 auto-rebalance | `treasury.py`, `gemini_api.withdraw_usdc`, `db.transfers` table, `POST /api/rebalance/execute` |
 
+**Plan 10 (Kalshi reward-MM pilot):** `MM_KALSHI_PILOT_ENABLED` (default `false`) gates
+`mm_pilot.KalshiMMPilot` — the safety layer for live Kalshi LIP/VIP quoting
+(spec: `docs/plans/10-mm-pilot-prep.md`). Independent of the legacy `MM_ENABLED`
+Polymarket path. Kalshi ONLY (hard-checked at the `authorize_order` choke point).
+A live (non-dry-run) start refuses to boot unless `MM_AUTO_HEDGE_ENABLED`,
+`MM_TOXIC_FLOW_ENABLED`, and `MM_VOLATILITY_ADJUSTED_ENABLED` are all true
+(`validate_config` raises), and the Supabase `bot_controls.mm_pilot_enabled` kill
+switch (migration 0004, seeded false) must be fresh AND true or the pilot pulls all
+quotes. Rollout: D0 dry-run soak → D1 live canary (`MM_CANARY_*`) → D2 pilot sizing;
+D1/D2 activation is an operator decision.
+
 Remaining gaps and the build sequence to close them are documented in the v2 framework's Remediation Roadmap section.
 
 

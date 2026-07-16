@@ -242,6 +242,28 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match=r"LIP_PRICE_BAND_HIGH.*LIP_PRICE_BAND_LOW"):
             _reload_config()
 
+    @pytest.mark.parametrize(("name", "value"), [
+        ("LIP_PRICE_BAND_LOW", "0"),
+        ("LIP_PRICE_BAND_HIGH", "1"),
+    ])
+    def test_lip_price_band_requires_open_interval(self, monkeypatch,
+                                                   name, value):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(
+            ValueError,
+            match=r"LIP_PRICE_BAND_HIGH.*LIP_PRICE_BAND_LOW",
+        ):
+            _reload_config()
+
+    def test_equal_lip_price_band_fails_fast(self, monkeypatch):
+        monkeypatch.setenv("LIP_PRICE_BAND_LOW", "0.50")
+        monkeypatch.setenv("LIP_PRICE_BAND_HIGH", "0.50")
+        with pytest.raises(
+            ValueError,
+            match=r"LIP_PRICE_BAND_HIGH.*LIP_PRICE_BAND_LOW",
+        ):
+            _reload_config()
+
     def test_sizing_aggressiveness_above_one(self, monkeypatch):
         monkeypatch.setenv("SIZING_AGGRESSIVENESS", "1.5")
         with pytest.raises(ValueError, match="SIZING_AGGRESSIVENESS.*must be in"):

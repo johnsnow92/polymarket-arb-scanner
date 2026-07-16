@@ -82,6 +82,18 @@ class _RateLimitError(Exception):
     pass
 
 
+class KalshiPortfolioQueryError(Exception):
+    """Raised by portfolio-state reads (fills/positions/orders) when the
+    caller opts into ``raise_on_error=True`` and the request fails.
+
+    A bare ``[]`` on HTTP failure is indistinguishable from "confirmed
+    empty" to any caller that cannot see inside this method — that
+    ambiguity is unsafe for the MM pilot's fill polling and startup
+    reconciliation, which must never mistake "unknown" for "zero".
+    """
+    pass
+
+
 class KalshiClient:
     """Kalshi API client with RSA-PSS API key authentication."""
 
@@ -397,13 +409,133 @@ class KalshiClient:
         balance_cents = data.get("balance", 0)
         return balance_cents / 100.0
 
-    def get_positions(self) -> list[dict]:
-        """Get open positions."""
-        resp = self._request("GET", "/portfolio/positions", params={"limit": 200})
-        if not resp or resp.status_code != 200:
-            return []
-        data = resp.json()
-        return data.get("market_positions", [])
+    def get_positions(self, limit: int = 200, max_pages: int = 10,
+                      raise_on_error: bool = False) -> list[dict]:
+        """Get open positions, walking cursor pagination across all pages.
+
+        Codex round-2 finding: this used to fetch a single page (limit=200)
+        and silently ignore the documented ``cursor`` field, exactly like
+        ``get_fills``/``get_settlements``/``get_open_orders`` already
+        pattern-match elsewhere in this file. An account with more than
+        ``limit`` resting positions would have had a pilot-market position
+        land on page 2 and never be seen — ``reconcile()`` would then mark
+        itself successful off an incomplete picture. Pagination now mirrors
+        ``get_open_orders``'s cursor loop exactly.
+
+        Args:
+            limit: Page size per request.
+            max_pages: Maximum pages to walk (cursor pagination).
+            raise_on_error: When True, ANY page fetch failure — including
+                one on page 2+, after earlier pages looked fine — raises
+                ``KalshiPortfolioQueryError`` instead of returning whatever
+                positions were accumulated so far. A partial cross-page
+                result is exactly as ambiguous as a single-page failure:
+                the MM pilot's startup reconciliation (mm_pilot.py) must
+                never mistake "some pages missing" for "confirmed
+                complete". Default False preserves the original
+                silent-partial-return behavior for other callers.
+
+        Raises:
+            KalshiPortfolioQueryError: Only when ``raise_on_error`` is True
+                and a page fetch fails.
+        """
+        positions: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            params: dict = {"limit": limit}
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._request("GET", "/portfolio/positions", params=params)
+            if not resp or resp.status_code != 200:
+                status = resp.status_code if resp is not None else "no response"
+                logger.warning("Kalshi get_positions failed: %s", status)
+                if raise_on_error:
+                    raise KalshiPortfolioQueryError(
+                        f"get_positions page fetch failed ({status}) after "
+                        f"{len(positions)} position(s) already accumulated "
+                        f"this call — result would be ambiguous (partial "
+                        f"vs. complete)")
+                break
+            data = resp.json()
+            page = data.get("market_positions", [])
+            positions.extend(page)
+            cursor = data.get("cursor")
+            if not cursor or not page:
+                break
+        else:
+            # Codex round-3 finding: the for-loop exhausted every
+            # max_pages iteration without ever hitting a `break` above —
+            # meaning every page fetch SUCCEEDED and the cursor was STILL
+            # non-empty after the very last one. More data genuinely
+            # exists beyond max_pages*limit; we only stopped because of
+            # our own bound. This is NOT "confirmed complete" (empty
+            # cursor) — silently returning `positions` here would let a
+            # caller (reconcile()) mistake an incomplete fetch for a full
+            # one and mark itself successfully reconciled anyway.
+            if cursor:
+                logger.warning(
+                    "Kalshi get_positions exhausted max_pages=%d while "
+                    "more data was still available (cursor non-empty) — "
+                    "%d position(s) accumulated is a PARTIAL result",
+                    max_pages, len(positions))
+                if raise_on_error:
+                    raise KalshiPortfolioQueryError(
+                        f"get_positions exhausted max_pages={max_pages} "
+                        f"while the cursor still had more data — "
+                        f"{len(positions)} position(s) accumulated is an "
+                        f"incomplete result")
+        return positions
+
+    def get_open_orders(self, ticker: str | None = None,
+                        limit: int = 200, max_pages: int = 5) -> list[dict]:
+        """Fetch this account's resting (unfilled) orders.
+
+        Used by the MM pilot's startup reconciliation gate
+        (docs/plans/10-mm-pilot-prep.md, restart-persistence fix): a prior
+        process crash can leave live GTC orders resting on Kalshi that a
+        fresh in-memory registry knows nothing about. Unlike
+        ``get_positions``, this always raises on failure — there is no
+        pre-existing caller relying on a silent-empty result, and a caller
+        that needs this list (reconciliation) must never treat "request
+        failed" as "confirmed no resting orders".
+
+        Raises:
+            KalshiPortfolioQueryError: On any page-fetch HTTP failure.
+        """
+        params: dict = {"status": "resting", "limit": limit}
+        if ticker:
+            params["ticker"] = ticker
+        orders: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            if cursor:
+                params["cursor"] = cursor
+            resp = self._request("GET", "/portfolio/orders", params=params)
+            if not resp or resp.status_code != 200:
+                status = resp.status_code if resp is not None else "no response"
+                logger.warning("Kalshi get_open_orders failed: %s", status)
+                raise KalshiPortfolioQueryError(
+                    f"get_open_orders page fetch failed ({status})")
+            data = resp.json()
+            page = data.get("orders", [])
+            orders.extend(page)
+            cursor = data.get("cursor")
+            if not cursor or not page:
+                break
+        else:
+            # Codex round-3 finding: exhausted max_pages while every page
+            # fetch succeeded and the cursor was STILL non-empty — more
+            # resting orders genuinely exist beyond max_pages*limit. This
+            # method's whole contract is "never silently return zero/
+            # partial on failure"; a partial result from hitting our own
+            # page bound is exactly as unsafe as an HTTP failure would be.
+            if cursor:
+                raise KalshiPortfolioQueryError(
+                    f"get_open_orders exhausted max_pages={max_pages} "
+                    f"while the cursor still had more data — "
+                    f"{len(orders)} order(s) accumulated is an incomplete "
+                    f"result")
+        return orders
 
     def get_settlements(self, limit: int = 200, max_pages: int = 5) -> list[dict]:
         """Fetch account settlement history from /portfolio/settlements.
@@ -535,7 +667,8 @@ class KalshiClient:
         return None
 
     def get_fills(self, limit: int = 200, max_pages: int = 5,
-                  min_ts: int | None = None) -> list[dict]:
+                  min_ts: int | None = None,
+                  raise_on_error: bool = False) -> list[dict]:
         """Fetch this account's executed trade fills from /portfolio/fills.
 
         Fills are the authoritative record of contracts traded (VIP volume),
@@ -547,9 +680,23 @@ class KalshiClient:
             limit: Page size per request.
             max_pages: Maximum pages to walk (cursor pagination).
             min_ts: Optional Unix seconds lower bound; passed as ``min_ts``.
+            raise_on_error: When True, a failed page fetch raises
+                ``KalshiPortfolioQueryError`` instead of returning whatever
+                fills were accumulated so far. A partial/empty list on HTTP
+                failure is indistinguishable from "confirmed no more fills"
+                to a caller that cannot see this method's internals —
+                callers that must never mistake "unknown" for "zero" (e.g.
+                the MM pilot's fill poll, which drives inventory/hedge
+                accounting) set this True. Default False preserves the
+                original silent partial-return behavior for existing
+                callers (e.g. kalshi_vip.py).
 
         Returns:
             A list of fill records, newest first.
+
+        Raises:
+            KalshiPortfolioQueryError: Only when ``raise_on_error`` is True
+                and a page fetch fails.
         """
         fills: list[dict] = []
         cursor = None
@@ -561,8 +708,14 @@ class KalshiClient:
                 params["min_ts"] = min_ts
             resp = self._request("GET", "/portfolio/fills", params=params)
             if not resp or resp.status_code != 200:
-                logger.warning("Kalshi get_fills failed: %s",
-                               resp.status_code if resp is not None else "no response")
+                status = resp.status_code if resp is not None else "no response"
+                logger.warning("Kalshi get_fills failed: %s", status)
+                if raise_on_error:
+                    raise KalshiPortfolioQueryError(
+                        f"get_fills page fetch failed ({status}) after "
+                        f"{len(fills)} fill(s) already accumulated this "
+                        f"call — result would be ambiguous (partial vs. "
+                        f"complete)")
                 break
             data = resp.json()
             page = data.get("fills", [])
@@ -570,6 +723,26 @@ class KalshiClient:
             cursor = data.get("cursor")
             if not cursor or not page:
                 break
+        else:
+            # Codex round-3 finding: exhausted max_pages while every page
+            # fetch succeeded and the cursor was STILL non-empty — more
+            # fills genuinely exist beyond max_pages*limit for this
+            # min_ts window. Silently returning a partial list here is
+            # exactly the "unknown looks like zero/some" ambiguity
+            # raise_on_error exists to close for the HTTP-failure case;
+            # hitting our own page bound must be treated identically.
+            if cursor:
+                logger.warning(
+                    "Kalshi get_fills exhausted max_pages=%d while more "
+                    "fills were still available (cursor non-empty) — %d "
+                    "fill(s) accumulated is a PARTIAL result", max_pages,
+                    len(fills))
+                if raise_on_error:
+                    raise KalshiPortfolioQueryError(
+                        f"get_fills exhausted max_pages={max_pages} "
+                        f"while the cursor still had more data — "
+                        f"{len(fills)} fill(s) accumulated is an "
+                        f"incomplete result")
         return fills
 
     def get_order_status(self, order_id: str) -> dict | None:

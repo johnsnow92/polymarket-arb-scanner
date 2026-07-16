@@ -104,6 +104,12 @@ class TestArgumentParsing:
         args = parser.parse_args(["--mode", "kalshi"])
         assert args.mode == "kalshi"
 
+    def test_mode_mm_pilot(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--mode", choices=["all", "mm-pilot"], default="all")
+        args = parser.parse_args(["--mode", "mm-pilot"])
+        assert args.mode == "mm-pilot"
+
     def test_min_profit_float(self):
         parser = argparse.ArgumentParser()
         parser.add_argument("--min-profit", type=float, default=None)
@@ -493,6 +499,31 @@ class TestMainBranching:
 
         mock_continuous.assert_called_once()
         mock_oneshot.assert_not_called()
+        mock_db.close.assert_called_once()
+
+    @patch.object(_cli_mod, "start_dashboard", return_value=None)
+    @patch.object(_cli_mod, "run_continuous")
+    @patch.object(_cli_mod, "_run_oneshot")
+    @patch.object(_cli_mod, "ArbitrageExecutor")
+    @patch.object(_cli_mod, "RiskManager")
+    @patch.object(_cli_mod, "TradeDB")
+    @patch.object(_cli_mod, "setup_logging")
+    @patch.object(_cli_mod, "load_dotenv")
+    def test_mm_pilot_mode_dispatches_only_continuous(
+        self, mock_dotenv, mock_logging, mock_db_cls, mock_risk_cls,
+        mock_exec_cls, mock_oneshot, mock_continuous, mock_dashboard,
+    ):
+        mock_db = MagicMock()
+        mock_db_cls.return_value = mock_db
+
+        with patch("sys.argv", ["scanner.py", "--continuous", "--mode", "mm-pilot", "--dry-run"]):
+            with patch.dict(os.environ, {}, clear=False):
+                _cli_mod.main()
+
+        mock_continuous.assert_called_once()
+        mock_oneshot.assert_not_called()
+        assert mock_continuous.call_args.args[0].mode == "mm-pilot"
+        assert mock_exec_cls.call_args.kwargs["dry_run"] is True
         mock_db.close.assert_called_once()
 
 
