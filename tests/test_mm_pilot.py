@@ -9,6 +9,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import importlib
+import logging
 
 import pytest
 
@@ -197,6 +198,22 @@ def build_pilot(clock, client=None, dry_run=False, hedger=None,
     pilot._test_controls = controls
     pilot._test_hedger = hedger
     return pilot
+
+
+@pytest.mark.parametrize(("severity", "expected_level"), [
+    ("INFO", logging.INFO),
+    ("WARNING", logging.WARNING),
+    ("CRITICAL", logging.CRITICAL),
+])
+def test_alert_logs_at_declared_severity(clock, caplog, severity,
+                                         expected_level):
+    pilot = build_pilot(clock, dry_run=True)
+    with caplog.at_level(logging.INFO, logger="mm_pilot"):
+        pilot._alert("test_alert", severity, "test message")
+
+    record = caplog.records[-1]
+    assert record.levelno == expected_level
+    assert record.getMessage() == "MM pilot test_alert: test message"
 
 
 # ---------------------------------------------------------------------------

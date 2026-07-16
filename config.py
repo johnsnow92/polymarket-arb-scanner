@@ -1182,14 +1182,12 @@ def validate_config() -> list[str]:
         "MM_CANARY_QUOTE_SIZE_USD": MM_CANARY_QUOTE_SIZE_USD,
         "MM_CANARY_MAX_LOSS_USD": MM_CANARY_MAX_LOSS_USD,
         "MM_CANARY_MIN_HOURS": MM_CANARY_MIN_HOURS,
-        "LIP_PRICE_BAND_LOW": LIP_PRICE_BAND_LOW,
-        "LIP_PRICE_BAND_HIGH": LIP_PRICE_BAND_HIGH,
     }
     for name, val in _positive.items():
         if val <= 0:
             raise ConfigError(f"{name}={val} must be > 0")
 
-    # Plan 10 non-negative / band keys (zero is a valid value for these)
+    # Plan 10 non-negative keys (zero is a valid value for these)
     if MM_INVENTORY_TARGET_USD < 0:
         raise ConfigError(
             f"MM_INVENTORY_TARGET_USD={MM_INVENTORY_TARGET_USD} must be >= 0")
@@ -1289,15 +1287,6 @@ def validate_config() -> list[str]:
             f"STALE_PRICE_MOVE_PCT={STALE_PRICE_MOVE_PCT} "
             f"must be in (0, 1)"
         )
-    if not (0 <= LIP_PRICE_BAND_LOW <= 1):
-        raise ConfigError(
-            f"LIP_PRICE_BAND_LOW={LIP_PRICE_BAND_LOW} must be in [0, 1]"
-        )
-    if not (0 <= LIP_PRICE_BAND_HIGH <= 1):
-        raise ConfigError(
-            f"LIP_PRICE_BAND_HIGH={LIP_PRICE_BAND_HIGH} must be in [0, 1]"
-        )
-
     # --- Relationship checks ---
     if BASE_TRADE_SIZE > MAX_TRADE_SIZE:
         raise ConfigError(
@@ -1310,12 +1299,6 @@ def validate_config() -> list[str]:
             f"FILL_POLL_TIMEOUT ({FILL_POLL_TIMEOUT}) < "
             f"FILL_POLL_INTERVAL ({FILL_POLL_INTERVAL}); "
             f"polls may never complete"
-        )
-
-    if LIP_PRICE_BAND_HIGH < LIP_PRICE_BAND_LOW:
-        raise ConfigError(
-            f"LIP_PRICE_BAND_HIGH ({LIP_PRICE_BAND_HIGH}) must be >= "
-            f"LIP_PRICE_BAND_LOW ({LIP_PRICE_BAND_LOW})"
         )
 
     # --- Dashboard checks ---

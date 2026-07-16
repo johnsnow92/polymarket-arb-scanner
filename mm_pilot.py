@@ -449,8 +449,12 @@ class KalshiMMPilot:
 
     def _alert(self, alert_type: str, severity: str, message: str,
                details: dict | None = None) -> None:
-        logger.log(logging.CRITICAL if severity == "CRITICAL" else logging.WARNING,
-                   "MM pilot %s: %s", alert_type, message)
+        log_level = {
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "CRITICAL": logging.CRITICAL,
+        }.get(str(severity).upper(), logging.WARNING)
+        logger.log(log_level, "MM pilot %s: %s", alert_type, message)
         if self._alerts is not None:
             try:
                 self._alerts.alert(alert_type, severity, message, details)
