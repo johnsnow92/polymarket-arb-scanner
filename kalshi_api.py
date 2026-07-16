@@ -219,6 +219,134 @@ class KalshiClient:
             return []
         return resp.json().get("markets", [])
 
+    def fetch_market(self, ticker: str) -> dict | None:
+        """Fetch a single market's current state from GET /markets/{ticker}.
+
+        Additive, read-only, general-purpose lookup (any status — open,
+        closed, settled) for any ticker. Unlike get_settlements(), which hits
+        the account-scoped /portfolio/settlements and only covers markets
+        this account actually traded, this works for any ticker.
+
+        Returns:
+            The market dict (includes 'status' and, once resolved, 'result')
+            or None on failure/not-found.
+        """
+        try:
+            resp = self._request("GET", f"/markets/{ticker}")
+        except Exception as exc:
+            logger.warning("Kalshi fetch_market failed for %s: %s", ticker, exc)
+            return None
+        if resp is not None and resp.status_code == 200:
+            data = resp.json()
+            return data.get("market", data)
+        return None
+
+    def fetch_settled_markets(self, min_close_ts: int, limit: int = 1000, max_pages: int = 50) -> list[dict]:
+        """Fetch settled markets closed at/after min_close_ts, cursor-paginated.
+
+        The discovery step of the "T-24h/T-6h candle reconstruction" method
+        (docs/plans/08-earnings-mention-oos.md, T1-pm-dispersion-novelty.md
+        §a): find WHAT settled since the caller's last watermark, then
+        reconstruct each one's historical price separately via
+        fetch_candlesticks. Mirrors fetch_all_events' pagination shape but
+        hits /markets directly with status=settled (same pattern validated
+        by the command-center's longshot_fade_pull.py full-history pull).
+
+        Kalshi settles on the order of millions of markets per year across
+        all categories, so min_close_ts is load-bearing: callers MUST track
+        and advance their own watermark forward each run rather than
+        omitting it or passing a stale/epoch value, or this will attempt to
+        page through the platform's entire settlement history every call.
+
+        Returns:
+            The complete list of settled market dicts (each carries
+            'result', 'ticker', 'event_ticker', 'close_time', etc.).
+
+        Raises:
+            RuntimeError: if any page request fails, or if
+                max_pages is exhausted while the cursor is still live —
+                never returns a silently-partial list.
+        """
+        out: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            params: dict = {"status": "settled", "limit": limit, "min_close_ts": min_close_ts}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                resp = self._request("GET", "/markets", params=params)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Kalshi settled-markets request failed mid-pagination: "
+                    f"{type(exc).__name__} ({len(out)} markets fetched so far)"
+                ) from exc
+            if not resp or resp.status_code != 200:
+                raise RuntimeError(
+                    f"Kalshi settled-markets request failed mid-pagination: "
+                    f"{resp.status_code if resp else 'no response'} ({len(out)} markets fetched so far)"
+                )
+            data = resp.json()
+            markets = data.get("markets", [])
+            out.extend(markets)
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        else:
+            raise RuntimeError(
+                f"Kalshi settled-markets pagination did not finish within max_pages={max_pages} "
+                f"({len(out)} markets fetched, cursor still live) — raise max_pages or narrow min_close_ts"
+            )
+        return out
+
+    def fetch_candlesticks(self, series_ticker: str, ticker: str, start_ts: int, end_ts: int,
+                           period_interval: int = 60) -> list[dict] | None:
+        """Fetch candlesticks via GET /series/{series_ticker}/markets/{ticker}/candlesticks.
+
+        Reconstructs a settled market's YES price at a specific historical
+        instant (e.g. T-24h before close) after the fact — the OOS logger's
+        core method, since a weekly cron cannot reliably catch every market
+        live during its narrow open T-24h..T-6h window. Price fields in the
+        response are ``*_dollars`` strings (e.g. ``close_dollars="0.2200"``),
+        NOT bare cents — confirmed gotcha from the in-sample pilot
+        (T1-pm-dispersion-novelty.md methodology note); callers must read the
+        dollar fields.
+
+        Args:
+            series_ticker: The market's series ticker (NOT its event or
+                market ticker — passing the wrong one 404s this endpoint).
+            ticker: The market ticker.
+            start_ts: Unix seconds, inclusive window start.
+            end_ts: Unix seconds, inclusive window end.
+            period_interval: Candle width in minutes (default 60 = hourly).
+
+        Returns:
+            The raw 'candlesticks' list — [] if the request succeeded but
+            found no candles in the window (e.g. the market didn't exist
+            yet), or None if the request itself failed: a non-200 response,
+            or a network/timeout/rate-limit exception that _request's
+            internal retry (see the @retry decorator above) re-raises once
+            exhausted (reraise=True). Callers MUST distinguish [] from None
+            — they mean opposite things (permanent no-data vs. transient
+            failure) and are not interchangeable.
+        """
+        try:
+            resp = self._request(
+                "GET",
+                f"/series/{series_ticker}/markets/{ticker}/candlesticks",
+                params={"start_ts": start_ts, "end_ts": end_ts, "period_interval": period_interval},
+            )
+        except (requests.RequestException, _RateLimitError) as exc:
+            # _request already retried transient errors internally; this is
+            # only reached once those retries are exhausted, so it's a real,
+            # currently-unrecoverable failure. Convert to this method's own
+            # None sentinel instead of propagating tenacity's implementation
+            # detail up through price_at_t24h and crashing the OOS cycle.
+            logger.warning("Kalshi candlesticks request failed for %s/%s: %s", series_ticker, ticker, exc)
+            return None
+        if resp is not None and resp.status_code == 200:
+            return resp.json().get("candlesticks", [])
+        return None
+
     def fetch_order_book(self, ticker: str) -> dict | None:
         """Fetch order book for a given market ticker."""
         resp = self._request("GET", f"/markets/{ticker}/orderbook")

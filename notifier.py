@@ -6,6 +6,7 @@ Supports Telegram, Slack, Discord, CallMeBot WhatsApp, and generic webhooks.
 import json
 import logging
 import os
+import re
 import threading
 from urllib.parse import quote as urlquote
 
@@ -14,6 +15,24 @@ import requests
 from url_guard import assert_public_url
 
 logger = logging.getLogger(__name__)
+
+# requests exceptions (ConnectionError, Timeout, ...) — and some proxy/WAF
+# error pages — commonly embed the full request URL in their text. For
+# Telegram and CallMeBot that URL carries a live bot token / API key / phone
+# number in the path or query string, so any code that logs str(exc) or
+# resp.text verbatim on failure can leak a credential into build/CI logs.
+# Every log call on these paths goes through _redact_secrets first.
+_TELEGRAM_TOKEN_RE = re.compile(r"(/bot)[^/\s]+(/)")
+_QUERY_SECRET_RE = re.compile(r"((?:apikey|phone)=)[^&\s'\"]+", re.IGNORECASE)
+
+
+def _redact_secrets(text: str | None) -> str | None:
+    """Strip Telegram bot tokens / CallMeBot apikey+phone from log-bound text."""
+    if not text:
+        return text
+    text = _TELEGRAM_TOKEN_RE.sub(r"\1***REDACTED***\2", text)
+    text = _QUERY_SECRET_RE.sub(r"\1***REDACTED***", text)
+    return text
 
 
 class WebhookNotifier:
@@ -213,9 +232,9 @@ class WebhookNotifier:
             if resp.status_code < 300:
                 logger.debug("Telegram sent: %s", text[:60])
             else:
-                logger.warning("Telegram returned %d: %s", resp.status_code, resp.text[:200])
+                logger.warning("Telegram returned %d: %s", resp.status_code, _redact_secrets(resp.text)[:200])
         except requests.RequestException as e:
-            logger.warning("Telegram request failed: %s", e)
+            logger.warning("Telegram request failed: %s", _redact_secrets(str(e)))
 
     # ---------------------------------------------------------------------------
     # CallMeBot WhatsApp
@@ -237,9 +256,9 @@ class WebhookNotifier:
             if resp.status_code < 300:
                 logger.debug("CallMeBot WhatsApp sent: %s", text[:60])
             else:
-                logger.warning("CallMeBot returned %d: %s", resp.status_code, resp.text[:200])
+                logger.warning("CallMeBot returned %d: %s", resp.status_code, _redact_secrets(resp.text[:200]))
         except requests.RequestException as e:
-            logger.warning("CallMeBot request failed: %s", e)
+            logger.warning("CallMeBot request failed: %s", _redact_secrets(str(e)))
 
     # ---------------------------------------------------------------------------
     # Formatting helpers
