@@ -1441,6 +1441,21 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 await asyncio.sleep(1800)  # Retry after 30 minutes
 
     async def _continuous_loop():
+        # ``signal.signal`` above updates the Events, but a synchronous Python
+        # signal handler does not reliably wake an asyncio selector that is
+        # blocked in ``wait_for`` on macOS.  Register the same callback through
+        # the running loop as well: asyncio's self-pipe wakes the selector
+        # immediately, so SIGINT/SIGTERM can enter the order-cancellation and
+        # task-cleanup path without waiting for a scan/monitor timeout.
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, _signal_handler, sig, None)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Windows and non-main-thread event loops do not support
+            # add_signal_handler; the synchronous handlers remain installed.
+            pass
+
         ws_task = None
         priority_consumer_task = None
         stale_monitor_task = None
