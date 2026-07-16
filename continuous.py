@@ -96,6 +96,18 @@ from scans import (
 logger = logging.getLogger(__name__)
 
 
+def _wake_asyncio_selector(loop, event) -> bool:
+    """Wake a running asyncio selector without replacing OS signal handlers."""
+    if loop is None:
+        return False
+    try:
+        loop.call_soon_threadsafe(event.set)
+    except RuntimeError:
+        # The loop may already be closed during repeated shutdown signals.
+        return False
+    return True
+
+
 class OpportunityIndex:
     """Maps (platform, ticker/token) to opportunities for fast lookup on WS updates."""
 
@@ -916,6 +928,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     rescan_interval = getattr(args, 'interval', None) or CONFIG_RESCAN_INTERVAL
 
     shutdown_event = asyncio.Event()
+    _signal_loop = None
 
     # Plan 10 / Codex round-2 finding #3: declared here (not later, where
     # the MM pilot setup block used to create them) so the signal handler
@@ -941,6 +954,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         # all resting orders via stop() as soon as it notices — idempotent
         # and safe to set here even when the pilot was never enabled.
         _mm_pilot_stop.set()
+        # Keep the direct ``signal.signal`` path above so the pilot stop flag
+        # is asserted even while the event loop is inside synchronous work.
+        # Then wake asyncio's selector through its self-pipe so the outer loop
+        # enters cleanup immediately instead of sleeping until its timeout.
+        _wake_asyncio_selector(_signal_loop, shutdown_event)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -1441,6 +1459,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 await asyncio.sleep(1800)  # Retry after 30 minutes
 
     async def _continuous_loop():
+        # Capture the running loop for the direct OS signal handler.  Its
+        # call_soon_threadsafe wakeup preserves immediate pilot cancellation
+        # while also interrupting a selector wait on macOS.
+        nonlocal _signal_loop
+        _signal_loop = asyncio.get_running_loop()
+
         ws_task = None
         priority_consumer_task = None
         stale_monitor_task = None

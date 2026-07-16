@@ -1251,6 +1251,28 @@ class TestSignalHandlerStopsMMPilotImmediately:
         info.assert_not_called()
 
 
+class TestAsyncioSignalWakeup:
+    def test_wakes_selector_without_replacing_signal_handler(self):
+        import continuous
+        loop = MagicMock()
+        event = MagicMock()
+
+        assert continuous._wake_asyncio_selector(loop, event) is True
+        loop.call_soon_threadsafe.assert_called_once_with(event.set)
+        loop.add_signal_handler.assert_not_called()
+
+    def test_closed_loop_preserves_direct_fallback(self):
+        import continuous
+        loop = MagicMock()
+        loop.call_soon_threadsafe.side_effect = RuntimeError
+
+        assert continuous._wake_asyncio_selector(loop, MagicMock()) is False
+
+    def test_missing_loop_preserves_direct_fallback(self):
+        import continuous
+        assert continuous._wake_asyncio_selector(None, MagicMock()) is False
+
+
 # ---------------------------------------------------------------------------
 # CodeRabbit finding (adjacent to Codex round-2 #3, fixed opportunistically
 # while already in this exact shutdown-safety code): the MM pilot
