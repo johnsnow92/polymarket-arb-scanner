@@ -249,6 +249,20 @@ class TradeDB:
                 )
             self.conn.commit()
 
+    def set_trade_order_id(self, trade_id: int, order_id: str | None):
+        """Persist the exchange order ID on a trade row.
+
+        Used when a leg fails with an unconfirmed cancel: the order may still
+        be live at the venue, so the ID must survive restarts for
+        recovery.reconcile_orphaned_positions() to find it.
+        """
+        with self._lock:
+            self.conn.execute(
+                "UPDATE trades SET order_id = ? WHERE id = ?",
+                (order_id, trade_id),
+            )
+            self.conn.commit()
+
     def get_daily_pnl(self) -> float:
         """Get realized P&L from positions settled today, plus expected P&L from open positions today."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

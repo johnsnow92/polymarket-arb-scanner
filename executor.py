@@ -2512,6 +2512,32 @@ class ArbitrageExecutor:
         self._write_decision(opportunity, "execute", "dry_run")
         return True
 
+    def _record_failed_leg(self, trade_id: int, leg: dict,
+                           unknown_state: bool = False) -> None:
+        """Record a failed leg, preserving reconciliation state for unconfirmed cancels.
+
+        A leg whose GTC cancel was unconfirmed may still have a live order at
+        the venue. Recording it as 'failed' would hide it from recovery.py
+        (which only scans 'pending' trades with order IDs), so persist it as
+        'pending' with its order_id instead.
+
+        unknown_state: pass True from exception handlers. An exception raised
+        after _execute_single_leg assigned leg['_order_id'] leaves the venue-
+        side state unknown (the order may be live), so such legs are also
+        preserved as 'pending' rather than dropped to 'failed' (fail closed).
+        """
+        if leg.get("_cancel_unconfirmed") or (unknown_state and leg.get("_order_id")):
+            self.db.set_trade_order_id(trade_id, leg.get("_order_id"))
+            self.db.update_trade_status(trade_id, "pending")
+            reason = ("cancel unconfirmed" if leg.get("_cancel_unconfirmed")
+                      else "exception after order placement — venue state unknown")
+            logger.error(
+                f"Trade #{trade_id} left 'pending' with order_id={leg.get('_order_id')!r} "
+                f"— {reason}, awaiting recovery reconciliation"
+            )
+        else:
+            self.db.update_trade_status(trade_id, "failed")
+
     def _execute_legs(self, opportunity: dict, legs: list[dict], size: float) -> bool:
         """Execute trade legs concurrently on both platforms."""
         total_cost_str = opportunity.get("total_cost", "$0")
@@ -2590,12 +2616,12 @@ class ArbitrageExecutor:
                             results[idx] = True
                             logger.info(f"Leg {idx+1} FILLED: {leg['platform']} order={order_id}")
                         else:
-                            self.db.update_trade_status(trade_id, "failed")
+                            self._record_failed_leg(trade_id, leg)
                             results[idx] = False
                             logger.error(f"Leg {idx+1} FAILED: {leg['platform']}")
                     except Exception as e:
                         trade_id = leg["_trade_id"]
-                        self.db.update_trade_status(trade_id, "failed")
+                        self._record_failed_leg(trade_id, leg, unknown_state=True)
                         results[idx] = False
                         logger.error(f"Leg {idx+1} ERROR: {e}")
         else:
@@ -2612,7 +2638,7 @@ class ArbitrageExecutor:
                         results[i] = True
                         logger.info(f"Leg {i+1} FILLED: {leg['platform']} order={order_id}")
                     else:
-                        self.db.update_trade_status(trade_id, "failed")
+                        self._record_failed_leg(trade_id, leg)
                         results[i] = False
                         logger.error(f"Leg {i+1} FAILED: {leg['platform']}")
                         # Abort remaining legs — no point continuing
@@ -2622,7 +2648,7 @@ class ArbitrageExecutor:
                         break
                 except Exception as e:
                     trade_id = leg["_trade_id"]
-                    self.db.update_trade_status(trade_id, "failed")
+                    self._record_failed_leg(trade_id, leg, unknown_state=True)
                     results[i] = False
                     logger.error(f"Leg {i+1} ERROR: {e}")
                     for j in range(i + 1, len(legs)):
@@ -2805,13 +2831,13 @@ class ArbitrageExecutor:
                             idx + 1, leg["platform"], order_id,
                         )
                     else:
-                        self.db.update_trade_status(trade_id, "failed")
+                        self._record_failed_leg(trade_id, leg)
                         results[idx] = False
                         logger.error(
                             "Concurrent leg %d FAILED: %s", idx + 1, leg["platform"])
                 except Exception as e:
                     trade_id = leg["_trade_id"]
-                    self.db.update_trade_status(trade_id, "failed")
+                    self._record_failed_leg(trade_id, leg, unknown_state=True)
                     results[idx] = False
                     logger.error("Concurrent leg %d ERROR: %s", idx + 1, e)
 
@@ -2923,13 +2949,37 @@ class ArbitrageExecutor:
                             "cancelling — no taker fallback per D-05",
                             order_id, GTC_ORDER_TIMEOUT,
                         )
+                        cancel_confirmed = False
                         try:
-                            self.pm_trader.cancel_order(order_id)
+                            cancel_confirmed = bool(self.pm_trader.cancel_order(order_id))
                         except Exception as cancel_err:
                             logger.warning(
-                                "Failed to cancel Polymarket GTC order %s: %s",
-                                order_id, cancel_err,
+                                f"Failed to cancel Polymarket GTC order {order_id}: {cancel_err}"
                             )
+                        if not cancel_confirmed:
+                            # Cancel unconfirmed: the order may still be live and fill
+                            # later (untracked exposure). Mark the leg so recovery/
+                            # reconciliation can find it via the preserved _order_id.
+                            leg["_cancel_unconfirmed"] = True
+                            logger.error(
+                                f"Polymarket GTC order {order_id} cancel UNCONFIRMED for market "
+                                f"{opportunity.get('market', opportunity.get('type', '?'))} — "
+                                f"order may still be live; leg flagged for reconciliation"
+                            )
+                            if _alert_manager:
+                                try:
+                                    _alert_manager.alert(
+                                        "cancel_unconfirmed",
+                                        "CRITICAL",
+                                        f"Polymarket GTC cancel unconfirmed for order {order_id}",
+                                        details={
+                                            "order_id": order_id,
+                                            "market": opportunity.get("market"),
+                                            "platform": "polymarket",
+                                        },
+                                    )
+                                except Exception:
+                                    logger.exception("cancel_unconfirmed alert failed")
                         return False, order_id, None
                     return True, order_id, fill_price
                 else:
