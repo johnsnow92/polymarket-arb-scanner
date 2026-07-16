@@ -1,6 +1,6 @@
 # 09 — Out-of-Band Policy Broker
 
-**Status:** BUILD (spec-first, mirrors command-center `22-POLICY-BROKER-SPEC.md` 2026-07-02)
+**Status:** FOUNDATION MERGED; operational runtime is BUILD + PR only
 **Owner:** command center (spec) → this repo (build) · **Blocks:** all auto-flip / auto-capital / auto-secret authority
 **Related:** `21-VENUE-STRATEGY-ADOPTION-FRAMEWORK.md`, `01-EXECUTION-TRACKER.md`, `13-SECRETS-AND-INTEGRATIONS-MAP.md` (command center) · `config.py:143` (`ENABLED_EXECUTION_PLATFORMS`), `executor.py` per-leg allowlist checks
 
@@ -51,6 +51,8 @@ loop (proposer) ──writes Intent(idempotency_key)──▶ IntentQueue (appen
 | `broker/validator.py` | `LiveSources` (injected callables — the broker never trusts stale state), `BrokerValidator` — the deterministic rulebook; every live-source exception ⇒ fail-closed |
 | `broker/secrets.py` | `rotate_secret_via_stdin()` — secret piped get-cmd → set-cmd stdin; value never decoded, logged, or returned (never enters LLM context) |
 | `broker/broker.py` | `PolicyBroker.process(intent)` orchestrator: dedupe → hard-stop screen → validate → execute → verify; statuses `EXECUTED` / `REJECTED` / `IN_DOUBT` / `HARD_STOP`; escalation callable |
+| `broker/adapters.py` | Concrete out-of-repo authority-snapshot and command-executor adapters; rejects in-repo/symlinked control files and never invokes a shell |
+| `broker/worker.py` | Single-writer worker: lease acquire/renew/release, full reconciliation preflight, bounded pending-intent drain, escalation delivery |
 
 ### Backends (both implement the same interface)
 
@@ -66,7 +68,7 @@ The broker/validator depend only on the queue interface, never on the backing st
   RLS is deny-by-default so only the service role can touch the tables.
 
 Project: `financial-markets-rewards` (`rtvusfddepldnpknqpjt`, Lane A). Migrations (additive-only):
-`policy_broker_intent_queue`, `policy_broker_truncate_guard`. Tables: `public.broker_intents`,
+`supabase/migrations/0005_policy_broker.sql` (not applied by this PR). Tables: `public.broker_intents`,
 `broker_intent_events`, `broker_halts`, `broker_leases`.
 
 **Env (server-side only, never logged):** `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_KEY`).
@@ -132,3 +134,6 @@ is never re-invoked).
 8. CodeRabbit CLI + PR approval + Codex adversarial pass; PR hard-stops to operator (money-authority)
 
 Until 1–8 are all green, the loop stays **BUILD+PR only** — no live flips, no capital moves.
+
+Operational deployment and account-side authority remain separately operator-gated; see
+`docs/plans/10-policy-broker-operations.md`.

@@ -275,3 +275,17 @@ class TestLease:
     def test_lease_holder_none_when_empty(self, q):
         q._session.get.return_value = _resp(200, [])
         assert q.lease_holder() is None
+
+
+class TestAttemptClaim:
+    def test_claim_calls_atomic_rpc(self, q):
+        q._session.post.return_value = _resp(200, True)
+        assert q.claim_intent_attempt(7, "worker-a") is True
+        url, kwargs = q._session.post.call_args[0][0], q._session.post.call_args[1]
+        assert url.endswith("/rpc/broker_claim_intent_attempt")
+        assert kwargs["json"] == {"p_intent_id": 7, "p_holder": "worker-a"}
+
+    def test_claim_fails_closed_on_changed_rpc_contract(self, q):
+        q._session.post.return_value = _resp(200, {"claimed": False})
+        with pytest.raises(RuntimeError, match="non-boolean"):
+            q.claim_intent_attempt(7, "worker-a")

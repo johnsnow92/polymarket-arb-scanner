@@ -18,6 +18,8 @@ from .broker import (
     PolicyBroker,
     TwoFactorWallError,
 )
+from .adapters import JsonAuthoritySource, load_command_executors
+from .worker import BrokerWorker
 
 __all__ = [
     "DEFAULT_LEASE_NAME",
@@ -30,6 +32,7 @@ __all__ = [
     "IntentExecutors",
     "IntentQueue",
     "LiveSources",
+    "JsonAuthoritySource",
     "PolicyBroker",
     "PolicyConfig",
     "PolicyError",
@@ -37,7 +40,9 @@ __all__ = [
     "SupabaseConfigError",
     "SupabaseIntentQueue",
     "TwoFactorWallError",
+    "BrokerWorker",
     "compute_gate_hash",
     "load_policy",
+    "load_command_executors",
     "rotate_secret_via_stdin",
 ]
