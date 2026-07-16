@@ -415,7 +415,6 @@ MM_REFRESH_INTERVAL = _env_float("MM_REFRESH_INTERVAL", "10.0")
 # Kalshi Liquidity Incentive Program (LIP) market making — the MM lead
 # strategy per docs/plans/02-kalshi-lip-mm-scope.md. Program expires
 # 2026-09-01; pools come from GET /incentive_programs.
-KALSHI_LIP_ENABLED = _env_bool("KALSHI_LIP_ENABLED", "false")
 LIP_MIN_POOL = _env_float("LIP_MIN_POOL", "10.0")  # ignore pools under $10/period
 LIP_MAX_MARKETS = _env_int("LIP_MAX_MARKETS", "5")
 LIP_SELECT_INTERVAL = _env_float("LIP_SELECT_INTERVAL", "3600.0")  # re-rank hourly
@@ -1112,6 +1111,9 @@ def validate_config() -> list[str]:
         "STALE_PRICE_THRESHOLD": STALE_PRICE_THRESHOLD,
         "BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS": BACKTEST_RECOMMENDATIONS_MAX_AGE_HOURS,
         "KALSHI_VIP_POLL_INTERVAL": KALSHI_VIP_POLL_INTERVAL,
+        "LIP_MAX_MARKETS": LIP_MAX_MARKETS,
+        "LIP_SELECT_INTERVAL": LIP_SELECT_INTERVAL,
+        "LIP_DEPTH_PROBE_LIMIT": LIP_DEPTH_PROBE_LIMIT,
     }
     for name, val in _positive.items():
         if val <= 0:
@@ -1128,6 +1130,8 @@ def validate_config() -> list[str]:
         "POLYGON_GAS_ESTIMATE": POLYGON_GAS_ESTIMATE,
         "WEBHOOK_MIN_PROFIT": WEBHOOK_MIN_PROFIT,
         "ALERT_BALANCE_LOW_THRESHOLD": ALERT_BALANCE_LOW_THRESHOLD,
+        "LIP_MIN_POOL": LIP_MIN_POOL,
+        "LIP_MIN_HOURS_REMAINING": LIP_MIN_HOURS_REMAINING,
     }
     for name, val in _non_negative.items():
         if val < 0:
@@ -1199,6 +1203,14 @@ def validate_config() -> list[str]:
             f"STALE_PRICE_MOVE_PCT={STALE_PRICE_MOVE_PCT} "
             f"must be in (0, 1)"
         )
+    if not (0 <= LIP_PRICE_BAND_LOW <= 1):
+        raise ConfigError(
+            f"LIP_PRICE_BAND_LOW={LIP_PRICE_BAND_LOW} must be in [0, 1]"
+        )
+    if not (0 <= LIP_PRICE_BAND_HIGH <= 1):
+        raise ConfigError(
+            f"LIP_PRICE_BAND_HIGH={LIP_PRICE_BAND_HIGH} must be in [0, 1]"
+        )
 
     # --- Relationship checks ---
     if BASE_TRADE_SIZE > MAX_TRADE_SIZE:
@@ -1212,6 +1224,12 @@ def validate_config() -> list[str]:
             f"FILL_POLL_TIMEOUT ({FILL_POLL_TIMEOUT}) < "
             f"FILL_POLL_INTERVAL ({FILL_POLL_INTERVAL}); "
             f"polls may never complete"
+        )
+
+    if LIP_PRICE_BAND_HIGH < LIP_PRICE_BAND_LOW:
+        raise ConfigError(
+            f"LIP_PRICE_BAND_HIGH ({LIP_PRICE_BAND_HIGH}) must be >= "
+            f"LIP_PRICE_BAND_LOW ({LIP_PRICE_BAND_LOW})"
         )
 
     # --- Dashboard checks ---

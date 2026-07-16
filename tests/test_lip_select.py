@@ -2,6 +2,7 @@
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,15 +12,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from scans.lip_select import select_lip_markets
 
 
-FUTURE = "2030-01-01T00:00:00Z"
-SOON = "2026-06-12T06:00:00Z"  # < 24h from any 2026-06-12 run; always past by 2030
+FUTURE = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+SOON = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
 
 
 def _client(programs, prices=None, depths=None):
     c = MagicMock()
     c.fetch_incentive_programs.return_value = programs
     prices = prices or {}
-    c.get_market_price.side_effect = lambda m: (prices.get(m["ticker"], 0.50), None)
+    c.get_market_price.side_effect = lambda m: prices.get(m["ticker"], (0.50, 0.50))
     depths = depths or {}
     c.get_order_book_depth.side_effect = lambda t: depths.get(t, {"yes_ask_size": 0, "no_ask_size": 0})
     return c
@@ -55,12 +56,20 @@ class TestSelectLipMarkets:
         assert out[1]["pool_dollars"] == pytest.approx(100.0)
         assert out[1]["competition_depth"] == 20
 
-    def test_aggregates_multiple_programs_per_ticker(self):
-        programs = [_prog("X", 40.0), _prog("X", 60.0)]
+    def test_aggregates_multiple_programs_per_ticker_deterministically(self):
+        earlier = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+        later = (datetime.now(timezone.utc) + timedelta(days=60)).isoformat()
+        first = _prog("X", 40.0, end=later)
+        first["discount_factor_bps"] = 4000
+        second = _prog("X", 60.0, end=earlier)
+        second["discount_factor_bps"] = 6000
         data = _data({"EV": [{"ticker": "X", "close_time": FUTURE}]})
-        out = select_lip_markets(_client(programs), kalshi_data=data)
-        assert len(out) == 1
-        assert out[0]["pool_dollars"] == pytest.approx(100.0)
+        forward = select_lip_markets(_client([first, second]), kalshi_data=data)
+        reverse = select_lip_markets(_client([second, first]), kalshi_data=data)
+        assert forward == reverse
+        assert forward[0]["pool_dollars"] == pytest.approx(100.0)
+        assert forward[0]["program_end"] == earlier
+        assert forward[0]["discount_factor_bps"] == 6000
 
     def test_excludes_sports_category(self):
         programs = [_prog("SPORTY", 500.0), _prog("POLI", 50.0)]
@@ -93,9 +102,31 @@ class TestSelectLipMarkets:
             {"ticker": "TAIL", "close_time": FUTURE},
             {"ticker": "MID", "close_time": FUTURE},
         ]})
-        client = _client(programs, prices={"TAIL": 0.03, "MID": 0.50})
+        client = _client(programs, prices={"TAIL": (0.04, 0.98), "MID": (0.55, 0.55)})
         out = select_lip_markets(client, kalshi_data=data)
         assert [o["ticker"] for o in out] == ["MID"]
+        assert out[0]["mid"] == pytest.approx(0.50)
+
+    def test_price_band_uses_mid_not_yes_ask(self):
+        programs = [_prog("WIDE", 100.0)]
+        data = _data({"EV": [{"ticker": "WIDE", "close_time": FUTURE}]})
+        out = select_lip_markets(
+            _client(programs, prices={"WIDE": (0.92, 0.52)}),
+            kalshi_data=data,
+        )
+        assert len(out) == 1
+        assert out[0]["mid"] == pytest.approx(0.70)
+
+    @pytest.mark.parametrize("program_end,market_close", [
+        (None, FUTURE),
+        ("not-a-date", FUTURE),
+        (FUTURE, None),
+        (FUTURE, "not-a-date"),
+    ])
+    def test_missing_or_invalid_duration_is_excluded(self, program_end, market_close):
+        programs = [_prog("UNKNOWN-DURATION", 100.0, end=program_end)]
+        data = _data({"EV": [{"ticker": "UNKNOWN-DURATION", "close_time": market_close}]})
+        assert select_lip_markets(_client(programs), kalshi_data=data) == []
 
     def test_unknown_ticker_skipped(self):
         programs = [_prog("GHOST", 100.0)]

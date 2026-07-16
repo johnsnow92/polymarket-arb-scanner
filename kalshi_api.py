@@ -339,7 +339,7 @@ class KalshiClient:
             if resp is None or resp.status_code != 200:
                 logger.warning("Kalshi fetch_incentive_programs failed: %s",
                                resp.status_code if resp is not None else "no response")
-                break
+                return []
             data = resp.json()
             page = data.get("incentive_programs", [])
             for p in page:
@@ -348,6 +348,13 @@ class KalshiClient:
             cursor = data.get("next_cursor")
             if not cursor:
                 break
+        else:
+            logger.warning(
+                "Kalshi fetch_incentive_programs exhausted max_pages=%d with a live cursor; "
+                "discarding partial results",
+                max_pages,
+            )
+            return []
         return programs
 
     def place_order(

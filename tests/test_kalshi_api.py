@@ -612,6 +612,24 @@ class TestFetchIncentivePrograms:
         with patch.object(c, "_request", return_value=None):
             assert c.fetch_incentive_programs() == []
 
+    def test_discards_partial_results_on_later_page_failure(self):
+        c = self._client()
+        first = {
+            "incentive_programs": [{"market_ticker": "A", "period_reward": 400000}],
+            "next_cursor": "abc",
+        }
+        with patch.object(c, "_request", side_effect=[_mock_response(200, first), None]):
+            assert c.fetch_incentive_programs() == []
+
+    def test_discards_partial_results_when_page_cap_exhausted(self):
+        c = self._client()
+        page = {
+            "incentive_programs": [{"market_ticker": "A", "period_reward": 400000}],
+            "next_cursor": "still-more",
+        }
+        with patch.object(c, "_request", return_value=_mock_response(200, page)):
+            assert c.fetch_incentive_programs(max_pages=1) == []
+
     def test_missing_period_reward_defaults_zero(self):
         c = self._client()
         page = {"incentive_programs": [{"market_ticker": "X"}], "next_cursor": None}
