@@ -300,6 +300,7 @@ class TestPolymarketTraderPlaceOrder:
         }
         trader = PolymarketTrader.__new__(PolymarketTrader)
         trader.client = mock_client
+        trader.execution_enabled = True
 
         resp = trader.place_order(
             token_id="tok",
@@ -325,6 +326,7 @@ class TestPolymarketTraderPlaceOrder:
         mock_client.create_and_post_order.return_value = {"success": True, "orderID": "x"}
         trader = PolymarketTrader.__new__(PolymarketTrader)
         trader.client = mock_client
+        trader.execution_enabled = True
         # This is the exact call shape from executor._execute_single_leg
         resp = trader.place_order(
             token_id="tok",
@@ -341,6 +343,7 @@ class TestPolymarketTraderPlaceOrder:
         mock_client = MagicMock()
         trader = PolymarketTrader.__new__(PolymarketTrader)
         trader.client = mock_client
+        trader.execution_enabled = True
         resp = trader.place_order(
             token_id="tok", side="BUY", price=0.45, size=5.0, order_type="IOC",
         )
@@ -351,6 +354,7 @@ class TestPolymarketTraderPlaceOrder:
         """GTD without a non-zero expiration must raise ValueError."""
         trader = PolymarketTrader.__new__(PolymarketTrader)
         trader.client = MagicMock()
+        trader.execution_enabled = True
         with pytest.raises(ValueError):
             trader.place_order(
                 token_id="tok", side="BUY", price=0.45, size=5.0, order_type="GTD",
@@ -368,6 +372,7 @@ class TestPolymarketTraderPlaceOrder:
         mock_client.create_and_post_order.return_value = {"success": True, "orderID": "x"}
         trader = PolymarketTrader.__new__(PolymarketTrader)
         trader.client = mock_client
+        trader.execution_enabled = True
         captured = {}
 
         class _CapturingOrderArgs:
@@ -384,6 +389,16 @@ class TestPolymarketTraderPlaceOrder:
         call = mock_client.create_and_post_order.call_args
         assert call.kwargs["order_type"] == polymarket_api._ORDER_TYPE_MAP["GTD"]
         assert isinstance(call.args[0], _CapturingOrderArgs)
+
+    def test_place_order_is_blocked_without_explicit_code_gate(self):
+        mock_client = MagicMock()
+        trader = PolymarketTrader.__new__(PolymarketTrader)
+        trader.client = mock_client
+
+        assert trader.place_order(
+            token_id="tok", side="BUY", price=0.45, size=5.0,
+        ) is None
+        mock_client.create_and_post_order.assert_not_called()
 
 
 class TestPolymarketTraderCancelOrder:
@@ -489,7 +504,7 @@ class TestClobProxyInjection:
                           side_effect=lambda url: calls.append(("proxy", url))), \
              patch.object(polymarket_api, "ClobClient",
                           side_effect=lambda **kw: calls.append(("client",)) or MagicMock()):
-            PolymarketTrader(private_key="0xkey")
+            PolymarketTrader(private_key="0xkey", execution_enabled=True)
         assert calls[0] == ("proxy", "http://proxy.local:8080")
         assert ("client",) in calls
 
@@ -504,7 +519,7 @@ class TestClobProxyInjection:
             with patch.dict(os.environ, {"POLYMARKET_PROXY_URL": "http://proxy.local:8080"}), \
                  patch.object(polymarket_api, "ClobClient") as mock_cls:
                 with pytest.raises(RuntimeError):
-                    PolymarketTrader(private_key="0xkey")
+                    PolymarketTrader(private_key="0xkey", execution_enabled=True)
                 assert not mock_cls.called
         finally:
             if had_attr:
@@ -515,7 +530,7 @@ class TestClobProxyInjection:
         with patch.dict(os.environ, env_without, clear=True), \
              patch.object(polymarket_api, "_install_clob_proxy") as mock_install, \
              patch.object(polymarket_api, "ClobClient", return_value=MagicMock()):
-            PolymarketTrader(private_key="0xkey")
+            PolymarketTrader(private_key="0xkey", execution_enabled=True)
         assert not mock_install.called
 
 

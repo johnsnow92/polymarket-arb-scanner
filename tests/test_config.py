@@ -357,6 +357,17 @@ class TestValidateConfigWarnings:
 
 class TestPlatformWhitelistConfig:
 
+    def test_default_whitelist_is_kalshi_only(self, monkeypatch):
+        monkeypatch.delenv("ENABLED_EXECUTION_PLATFORMS", raising=False)
+        cfg = _reload_config()
+        assert cfg.ENABLED_EXECUTION_PLATFORMS == frozenset({"kalshi"})
+
+    def test_live_polymarket_is_blocked(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,kalshi")
+        monkeypatch.setenv("DRY_RUN", "false")
+        with pytest.raises(ValueError, match="public-data/shadow-only"):
+            _reload_config()
+
     def test_valid_platforms_accepted(self, monkeypatch):
         monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,kalshi,sxbet")
         cfg = _reload_config()
@@ -411,7 +422,7 @@ class TestSXBetQuarantine:
     """SX Bet `place_order()` sends unsigned JSON. Live trading must be blocked."""
 
     def test_live_trading_with_sxbet_raises(self, monkeypatch):
-        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,sxbet")
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "kalshi,sxbet")
         monkeypatch.setenv("DRY_RUN", "false")
         with pytest.raises(ValueError, match="SX Bet"):
             _reload_config()
@@ -423,10 +434,10 @@ class TestSXBetQuarantine:
         assert "sxbet" in cfg.ENABLED_EXECUTION_PLATFORMS
 
     def test_live_trading_without_sxbet_ok(self, monkeypatch):
-        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,kalshi")
+        monkeypatch.setenv("ENABLED_EXECUTION_PLATFORMS", "kalshi")
         monkeypatch.setenv("DRY_RUN", "false")
         cfg = _reload_config()  # must not raise
-        assert "sxbet" not in cfg.ENABLED_EXECUTION_PLATFORMS
+        assert cfg.ENABLED_EXECUTION_PLATFORMS == frozenset({"kalshi"})
 
 
 class TestDashboardHostGuard:

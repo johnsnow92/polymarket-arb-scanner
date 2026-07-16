@@ -140,10 +140,16 @@ _VALID_PLATFORMS = frozenset([
     "polymarket", "kalshi", "betfair", "smarkets",
     "sxbet", "matchbook", "gemini", "ibkr",
 ])
-_raw_enabled = os.getenv("ENABLED_EXECUTION_PLATFORMS", "polymarket,kalshi")
+_raw_enabled = os.getenv("ENABLED_EXECUTION_PLATFORMS", "kalshi")
 ENABLED_EXECUTION_PLATFORMS: frozenset[str] = frozenset(
     p.strip().lower() for p in _raw_enabled.split(",") if p.strip()
 )
+
+# Strategy truth reset (2026-07-16): international Polymarket remains
+# public-data/shadow-only. This is deliberately a code-level breaker rather
+# than an environment toggle so a stale deployment variable cannot re-enable
+# authenticated order placement.
+POLYMARKET_EXECUTION_ENABLED = False
 
 # Platform minimum order sizes (USD). Orders below these are rejected
 # client-side to prevent API rejections and costly partial-fill hedging.
@@ -1258,6 +1264,13 @@ def validate_config() -> list[str]:
             f"ENABLED_EXECUTION_PLATFORMS contains unknown platforms: "
             f"{', '.join(sorted(unknown))}. "
             f"Valid: {', '.join(sorted(_VALID_PLATFORMS))}"
+        )
+
+    if "polymarket" in ENABLED_EXECUTION_PLATFORMS and not DRY_RUN:
+        raise ConfigError(
+            "Polymarket is public-data/shadow-only and cannot be included in "
+            "ENABLED_EXECUTION_PLATFORMS when DRY_RUN=false. Remove polymarket "
+            "from the execution whitelist."
         )
 
     # SX Bet quarantine — place_order() sends unsigned JSON and is rejected by

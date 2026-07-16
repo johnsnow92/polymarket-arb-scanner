@@ -263,7 +263,8 @@ class TestMultiCrossExecutor:
                  "side": "yes", "_token_id": "tok_c"},
             ],
         }
-        legs = executor._build_legs(opp, 5.0)
+        with patch("executor.ENABLED_EXECUTION_PLATFORMS", frozenset({"polymarket"})):
+            legs = executor._build_legs(opp, 5.0)
         assert len(legs) == 3
         for leg in legs:
             assert leg["platform"] == "polymarket"
@@ -302,7 +303,11 @@ class TestMultiCrossExecutor:
                  "side": "yes", "_token_id": "tok_c"},
             ],
         }
-        legs = executor._build_legs(opp, 5.0)
+        with patch(
+            "executor.ENABLED_EXECUTION_PLATFORMS",
+            frozenset({"polymarket", "kalshi"}),
+        ):
+            legs = executor._build_legs(opp, 5.0)
         assert len(legs) == 3
         platforms = [leg["platform"] for leg in legs]
         assert "polymarket" in platforms
