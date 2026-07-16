@@ -1,6 +1,5 @@
 """Tests for continuous.py — OpportunityIndex and WS-triggered execution logic."""
 
-import inspect
 import sys
 import os
 import threading
@@ -1253,12 +1252,27 @@ class TestSignalHandlerStopsMMPilotImmediately:
 
 
 class TestAsyncioSignalWakeup:
-    def test_continuous_loop_registers_wakeup_handlers(self):
-        """The running loop must own SIGINT/SIGTERM to wake its selector."""
+    def test_registers_both_wakeup_handlers(self):
+        """The loop must own SIGINT/SIGTERM to wake its selector."""
         import continuous
-        source = inspect.getsource(continuous.run_continuous)
-        assert "loop.add_signal_handler(sig, _signal_handler, sig, None)" in source
-        assert "asyncio.get_running_loop()" in source
+        loop = MagicMock()
+        handler = MagicMock()
+
+        assert continuous._install_asyncio_signal_wakeup(loop, handler) is True
+        assert loop.add_signal_handler.call_args_list == [
+            ((continuous.signal.SIGINT, handler,
+              continuous.signal.SIGINT, None), {}),
+            ((continuous.signal.SIGTERM, handler,
+              continuous.signal.SIGTERM, None), {}),
+        ]
+
+    def test_unsupported_loop_preserves_fallback(self):
+        import continuous
+        loop = MagicMock()
+        loop.add_signal_handler.side_effect = NotImplementedError
+
+        assert continuous._install_asyncio_signal_wakeup(
+            loop, MagicMock()) is False
 
 
 # ---------------------------------------------------------------------------

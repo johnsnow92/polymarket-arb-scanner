@@ -96,6 +96,16 @@ from scans import (
 logger = logging.getLogger(__name__)
 
 
+def _install_asyncio_signal_wakeup(loop, handler) -> bool:
+    """Register signal callbacks through asyncio's selector wakeup pipe."""
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, handler, sig, None)
+    except (NotImplementedError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 class OpportunityIndex:
     """Maps (platform, ticker/token) to opportunities for fast lookup on WS updates."""
 
@@ -1447,14 +1457,10 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         # the running loop as well: asyncio's self-pipe wakes the selector
         # immediately, so SIGINT/SIGTERM can enter the order-cancellation and
         # task-cleanup path without waiting for a scan/monitor timeout.
-        try:
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, _signal_handler, sig, None)
-        except (NotImplementedError, RuntimeError, ValueError):
-            # Windows and non-main-thread event loops do not support
-            # add_signal_handler; the synchronous handlers remain installed.
-            pass
+        # Windows and non-main-thread event loops do not support this; the
+        # synchronous handlers remain installed as the portable fallback.
+        _install_asyncio_signal_wakeup(
+            asyncio.get_running_loop(), _signal_handler)
 
         ws_task = None
         priority_consumer_task = None
