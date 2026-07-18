@@ -337,3 +337,120 @@ class TestUpdateSubscriptions:
 
         assert fm._pending_poly_subs == []
         assert fm._pending_kalshi_subs == []
+
+
+# ---------------------------------------------------------------------------
+# _handle_kalshi_message — orderbook semantics (audit C-1)
+# ---------------------------------------------------------------------------
+
+
+class TestKalshiOrderbookSemantics:
+    """Kalshi WS ``yes``/``no`` ladders are BID ladders ([price_cents, qty],
+    ascending). The executable YES ask is 100 - best NO bid, and vice versa.
+    Deltas mutate a per-ticker book; they do not carry full ladders."""
+
+    SNAPSHOT = {
+        "type": "orderbook_snapshot",
+        "msg": {
+            "market_ticker": "KXTEST-A",
+            "yes": [[30, 10], [40, 20]],
+            "no": [[45, 50], [55, 80]],
+        },
+    }
+
+    def test_snapshot_derives_asks_from_opposite_bids(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        fm._handle_kalshi_message(self.SNAPSHOT)
+
+        payload = cb.call_args[0][2]
+        # best NO bid 55c -> YES ask 45c, size = that NO bid's qty
+        assert payload["yes_ask"] == pytest.approx(0.45)
+        assert payload["yes_ask_size"] == 80
+        # best YES bid 40c -> NO ask 60c
+        assert payload["no_ask"] == pytest.approx(0.60)
+        assert payload["no_ask_size"] == 20
+
+    def test_delta_updates_book_and_recomputes_asks(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        fm._handle_kalshi_message(self.SNAPSHOT)
+        cb.reset_mock()
+
+        fm._handle_kalshi_message({
+            "type": "orderbook_delta",
+            "msg": {"market_ticker": "KXTEST-A", "side": "no", "price": 60, "delta": 40},
+        })
+        payload = cb.call_args[0][2]
+        # new best NO bid 60c -> YES ask 40c with the delta's qty
+        assert payload["yes_ask"] == pytest.approx(0.40)
+        assert payload["yes_ask_size"] == 40
+
+    def test_delta_removing_best_level_falls_back(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        fm._handle_kalshi_message(self.SNAPSHOT)
+        cb.reset_mock()
+
+        fm._handle_kalshi_message({
+            "type": "orderbook_delta",
+            "msg": {"market_ticker": "KXTEST-A", "side": "no", "price": 55, "delta": -80},
+        })
+        payload = cb.call_args[0][2]
+        # 55c level emptied -> best NO bid back to 45c -> YES ask 55c
+        assert payload["yes_ask"] == pytest.approx(0.55)
+        assert payload["yes_ask_size"] == 50
+
+    def test_delta_without_snapshot_yields_no_phantom_asks(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        fm._handle_kalshi_message({
+            "type": "orderbook_delta",
+            "msg": {"market_ticker": "KXNOSNAP", "side": "yes", "price": 45, "delta": 5},
+        })
+        payload = cb.call_args[0][2]
+        # only a one-sided partial book exists; NO side unknown -> yes_ask None
+        assert payload["yes_ask"] is None
+
+    def test_empty_side_reports_none_not_worst_price(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        fm._handle_kalshi_message({
+            "type": "orderbook_snapshot",
+            "msg": {"market_ticker": "KXONESIDE", "yes": [[40, 20]], "no": []},
+        })
+        payload = cb.call_args[0][2]
+        assert payload["yes_ask"] is None
+        assert payload["yes_ask_size"] == 0
+        assert payload["no_ask"] == pytest.approx(0.60)
+
+    def test_deltas_on_both_sides_before_snapshot_publish_none(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        # Deltas alone can never establish a complete book — no phantom asks.
+        for side, price in (("yes", 40), ("no", 55)):
+            fm._handle_kalshi_message({
+                "type": "orderbook_delta",
+                "msg": {"market_ticker": "KXDELTAONLY", "side": side, "price": price, "delta": 10},
+            })
+        payload = cb.call_args[0][2]
+        assert payload["yes_ask"] is None
+        assert payload["no_ask"] is None
+        assert payload["yes_ask_size"] == 0
+        assert payload["no_ask_size"] == 0
+
+    def test_reset_kalshi_books_requires_fresh_snapshot(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        fm._handle_kalshi_message(self.SNAPSHOT)
+        fm._reset_kalshi_books()
+        cb.reset_mock()
+
+        # Post-reconnect delta must not resurrect the stale pre-reset book.
+        fm._handle_kalshi_message({
+            "type": "orderbook_delta",
+            "msg": {"market_ticker": "KXTEST-A", "side": "no", "price": 60, "delta": 40},
+        })
+        payload = cb.call_args[0][2]
+        assert payload["yes_ask"] is None
+        assert payload["no_ask"] is None
