@@ -368,6 +368,7 @@ class FeedManager:
 
         async with websockets.connect(KALSHI_WS_URL, **connect_kwargs) as ws:
             logger.info("Kalshi connected. Subscribing to %d tickers...", len(self._kalshi_tickers))
+            self._reset_kalshi_books()
 
             # Subscribe to orderbook updates for each ticker
             for ticker in self._kalshi_tickers:
@@ -412,6 +413,14 @@ class FeedManager:
 
             self._kalshi_ws = None
 
+    def _reset_kalshi_books(self):
+        """Drop all cached Kalshi book state.
+
+        Called on (re)connect: after a connection gap the cached ladders are
+        stale, and deltas must not be applied until a fresh snapshot arrives.
+        """
+        self._kalshi_books.clear()
+
     def _handle_kalshi_message(self, data: dict):
         """Process a Kalshi WebSocket message.
 
@@ -432,8 +441,10 @@ class FeedManager:
             # ascending); the executable ask for one side is 100c minus the best
             # bid on the opposite side. Deltas carry a single (side, price, delta)
             # change, so a per-ticker book is maintained across messages.
-            book = self._kalshi_books.setdefault(ticker, {"yes": {}, "no": {}})
+            book = self._kalshi_books.get(ticker)
             if msg_type == "orderbook_snapshot":
+                book = {"yes": {}, "no": {}}
+                self._kalshi_books[ticker] = book
                 for side in ("yes", "no"):
                     ladder = msg.get(side) or []
                     book[side] = {
@@ -441,7 +452,7 @@ class FeedManager:
                         for level in ladder
                         if isinstance(level, (list, tuple)) and len(level) >= 2
                     }
-            else:
+            elif book is not None:
                 side = msg.get("side")
                 price = msg.get("price")
                 delta = msg.get("delta")
@@ -455,7 +466,9 @@ class FeedManager:
 
             normalised = dict(msg)  # keep raw fields for backward compat
             for side, opposite in (("yes", "no"), ("no", "yes")):
-                opposite_levels = book[opposite]
+                # A delta before the ticker's snapshot leaves book=None: the
+                # ladder is unknown, so publish no executable prices at all.
+                opposite_levels = book[opposite] if book is not None else {}
                 if opposite_levels:
                     best_bid = max(opposite_levels)
                     normalised[f"{side}_ask"] = (100 - best_bid) / 100.0

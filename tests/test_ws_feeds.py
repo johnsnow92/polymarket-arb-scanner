@@ -423,3 +423,34 @@ class TestKalshiOrderbookSemantics:
         assert payload["yes_ask"] is None
         assert payload["yes_ask_size"] == 0
         assert payload["no_ask"] == pytest.approx(0.60)
+
+    def test_deltas_on_both_sides_before_snapshot_publish_none(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        # Deltas alone can never establish a complete book — no phantom asks.
+        for side, price in (("yes", 40), ("no", 55)):
+            fm._handle_kalshi_message({
+                "type": "orderbook_delta",
+                "msg": {"market_ticker": "KXDELTAONLY", "side": side, "price": price, "delta": 10},
+            })
+        payload = cb.call_args[0][2]
+        assert payload["yes_ask"] is None
+        assert payload["no_ask"] is None
+        assert payload["yes_ask_size"] == 0
+        assert payload["no_ask_size"] == 0
+
+    def test_reset_kalshi_books_requires_fresh_snapshot(self):
+        cb = MagicMock()
+        fm = _make_feed(cb)
+        fm._handle_kalshi_message(self.SNAPSHOT)
+        fm._reset_kalshi_books()
+        cb.reset_mock()
+
+        # Post-reconnect delta must not resurrect the stale pre-reset book.
+        fm._handle_kalshi_message({
+            "type": "orderbook_delta",
+            "msg": {"market_ticker": "KXTEST-A", "side": "no", "price": 60, "delta": 40},
+        })
+        payload = cb.call_args[0][2]
+        assert payload["yes_ask"] is None
+        assert payload["no_ask"] is None
