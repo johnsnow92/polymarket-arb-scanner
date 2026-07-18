@@ -96,6 +96,9 @@ class FeedManager:
         self._pending_kalshi_subs: list[str] = []
         self._pending_betfair_subs: list[str] = []
         self._kalshi_ws = None
+        # Per-ticker Kalshi book state: {ticker: {"yes": {price_cents: qty}, "no": {...}}}.
+        # Needed because orderbook_delta messages carry single-level changes, not ladders.
+        self._kalshi_books: dict[str, dict[str, dict[int, float]]] = {}
         self._poly_ws = None
         self._last_message_time: dict[str, float] = {}  # platform -> timestamp
 
@@ -425,15 +428,38 @@ class FeedManager:
             if not ticker:
                 return
 
-            # Parse best yes/no ask from the ladder arrays.
-            # Kalshi ladders: [[price_cents, quantity], ...] sorted best-first.
+            # Kalshi WS "yes"/"no" ladders are BID ladders ([price_cents, qty],
+            # ascending); the executable ask for one side is 100c minus the best
+            # bid on the opposite side. Deltas carry a single (side, price, delta)
+            # change, so a per-ticker book is maintained across messages.
+            book = self._kalshi_books.setdefault(ticker, {"yes": {}, "no": {}})
+            if msg_type == "orderbook_snapshot":
+                for side in ("yes", "no"):
+                    ladder = msg.get(side) or []
+                    book[side] = {
+                        int(level[0]): level[1]
+                        for level in ladder
+                        if isinstance(level, (list, tuple)) and len(level) >= 2
+                    }
+            else:
+                side = msg.get("side")
+                price = msg.get("price")
+                delta = msg.get("delta")
+                if side in ("yes", "no") and isinstance(price, (int, float)) and isinstance(delta, (int, float)):
+                    levels = book[side]
+                    qty = levels.get(int(price), 0) + delta
+                    if qty > 0:
+                        levels[int(price)] = qty
+                    else:
+                        levels.pop(int(price), None)
+
             normalised = dict(msg)  # keep raw fields for backward compat
-            for side in ("yes", "no"):
-                ladder = msg.get(side, [])
-                if ladder and isinstance(ladder, list) and len(ladder[0]) >= 2:
-                    # Price is in cents (0-100); convert to dollars (0-1)
-                    normalised[f"{side}_ask"] = ladder[0][0] / 100.0
-                    normalised[f"{side}_ask_size"] = ladder[0][1]
+            for side, opposite in (("yes", "no"), ("no", "yes")):
+                opposite_levels = book[opposite]
+                if opposite_levels:
+                    best_bid = max(opposite_levels)
+                    normalised[f"{side}_ask"] = (100 - best_bid) / 100.0
+                    normalised[f"{side}_ask_size"] = opposite_levels[best_bid]
                 else:
                     normalised[f"{side}_ask"] = None
                     normalised[f"{side}_ask_size"] = 0
