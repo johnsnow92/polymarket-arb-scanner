@@ -980,6 +980,13 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     cross_pair_ws_enabled = os.getenv("CROSS_PAIR_WS_ENABLED", "true").lower() == "true"
     _cross_pair_min_profit_factor = float(os.getenv("CROSS_PAIR_WS_MIN_PROFIT_FACTOR", "1.0"))
 
+    # Cross-cycle Polymarket->Kalshi match cache for the convergence scan —
+    # titles are static, so fuzzy matching only runs for unseen markets and on
+    # a periodic full refresh instead of every cycle.
+    from scans.convergence_inputs import ConvergenceMatchCache
+    _convergence_match_cache = ConvergenceMatchCache(
+        refresh_interval=float(os.getenv("CONVERGENCE_REMATCH_INTERVAL", "1800")))
+
     # Initialize PriceTracker for stale price detection (Layer 2)
     _price_tracker = None
     try:
@@ -2047,51 +2054,16 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         from scans.convergence import scan_convergence
                         from config import CONVERGENCE_MIN_DIVERGENCE, CONVERGENCE_MIN_PLATFORMS
                         from matcher import match_cross_platform
-                        # Build platform_prices_map from current data
-                        _conv_prices: dict[str, dict] = {}
-                        if poly_markets:
-                            for mkt in poly_markets:
-                                cid = mkt.get("condition_id", "")
-                                title = mkt.get("question") or mkt.get("title", "")
-                                tokens = mkt.get("tokens", [])
-                                yp = None
-                                for t in tokens:
-                                    if t.get("outcome", "").lower() == "yes":
-                                        yp = t.get("price")
-                                if cid and yp:
-                                    _conv_prices.setdefault(cid, {})["polymarket"] = {
-                                        "yes": float(yp), "no": 1.0 - float(yp),
-                                    }
-                                    _conv_prices[cid]["_title"] = title
-                        if kalshi_data and kalshi_data[0] and poly_markets:
-                            kflat = []
-                            for evt in kalshi_data[0]:
-                                for mkt in evt.get("markets", [evt]):
-                                    kflat.append(mkt)
-                            matches = match_cross_platform(
-                                poly_markets, kflat, "polymarket", "kalshi",
-                                threshold=72, min_confidence=args.min_confidence,
-                            )
-                            for m in matches:
-                                pm_mkt = m.get("market_a", {})
-                                k_mkt = m.get("market_b", {})
-                                cid = pm_mkt.get("condition_id", "")
-                                ya = k_mkt.get("yes_ask") or k_mkt.get("yes_price")
-                                if cid and ya:
-                                    pv = float(ya)
-                                    if pv > 1:
-                                        pv /= 100.0
-                                    _conv_prices.setdefault(cid, {})["kalshi"] = {
-                                        "yes": pv, "no": 1.0 - pv,
-                                    }
-                        _conv_matched = []
-                        for mk, data in _conv_prices.items():
-                            title = data.pop("_title", mk)
-                            pp = {k: v for k, v in data.items() if isinstance(v, dict)}
-                            if len(pp) >= 2:
-                                _conv_matched.append({
-                                    "market_key": mk, "title": title, "platform_prices": pp,
-                                })
+                        from scans.convergence_inputs import build_convergence_matched
+                        _conv_matched = build_convergence_matched(
+                            poly_markets or [],
+                            kalshi_data[0] if kalshi_data and kalshi_data[0] else [],
+                            _convergence_match_cache,
+                            matcher_fn=match_cross_platform,
+                            min_confidence=args.min_confidence,
+                            min_platforms=CONVERGENCE_MIN_PLATFORMS,
+                            now=time.time(),
+                        )
                         conv_opps = scan_convergence(
                             _conv_matched, min_divergence=CONVERGENCE_MIN_DIVERGENCE,
                             min_platforms=CONVERGENCE_MIN_PLATFORMS, min_profit=min_profit,
