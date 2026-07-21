@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class GasMonitor:
-    """Fetches real-time gas prices for Polygon, tracks platform fee state.
+    """Fetches real-time gas prices for Polygon for gas-aware thresholds.
 
     When enabled, replaces static POLYGON_GAS_ESTIMATE with real-time data
     and computes dynamic execution thresholds based on actual costs.
@@ -141,7 +141,8 @@ class GasMonitor:
     ) -> float:
         """Calculate dynamic minimum profit threshold for a platform pair.
 
-        Accounts for gas costs on each leg plus platform-specific fees,
+        Accounts for Polygon gas costs on each on-chain leg (platform
+        trading fees are already netted out of scan net_profit by fees.py),
         multiplied by the safety margin.
 
         Args:

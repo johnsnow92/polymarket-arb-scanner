@@ -219,7 +219,7 @@ class TestGetEffectiveThreshold:
         assert threshold == pytest.approx(0.002 * 1.2)
 
     def test_cross_polymarket_kalshi(self):
-        """Polymarket vs Kalshi: 1 on-chain txn + Kalshi fee."""
+        """Polymarket vs Kalshi: 1 on-chain txn; gas only, no fee add-on."""
         monitor = self._make_monitor(gas_cost=0.001)
         threshold = monitor.get_effective_threshold("polymarket", "kalshi")
         # 1 txn * $0.001 (PM) + 0 txns (Kalshi); platform fees are NOT added —
@@ -228,21 +228,21 @@ class TestGetEffectiveThreshold:
         assert threshold == pytest.approx(expected)
 
     def test_cross_polymarket_betfair(self):
-        """Polymarket vs Betfair: 1 on-chain txn + Betfair fee."""
+        """Polymarket vs Betfair: 1 on-chain txn; gas only, no fee add-on."""
         monitor = self._make_monitor(gas_cost=0.001)
         threshold = monitor.get_effective_threshold("polymarket", "betfair")
         expected = 0.001 * 1.2
         assert threshold == pytest.approx(expected)
 
     def test_cross_polymarket_smarkets(self):
-        """Polymarket vs Smarkets: 1 on-chain txn + Smarkets fee."""
+        """Polymarket vs Smarkets: 1 on-chain txn; gas only, no fee add-on."""
         monitor = self._make_monitor(gas_cost=0.001)
         threshold = monitor.get_effective_threshold("polymarket", "smarkets")
         expected = 0.001 * 1.2
         assert threshold == pytest.approx(expected)
 
     def test_kalshi_internal_no_gas(self):
-        """Kalshi vs Kalshi: 0 on-chain txns, only Kalshi fees."""
+        """Kalshi vs Kalshi: 0 on-chain txns -> zero threshold."""
         monitor = self._make_monitor(gas_cost=0.001)
         threshold = monitor.get_effective_threshold("kalshi", "kalshi")
         # 0 gas txns; Kalshi fees are already inside scan net_profit -> $0.
