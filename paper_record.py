@@ -13,8 +13,6 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-_DAY_SECONDS = 86400.0
-
 
 class PaperRecordTracker:
     """Tracks the paper-trading window over the opportunities table.
@@ -31,7 +29,7 @@ class PaperRecordTracker:
         self.db = db
         self.notifier = notifier
         self.window_start = float(window_start or 0.0)
-        self.window_days = window_days
+        self.window_days = max(1, int(window_days))
         self._last_digest_day: int | None = None
         self._completion_sent = False
 
@@ -43,7 +41,11 @@ class PaperRecordTracker:
         """Call at (or after) each UTC day boundary; idempotent within a day."""
         if not self.enabled:
             return
-        day = int((now - self.window_start) // _DAY_SECONDS)
+        # Day index by UTC calendar date, not 86400s blocks: the loop calls
+        # this at the UTC daily reset, so a mid-day window start would
+        # otherwise skip the first digest and mislabel the rest.
+        start_date = datetime.fromtimestamp(self.window_start, tz=timezone.utc).date()
+        day = (datetime.fromtimestamp(now, tz=timezone.utc).date() - start_date).days
         if day < 1 or day == self._last_digest_day:
             return
         self._last_digest_day = day
@@ -52,12 +54,14 @@ class PaperRecordTracker:
             summary = self._summarise()
             self._send(self._format_digest(day, summary))
             if day >= self.window_days and not self._completion_sent:
-                self._completion_sent = True
-                self._send(self._format_completion(summary))
+                # Only mark sent on confirmed delivery — a webhook outage on
+                # day 7 must retry at the next boundary, not go silent.
+                if self._send(self._format_completion(summary)):
+                    self._completion_sent = True
         except Exception as exc:
             logger.warning("Paper-record digest failed: %s", exc)
 
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
 
     def _summarise(self) -> dict:
         since_iso = datetime.fromtimestamp(self.window_start, tz=timezone.utc).isoformat()
@@ -83,7 +87,8 @@ class PaperRecordTracker:
         ]
         for opp_type, count, avg_roi, max_roi in summary["by_type"]:
             lines.append(
-                f"  • {opp_type}: {count} (avg ROI {avg_roi * 100:.2f}%, max {max_roi * 100:.2f}%)")
+                f"  • {opp_type}: {count} (avg ROI {(avg_roi or 0) * 100:.2f}%, "
+                f"max {(max_roi or 0) * 100:.2f}%)")
         if summary["by_action"]:
             actions = ", ".join(f"{action or 'unknown'}={count}" for action, count in summary["by_action"])
             lines.append(f"Outcomes: {actions}")
@@ -99,10 +104,12 @@ class PaperRecordTracker:
             f"tune-and-walk-the-gate vs Layer-3 pivot. Run /goal for the full read."
         )
 
-    def _send(self, message: str) -> None:
+    def _send(self, message: str) -> bool:
         if not self.notifier:
-            return
+            return False
         try:
             self.notifier.notify_text(message)
+            return True
         except Exception as exc:
             logger.warning("Paper-record notification failed: %s", exc)
+            return False

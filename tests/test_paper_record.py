@@ -23,6 +23,7 @@ START = time.time() - 0.5 * 86400  # window opened half a day ago;
 
 def _db_with_opps():
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
     db = TradeDB(tmp.name)
     db.log_opportunity("KalshiMulti(4)", "Fed Combo", "0.6,0.29", 0.91, 0.04, 0.033, 151.0, "skipped:gas_threshold")
     db.log_opportunity("KalshiMulti(4)", "Fed Combo", "0.6,0.29", 0.91, 0.04, 0.033, 151.0, "dry_run")
@@ -78,6 +79,41 @@ class TestCompletion:
         tracker.on_day_boundary(now=START + 6 * DAY)
         msgs = [c[0][0] for c in notifier.notify_text.call_args_list]
         assert not any("complete" in m.lower() for m in msgs)
+
+
+class TestReviewHardening:
+    def test_null_roi_rows_do_not_break_digest(self):
+        db = _db_with_opps()
+        with db._lock:
+            db.conn.execute(
+                "INSERT INTO opportunities (timestamp, type, market, prices, total_cost,"
+                " net_profit, net_roi, depth, action) VALUES (?,?,?,?,?,?,NULL,?,?)",
+                ("2099-01-01T00:00:00+00:00", "LegacyType", "old", "", 0.5, 0.01, 10.0, "dry_run"))
+            db.conn.commit()
+        # Make the NULL row visible: window covers everything.
+        notifier = MagicMock()
+        tracker = PaperRecordTracker(db, notifier, window_start=START, window_days=7)
+        tracker.on_day_boundary(now=START + 1 * DAY)
+        assert notifier.notify_text.call_count == 1
+
+    def test_failed_completion_send_retries_next_boundary(self):
+        notifier = MagicMock()
+        notifier.notify_text.side_effect = [None, RuntimeError("down"), None, None]
+        tracker = PaperRecordTracker(_db_with_opps(), notifier, window_start=START, window_days=7)
+        tracker.on_day_boundary(now=START + 7 * DAY)   # digest ok, completion fails
+        tracker.on_day_boundary(now=START + 8 * DAY)   # digest ok, completion retried
+        completions = [c[0][0] for c in notifier.notify_text.call_args_list
+                       if "complete" in c[0][0].lower()]
+        assert len(completions) == 2  # one failed attempt + one delivered
+        # Delivered now; day 9 must not send a third.
+        tracker.on_day_boundary(now=START + 9 * DAY)
+        completions = [c[0][0] for c in notifier.notify_text.call_args_list
+                       if "complete" in c[0][0].lower()]
+        assert len(completions) == 2
+
+    def test_window_days_clamped_to_minimum_one(self):
+        tracker = PaperRecordTracker(_db_with_opps(), MagicMock(), window_start=START, window_days=0)
+        assert tracker.window_days == 1
 
 
 class TestDisabled:
