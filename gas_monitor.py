@@ -12,22 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class GasMonitor:
-    """Fetches real-time gas prices for Polygon, tracks platform fee state.
+    """Fetches real-time gas prices for Polygon for gas-aware thresholds.
 
     When enabled, replaces static POLYGON_GAS_ESTIMATE with real-time data
     and computes dynamic execution thresholds based on actual costs.
     """
-
-    # Platform-specific fee estimates (per-trade, in dollars)
-    # These approximate the additional platform costs beyond gas.
-    PLATFORM_FEES = {
-        "polymarket": 0.0,       # Gas only (handled separately)
-        "kalshi": 0.02,          # ~$0.02 taker fee per contract
-        "betfair": 0.05,         # 5% of typical profit (~$1 spread)
-        "smarkets": 0.02,        # 2% commission
-        "sxbet": 0.0,            # 0% commission on API trades
-        "matchbook": 0.0,        # 0% commission
-    }
 
     # Number of Polygon transactions required per platform leg
     # Polymarket trades settle on-chain; others are off-chain.
@@ -152,7 +141,8 @@ class GasMonitor:
     ) -> float:
         """Calculate dynamic minimum profit threshold for a platform pair.
 
-        Accounts for gas costs on each leg plus platform-specific fees,
+        Accounts for Polygon gas costs on each on-chain leg (platform
+        trading fees are already netted out of scan net_profit by fees.py),
         multiplied by the safety margin.
 
         Args:
@@ -169,12 +159,11 @@ class GasMonitor:
         txns_b = self.PLATFORM_GAS_TXNS.get(platform_b.lower(), 0)
         total_gas = gas_cost_per_tx * (txns_a + txns_b)
 
-        # Add platform-specific fee estimates
-        fee_a = self.PLATFORM_FEES.get(platform_a.lower(), 0.0)
-        fee_b = self.PLATFORM_FEES.get(platform_b.lower(), 0.0)
-
-        raw_cost = total_gas + fee_a + fee_b
-        return raw_cost * self.safety_margin
+        # Gas only: platform trading fees are already netted out of every
+        # scan's net_profit by fees.py — re-adding flat estimates here
+        # double-charged fees and skipped fee-netted opportunities (a $0.04
+        # KalshiMulti profit lost to a phantom $0.048 "gas" threshold).
+        return total_gas * self.safety_margin
 
     def should_execute(self, opp: dict) -> bool:
         """Check if an opportunity's profit exceeds the dynamic threshold.
