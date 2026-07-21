@@ -17,7 +17,11 @@ cycles. One item per invocation, done properly, beats three items rushed.
 3. Check production reality before trusting any narrative: Railway service
    `polymarket-arb-scanner` (`railway logs`, and `/status` on
    `arb-scanner-production.up.railway.app` with Basic auth `DASHBOARD_USER` +
-   `DASHBOARD_PASS` from `railway variables`). Confirm `DRY_RUN` is still `true`.
+   `DASHBOARD_PASS` from `railway variables`). Confirm ALL safety controls are
+   unchanged, not just one: `DRY_RUN=true`, `ENABLED_EXECUTION_PLATFORMS=kalshi`,
+   `MAX_TRADE_SIZE=10`, and `DAILY_LOSS_LIMIT` / `MAX_OPEN_POSITIONS` at their
+   recorded values. If ANY of these has drifted, stop — report the drift to
+   Jonathon via AskUserQuestion before selecting or doing any work.
 
 ## Execute (one cycle)
 
@@ -52,8 +56,11 @@ cycles. One item per invocation, done properly, beats three items rushed.
   decision via AskUserQuestion every single time.
 - **Never touch money paths live**: no withdrawals, transfers, order placement, or
   anything that moves funds — including "just to test".
-- Production env/config changes beyond read-only inspection: ask first, except
-  reverting a value to its documented code default when it is demonstrably wrong.
+- Production env/config changes beyond read-only inspection: ask first. The only
+  exception is reverting a non-safety value to its documented code default when it
+  is demonstrably wrong — and this exception NEVER applies to `DRY_RUN`,
+  `ENABLED_EXECUTION_PLATFORMS`, `MAX_TRADE_SIZE`, or any risk limit: those
+  require explicit human approval every time, in every direction.
 - Don't generate new audit-report PRs; fix or triage existing findings instead.
 - If the paper record shows the Layer-1 edge is dead (a full week of honest zero),
   don't keep grinding arb fixes — surface the Layer-3 (rewards MM) pivot decision
