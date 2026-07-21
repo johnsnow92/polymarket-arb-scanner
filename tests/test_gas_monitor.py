@@ -222,32 +222,31 @@ class TestGetEffectiveThreshold:
         """Polymarket vs Kalshi: 1 on-chain txn + Kalshi fee."""
         monitor = self._make_monitor(gas_cost=0.001)
         threshold = monitor.get_effective_threshold("polymarket", "kalshi")
-        # 1 txn * $0.001 (PM) + 0 txns (Kalshi) + $0 (PM fee) + $0.02 (Kalshi fee)
-        # = $0.021, * 1.2 = $0.0252
-        expected = (0.001 + 0.02) * 1.2
+        # 1 txn * $0.001 (PM) + 0 txns (Kalshi); platform fees are NOT added —
+        # scan net_profit is already fee-netted by fees.py (double-count fix).
+        expected = 0.001 * 1.2
         assert threshold == pytest.approx(expected)
 
     def test_cross_polymarket_betfair(self):
         """Polymarket vs Betfair: 1 on-chain txn + Betfair fee."""
         monitor = self._make_monitor(gas_cost=0.001)
         threshold = monitor.get_effective_threshold("polymarket", "betfair")
-        expected = (0.001 + 0.05) * 1.2
+        expected = 0.001 * 1.2
         assert threshold == pytest.approx(expected)
 
     def test_cross_polymarket_smarkets(self):
         """Polymarket vs Smarkets: 1 on-chain txn + Smarkets fee."""
         monitor = self._make_monitor(gas_cost=0.001)
         threshold = monitor.get_effective_threshold("polymarket", "smarkets")
-        expected = (0.001 + 0.02) * 1.2
+        expected = 0.001 * 1.2
         assert threshold == pytest.approx(expected)
 
     def test_kalshi_internal_no_gas(self):
         """Kalshi vs Kalshi: 0 on-chain txns, only Kalshi fees."""
         monitor = self._make_monitor(gas_cost=0.001)
         threshold = monitor.get_effective_threshold("kalshi", "kalshi")
-        # 0 gas txns + $0.02 * 2 Kalshi fees = $0.04, * 1.2 = $0.048
-        expected = (0.02 + 0.02) * 1.2
-        assert threshold == pytest.approx(expected)
+        # 0 gas txns; Kalshi fees are already inside scan net_profit -> $0.
+        assert threshold == pytest.approx(0.0)
 
     def test_sxbet_zero_fees(self):
         """SX Bet vs SX Bet: 0 gas, 0 platform fees -> threshold = 0."""
@@ -261,12 +260,11 @@ class TestGetEffectiveThreshold:
         monitor = self._make_monitor(gas_cost=0.001)
         t_pm_pm = monitor.get_effective_threshold("polymarket", "polymarket")
         t_pm_kalshi = monitor.get_effective_threshold("polymarket", "kalshi")
-        t_pm_betfair = monitor.get_effective_threshold("polymarket", "betfair")
+        t_kalshi_kalshi = monitor.get_effective_threshold("kalshi", "kalshi")
 
-        # Betfair has higher fee (0.05) than Kalshi (0.02)
-        assert t_pm_betfair > t_pm_kalshi
-        # Kalshi adds a $0.02 fee vs pure PM internal (gas only)
-        assert t_pm_kalshi > t_pm_pm
+        # Thresholds now track gas txn count only (fees live in net_profit).
+        assert t_pm_pm > t_pm_kalshi  # 2 on-chain legs vs 1
+        assert t_pm_kalshi > t_kalshi_kalshi  # 1 on-chain leg vs 0
 
     def test_safety_margin_applied(self):
         """Threshold should scale with safety_margin."""
@@ -321,7 +319,7 @@ class TestShouldExecute:
     def test_returns_false_for_unprofitable_opp(self):
         """Opportunity with profit below threshold should fail."""
         monitor = self._make_monitor(gas_cost=0.01)
-        # Threshold for PM vs Betfair: (0.01 + 0.05) * 1.2 = 0.072
+        # Threshold for PM vs Betfair: 1 gas txn * 0.01 * 1.2 = 0.012
         opp = {
             "net_profit": 0.01,
             "_platform_a": "polymarket",
@@ -329,6 +327,16 @@ class TestShouldExecute:
             "type": "Cross-Betfair",
         }
         assert monitor.should_execute(opp) is False
+
+    def test_fee_netted_kalshi_multi_passes(self):
+        """Regression (2026-07-21): a KalshiMulti(4) with $0.04 net profit —
+        already net of real Kalshi fees via net_profit_kalshi_multi — was
+        skipped as 'gas_threshold' because the gate re-added a flat $0.02/leg
+        fee estimate on a zero-gas platform. Fees live in net_profit; the
+        gate prices gas only."""
+        monitor = self._make_monitor(gas_cost=0.001)
+        opp = {"net_profit": 0.04, "type": "KalshiMulti(4)"}
+        assert monitor.should_execute(opp) is True
 
     def test_returns_true_when_disabled(self):
         """When disabled, should_execute always returns True."""
