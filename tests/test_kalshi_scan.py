@@ -2,6 +2,7 @@
 
 import pytest
 from unittest.mock import MagicMock, patch
+from typing import ClassVar
 import sys
 import os
 
@@ -352,7 +353,7 @@ class TestScanKalshiMultiExhaustiveness:
     8% riskless arb; if the value lands 0-3 every leg loses. A scalar strike
     ladder is only exhaustive when it has open-ended tail buckets."""
 
-    CLOSE = {"close_time": "2030-01-01T00:00:00Z", "expiration_time": "2030-01-01T00:00:00Z"}
+    CLOSE: ClassVar[dict[str, str]] = {"close_time": "2030-01-01T00:00:00Z", "expiration_time": "2030-01-01T00:00:00Z"}
 
     def _scan(self, markets, prices):
         from scans.kalshi import scan_kalshi_multi
@@ -390,6 +391,27 @@ class TestScanKalshiMultiExhaustiveness:
         result = self._scan(markets, prices)
         assert len(result) == 1
         assert result[0]["type"] == "KalshiMulti(4)"
+
+    def test_ladder_with_interior_gap_is_rejected(self):
+        # Tails present but bucket 4 missing (<=3, 5, >=6): a 4 loses every leg.
+        markets = [
+            {"ticker": "K-LOW", "title": "3 or fewer", "floor_strike": None, "cap_strike": 3, **self.CLOSE},
+            {"ticker": "K-5", "title": "5", "floor_strike": 5, "cap_strike": 5, **self.CLOSE},
+            {"ticker": "K-HIGH", "title": "6 or more", "floor_strike": 6, "cap_strike": None, **self.CLOSE},
+        ]
+        prices = [(0.28, 0.73), (0.30, 0.71), (0.28, 0.73)]  # asks sum 0.86
+        assert self._scan(markets, prices) == []
+
+    def test_ladder_with_between_buckets_is_kept(self):
+        # <=3, between 4-5, >=6: contiguous coverage with a range bucket.
+        markets = [
+            {"ticker": "K-LOW", "title": "3 or fewer", "floor_strike": None, "cap_strike": 3, **self.CLOSE},
+            {"ticker": "K-MID", "title": "4 to 5", "floor_strike": 4, "cap_strike": 5, **self.CLOSE},
+            {"ticker": "K-HIGH", "title": "6 or more", "floor_strike": 6, "cap_strike": None, **self.CLOSE},
+        ]
+        prices = [(0.28, 0.73), (0.32, 0.69), (0.28, 0.73)]  # asks sum 0.88
+        result = self._scan(markets, prices)
+        assert len(result) == 1
 
     def test_categorical_event_without_strikes_unchanged(self):
         # No strike fields at all -> no structural signal; existing behavior kept.

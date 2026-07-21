@@ -223,7 +223,26 @@ def scan_kalshi_multi(
             return None
         has_open_bottom = any(f is None and c is not None for f, c in strikes)
         has_open_top = any(f is not None and c is None for f, c in strikes)
-        return has_open_bottom and has_open_top
+        if not (has_open_bottom and has_open_top):
+            return False
+        # Interior contiguity: tails alone don't rule out a missing middle
+        # bucket (<=3, 5, >=6 omits 4). Sort bounded intervals by floor and
+        # require each to start within one tick of the previous cap; the same
+        # rule links the bottom tail's cap and the top tail's floor.
+        try:
+            bottom_cap = max(float(c) for f, c in strikes if f is None and c is not None)
+            top_floor = min(float(f) for f, c in strikes if f is not None and c is None)
+            interior = sorted(
+                (float(f), float(c)) for f, c in strikes if f is not None and c is not None
+            )
+        except (TypeError, ValueError):
+            return False
+        prev_cap = bottom_cap
+        for floor, cap in interior:
+            if floor - prev_cap > 1:
+                return False
+            prev_cap = max(prev_cap, cap)
+        return top_floor - prev_cap <= 1
 
     filtered_resolution = 0
     skipped_non_exclusive = 0
