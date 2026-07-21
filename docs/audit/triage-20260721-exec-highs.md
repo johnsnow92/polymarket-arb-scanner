@@ -3,11 +3,13 @@
 Triage of the ~21 execution-path HIGH findings from the 2026-07-17 consolidated audit
 (`.codebase-audit/report-20260717-consolidated.md`), each re-verified against
 `origin/master` @ `7d26e20` by independent verification passes. This document
-dispositions the backlog — it is a triage record, not a new audit.
+records the disposition of that backlog — it is a triage record, not a new audit.
 
 Verdicts: **CONFIRMED** (defect exists as described), **STALE** (already fixed/mitigated),
-**INVALID** (misreading). Exposure assumes today's config: `DRY_RUN=true`,
-`ENABLED_EXECUTION_PLATFORMS=kalshi`, `MAX_TRADE_SIZE=10`.
+**INVALID** (misreading), **ACCEPT** (real but knowingly not fixed — rationale recorded).
+Exposure assumes the deployed config as of 2026-07-21: `DRY_RUN=true`,
+`ENABLED_EXECUTION_PLATFORMS=kalshi`, `MAX_TRADE_SIZE=10`, `NEWS_SNIPE_ENABLED=true`,
+`DYNAMIC_FEE_ENABLED=true`.
 
 ## FIX-NOW (active today or poisons data regardless of DRY_RUN)
 
