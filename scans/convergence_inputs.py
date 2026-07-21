@@ -36,7 +36,7 @@ def _pm_yes_price(market: dict) -> float | None:
     for token in market.get("tokens", []):
         if token.get("outcome", "").lower() == "yes":
             price = token.get("price")
-            if price:
+            if price is not None:
                 return float(price)
     return None
 
@@ -113,8 +113,10 @@ def build_convergence_matched(
         if not kalshi_market:
             continue
         pm_yes = _pm_yes_price(market)
-        kalshi_yes = kalshi_market.get("yes_ask") or kalshi_market.get("yes_price")
-        if not pm_yes or not kalshi_yes:
+        kalshi_yes = kalshi_market.get("yes_ask")
+        if kalshi_yes is None:
+            kalshi_yes = kalshi_market.get("yes_price")
+        if pm_yes is None or kalshi_yes is None:
             continue
         kalshi_yes = float(kalshi_yes)
         if kalshi_yes > 1:

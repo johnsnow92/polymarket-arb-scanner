@@ -93,6 +93,22 @@ class TestBuildsMatchedMarkets:
         assert result[0]["platform_prices"]["kalshi"]["yes"] == 0.60
 
 
+class TestZeroPrices:
+    def test_zero_prices_are_not_dropped_by_truthiness(self):
+        # A 0.0 price is data, not absence — scan_convergence's own 0<p<1
+        # bound is the right place to exclude it, not a truthiness check here.
+        matcher = _matcher_for({"c1": "K-1"})
+        cache = ConvergenceMatchCache(refresh_interval=1800.0)
+        result = build_convergence_matched(
+            [_pm("c1", "Will X happen?", 0.0)],
+            [_kalshi_event("K-1", "Will X happen?", 0.60)],
+            cache, matcher_fn=matcher, min_confidence="medium",
+            min_platforms=2, now=1000.0,
+        )
+        assert len(result) == 1
+        assert result[0]["platform_prices"]["polymarket"]["yes"] == 0.0
+
+
 class TestMatchCache:
     def test_second_cycle_skips_matching_but_refreshes_prices(self):
         matcher = _matcher_for({"c1": "K-1"})
