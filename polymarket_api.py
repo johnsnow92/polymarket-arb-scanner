@@ -146,10 +146,14 @@ def fetch_all_markets(limit: int = 500, max_pages: int = 20) -> list[dict]:
             break
 
         all_markets.extend(markets)
-        offset += limit
-
-        if len(markets) < limit:
-            break
+        # Gamma silently caps the page size (limit=500 returns 100 rows), so
+        # advance by the actual page length and stop only on an empty page —
+        # `len(markets) < limit` would end pagination after the first page.
+        offset += len(markets)
+    else:
+        logger.warning(
+            "Polymarket markets pagination hit max_pages=%d (%d markets fetched) — universe may be truncated",
+            max_pages, len(all_markets))
 
     return all_markets
 
@@ -177,10 +181,13 @@ def fetch_events(limit: int = 500, max_pages: int = 20) -> list[dict]:
             break
 
         all_events.extend(events)
-        offset += limit
-
-        if len(events) < limit:
-            break
+        # Same server-side page cap as fetch_all_markets: advance by the
+        # actual page length; only an empty page means the end.
+        offset += len(events)
+    else:
+        logger.warning(
+            "Polymarket events pagination hit max_pages=%d (%d events fetched) — universe may be truncated",
+            max_pages, len(all_events))
 
     return all_events
 
