@@ -854,6 +854,11 @@ MARKET_TITLE_MAX_LEN = _env_int("MARKET_TITLE_MAX_LEN", "60")
 # before _is_near_resolution() flags it as a candidate. Default 48h.
 RESOLUTION_SNIPE_WINDOW_HOURS = _env_float("RESOLUTION_SNIPE_WINDOW_HOURS", "48")
 
+# Paper-trading window tracker (paper_record.py). PAPER_WINDOW_START is an ISO
+# UTC timestamp (e.g. "2026-07-21T20:30:00Z"); empty disables the tracker.
+PAPER_WINDOW_START = os.getenv("PAPER_WINDOW_START", "")
+PAPER_WINDOW_DAYS = _env_int("PAPER_WINDOW_DAYS", "7")
+
 # Dashboard query limits
 DASHBOARD_RECENT_TRADES_LIMIT = _env_int("DASHBOARD_RECENT_TRADES_LIMIT", "100")
 DASHBOARD_PNL_HISTORY_DAYS = _env_int("DASHBOARD_PNL_HISTORY_DAYS", "30")

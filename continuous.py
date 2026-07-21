@@ -980,6 +980,22 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     cross_pair_ws_enabled = os.getenv("CROSS_PAIR_WS_ENABLED", "true").lower() == "true"
     _cross_pair_min_profit_factor = float(os.getenv("CROSS_PAIR_WS_MIN_PROFIT_FACTOR", "1.0"))
 
+    # Paper-trading window tracker: daily digest + one-time completion alert.
+    _paper_tracker = None
+    try:
+        from config import PAPER_WINDOW_START, PAPER_WINDOW_DAYS
+        if PAPER_WINDOW_START and notifier:
+            from datetime import datetime as _dt
+            from paper_record import PaperRecordTracker
+            _window_start_ts = _dt.fromisoformat(
+                PAPER_WINDOW_START.replace("Z", "+00:00")).timestamp()
+            _paper_tracker = PaperRecordTracker(
+                db, notifier, window_start=_window_start_ts, window_days=PAPER_WINDOW_DAYS)
+            logger.info("Paper-record tracker active: window %s + %d days",
+                        PAPER_WINDOW_START, PAPER_WINDOW_DAYS)
+    except Exception as exc:
+        logger.warning("Paper-record tracker init failed: %s", exc)
+
     # Initialize PriceTracker for stale price detection (Layer 2)
     _price_tracker = None
     try:
@@ -1503,6 +1519,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if _alert_manager:
                     _alert_manager.reset_daily()
                 _last_daily_reset_date = _today
+                if _paper_tracker:
+                    _paper_tracker.on_day_boundary(time.time())
 
             try:
                 from concurrent.futures import ThreadPoolExecutor
