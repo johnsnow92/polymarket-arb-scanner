@@ -286,3 +286,78 @@ class TestRestClientShim:
         monkeypatch.setattr(builtins, "__import__", _no_sdk)
         client = supabase_sync.build_client_from_env()
         assert isinstance(client, supabase_sync.PostgrestClient)
+
+
+class TestWindowSeededHighWaterMark:
+    """An empty remote must not trigger a months-long historical backfill —
+    seed the mark just before the first in-window opportunity instead."""
+
+    def _db(self, tmp_path):
+        from db import TradeDB
+        db = TradeDB(str(tmp_path / "w.db"))
+        with db._lock:
+            for i, ts in enumerate(
+                ["2026-03-01T00:00:00+00:00", "2026-07-20T00:00:00+00:00",
+                 "2026-07-21T22:00:00+00:00", "2026-07-22T01:00:00+00:00"], 1):
+                db.conn.execute(
+                    "INSERT INTO opportunities (id, timestamp, type, market, prices,"
+                    " total_cost, net_profit, net_roi, depth, action)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (i, ts, "T", "m", "p", 1.0, 0.01, 0.01, 1.0, "dry_run"))
+            db.conn.commit()
+        return db
+
+    def test_empty_remote_seeds_from_window_start(self, tmp_path):
+        from supabase_sync import OpportunitySync
+        db = self._db(tmp_path)
+        try:
+            client = MagicMock()
+            chain = client.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value
+            chain.execute.return_value = MagicMock(data=[])
+            sync = OpportunitySync(client, db=db)
+            # Window opened 2026-07-21T21:08Z -> rows 3 and 4 are in-window;
+            # the mark must sit just before row 3, skipping 1-2 entirely.
+            from datetime import datetime, timezone
+            ws = datetime(2026, 7, 21, 21, 8, tzinfo=timezone.utc).timestamp()
+            assert sync.get_remote_high_water_mark(window_start_ts=ws) == 2
+        finally:
+            db.conn.close()
+
+    def test_remote_below_window_seed_is_floored_to_seed(self, tmp_path):
+        # A partially backfilled remote (pre-window rows only) must not pull
+        # the resume point back into history: the window seed is a floor.
+        from supabase_sync import OpportunitySync
+        db = self._db(tmp_path)
+        try:
+            client = MagicMock()
+            chain = client.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value
+            chain.execute.return_value = MagicMock(data=[{"source_id": 1}])
+            sync = OpportunitySync(client, db=db)
+            from datetime import datetime, timezone
+            ws = datetime(2026, 7, 21, 21, 8, tzinfo=timezone.utc).timestamp()
+            assert sync.get_remote_high_water_mark(window_start_ts=ws) == 2
+        finally:
+            db.conn.close()
+
+    def test_nonempty_remote_ignores_window_seed(self, tmp_path):
+        from supabase_sync import OpportunitySync
+        db = self._db(tmp_path)
+        try:
+            client = MagicMock()
+            chain = client.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value
+            chain.execute.return_value = MagicMock(data=[{"source_id": 3}])
+            sync = OpportunitySync(client, db=db)
+            assert sync.get_remote_high_water_mark(window_start_ts=1.0) == 3
+        finally:
+            db.conn.close()
+
+    def test_empty_remote_without_window_keeps_zero(self, tmp_path):
+        from supabase_sync import OpportunitySync
+        db = self._db(tmp_path)
+        try:
+            client = MagicMock()
+            chain = client.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value
+            chain.execute.return_value = MagicMock(data=[])
+            assert OpportunitySync(client, db=db).get_remote_high_water_mark() == 0
+        finally:
+            db.conn.close()
