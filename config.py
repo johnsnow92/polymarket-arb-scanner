@@ -857,6 +857,23 @@ RESOLUTION_SNIPE_WINDOW_HOURS = _env_float("RESOLUTION_SNIPE_WINDOW_HOURS", "48"
 # Mirror paper opportunities to Supabase (supabase_sync.OpportunitySync).
 OPP_SYNC_ENABLED = _env_bool("OPP_SYNC_ENABLED", "false")
 
+# Paper-trading window tracker (paper_record.py). PAPER_WINDOW_START is an ISO
+# UTC timestamp (e.g. "2026-07-21T20:30:00Z"); empty disables the tracker.
+# Validated here at import so a malformed timestamp fails loudly instead of
+# silently disabling the tracker mid-deploy.
+PAPER_WINDOW_START = os.getenv("PAPER_WINDOW_START", "")
+PAPER_WINDOW_START_TS = 0.0
+if PAPER_WINDOW_START:
+    try:
+        from datetime import datetime as _pw_dt
+        PAPER_WINDOW_START_TS = _pw_dt.fromisoformat(
+            PAPER_WINDOW_START.replace("Z", "+00:00")).timestamp()
+    except ValueError as _pw_exc:
+        raise ConfigError(
+            f"PAPER_WINDOW_START is not a valid ISO timestamp: {PAPER_WINDOW_START!r}"
+        ) from _pw_exc
+PAPER_WINDOW_DAYS = max(1, _env_int("PAPER_WINDOW_DAYS", "7"))
+
 # Dashboard query limits
 DASHBOARD_RECENT_TRADES_LIMIT = _env_int("DASHBOARD_RECENT_TRADES_LIMIT", "100")
 DASHBOARD_PNL_HISTORY_DAYS = _env_int("DASHBOARD_PNL_HISTORY_DAYS", "30")
