@@ -69,10 +69,11 @@ def build_client_from_env():
     """Build a Supabase client from SUPABASE_URL + SUPABASE_SERVICE_KEY.
 
     Returns:
-        A supabase Client.
+        A supabase-py Client when the SDK is installed, otherwise the built-in
+        PostgrestClient (same interface subset).
 
     Raises:
-        RuntimeError: If credentials are missing or supabase-py is not installed.
+        RuntimeError: If credentials are missing.
     """
     url = os.getenv('SUPABASE_URL')
     key = os.getenv('SUPABASE_SERVICE_KEY') or os.getenv('SUPABASE_KEY')
@@ -141,8 +142,6 @@ class _PostgrestQuery:
         return self
 
     def execute(self) -> _PostgrestResponse:
-        import requests as _requests  # session may be injected in tests
-
         if self._mode == 'upsert':
             resp = self._session.post(
                 self._url,
@@ -150,13 +149,17 @@ class _PostgrestQuery:
                 headers=self._headers({'Prefer': 'resolution=merge-duplicates,return=minimal'}),
                 json=self._payload,
                 timeout=15,
+                allow_redirects=False,
             )
             if resp.status_code >= 300:
                 raise RuntimeError(
                     f'PostgREST upsert failed ({resp.status_code}): {resp.text[:200]}')
             return _PostgrestResponse([])
+        # Never follow redirects: the service key rides in headers and must not
+        # be replayed to a redirect target.
         resp = self._session.get(
-            self._url, params=self._params, headers=self._headers(), timeout=15)
+            self._url, params=self._params, headers=self._headers(), timeout=15,
+            allow_redirects=False)
         if resp.status_code >= 300:
             raise RuntimeError(
                 f'PostgREST select failed ({resp.status_code}): {resp.text[:200]}')
