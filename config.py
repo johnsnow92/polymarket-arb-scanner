@@ -854,6 +854,9 @@ MARKET_TITLE_MAX_LEN = _env_int("MARKET_TITLE_MAX_LEN", "60")
 # before _is_near_resolution() flags it as a candidate. Default 48h.
 RESOLUTION_SNIPE_WINDOW_HOURS = _env_float("RESOLUTION_SNIPE_WINDOW_HOURS", "48")
 
+# Mirror paper opportunities to Supabase (supabase_sync.OpportunitySync).
+OPP_SYNC_ENABLED = _env_bool("OPP_SYNC_ENABLED", "false")
+
 # Paper-trading window tracker (paper_record.py). PAPER_WINDOW_START is an ISO
 # UTC timestamp (e.g. "2026-07-21T20:30:00Z"); empty disables the tracker.
 # Validated here at import so a malformed timestamp fails loudly instead of
@@ -862,9 +865,14 @@ PAPER_WINDOW_START = os.getenv("PAPER_WINDOW_START", "")
 PAPER_WINDOW_START_TS = 0.0
 if PAPER_WINDOW_START:
     try:
-        from datetime import datetime as _pw_dt
-        PAPER_WINDOW_START_TS = _pw_dt.fromisoformat(
-            PAPER_WINDOW_START.replace("Z", "+00:00")).timestamp()
+        from datetime import datetime as _pw_dt, timezone as _pw_tz
+        _pw_parsed = _pw_dt.fromisoformat(PAPER_WINDOW_START.replace("Z", "+00:00"))
+        if _pw_parsed.tzinfo is None:
+            # A naive timestamp would be read as deploy-host local time,
+            # making the window deployment-dependent; the config contract is
+            # UTC, so pin it explicitly.
+            _pw_parsed = _pw_parsed.replace(tzinfo=_pw_tz.utc)
+        PAPER_WINDOW_START_TS = _pw_parsed.timestamp()
     except ValueError as _pw_exc:
         raise ConfigError(
             f"PAPER_WINDOW_START is not a valid ISO timestamp: {PAPER_WINDOW_START!r}"

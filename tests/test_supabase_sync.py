@@ -125,3 +125,97 @@ class TestSyncFromDb:
         sync = RewardSync(_FakeClient())
         with pytest.raises(RuntimeError):
             sync.sync_reward_metrics()
+
+
+# ---------------------------------------------------------------------------
+# OpportunitySync — paper-record mirror (2026-07-21 observability build-out)
+# ---------------------------------------------------------------------------
+
+
+class TestOpportunitySync:
+    @pytest.fixture
+    def opps_db(self, tmp_path):
+        from db import TradeDB
+        db = TradeDB(str(tmp_path / "opps.db"))
+        db.log_opportunity("KalshiMulti(4)", "Fed Combo", "0.6,0.29", 0.91, 0.04, 0.033, 151.0, "dry_run")
+        db.log_opportunity("CrossPlatform", "X vs Y", "0.5,0.4", 0.90, 0.06, 0.066, 80.0, "skipped:risk")
+        yield db
+        db.conn.close()
+
+    def test_syncs_new_rows_and_returns_high_water_mark(self, opps_db):
+        from supabase_sync import OpportunitySync
+        client = MagicMock()
+        db = opps_db
+        sync = OpportunitySync(client, db=db)
+
+        last_id = sync.sync_opportunities(after_id=0)
+
+        client.table.assert_called_once_with("paper_opportunities")
+        rows = client.table.return_value.upsert.call_args[0][0]
+        assert len(rows) == 2
+        assert {r["opp_type"] for r in rows} == {"KalshiMulti(4)", "CrossPlatform"}
+        assert all(r["engine"] == "arbgrid" for r in rows)
+        assert all("source_id" in r and "detected_at" in r for r in rows)
+        assert client.table.return_value.upsert.call_args[1]["on_conflict"] == "engine,source_id"
+        assert last_id == max(r["source_id"] for r in rows)
+
+    def test_incremental_sync_skips_already_synced(self, opps_db):
+        from supabase_sync import OpportunitySync
+        client = MagicMock()
+        db = opps_db
+        sync = OpportunitySync(client, db=db)
+        hwm = sync.sync_opportunities(after_id=0)
+        client.reset_mock()
+
+        # No new rows: no upsert call, high-water mark unchanged.
+        assert sync.sync_opportunities(after_id=hwm) == hwm
+        client.table.assert_not_called()
+
+        db.log_opportunity("KalshiBinary", "New", "0.9", 0.95, 0.02, 0.02, 40.0, "dry_run")
+        new_hwm = sync.sync_opportunities(after_id=hwm)
+        rows = client.table.return_value.upsert.call_args[0][0]
+        assert len(rows) == 1
+        assert new_hwm > hwm
+
+    def test_client_error_propagates_and_hwm_not_advanced(self, opps_db):
+        from supabase_sync import OpportunitySync
+        client = MagicMock()
+        client.table.return_value.upsert.return_value.execute.side_effect = RuntimeError("supabase down")
+        db = opps_db
+        sync = OpportunitySync(client, db=db)
+        with pytest.raises(RuntimeError):
+            sync.sync_opportunities(after_id=0)
+
+    def test_without_db_raises(self):
+        from supabase_sync import OpportunitySync
+        with pytest.raises(RuntimeError):
+            OpportunitySync(MagicMock(), db=None).sync_opportunities(after_id=0)
+
+
+class TestRemoteHighWaterMark:
+    def test_reads_max_source_id_from_supabase(self):
+        from supabase_sync import OpportunitySync
+        client = MagicMock()
+        chain = client.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value
+        chain.execute.return_value = MagicMock(data=[{"source_id": 445490}])
+        assert OpportunitySync(client).get_remote_high_water_mark() == 445490
+
+    def test_empty_table_returns_zero(self):
+        from supabase_sync import OpportunitySync
+        client = MagicMock()
+        chain = client.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value
+        chain.execute.return_value = MagicMock(data=[])
+        assert OpportunitySync(client).get_remote_high_water_mark() == 0
+
+    def test_outage_falls_back_to_local_max_not_full_backfill(self, tmp_path):
+        from supabase_sync import OpportunitySync
+        from db import TradeDB
+        db = TradeDB(str(tmp_path / "o.db"))
+        try:
+            db.log_opportunity("T", "m", "p", 1.0, 0.01, 0.01, 1.0, "dry_run")
+            local_max_row = db.conn.execute("SELECT MAX(id) FROM opportunities").fetchone()
+            client = MagicMock()
+            client.table.return_value.select.side_effect = RuntimeError("supabase down")
+            assert OpportunitySync(client, db=db).get_remote_high_water_mark() == local_max_row[0]
+        finally:
+            db.conn.close()

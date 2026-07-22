@@ -19,6 +19,7 @@ import os
 logger = logging.getLogger(__name__)
 
 REWARDS_TABLE = 'rewards_events'
+OPPORTUNITIES_TABLE = 'paper_opportunities'
 
 # reward_metrics is prediction-market market-making activity; rebates are
 # ordinary income for tax purposes (doc 07 tax map).
@@ -145,3 +146,83 @@ class RewardSync:
         rows = self._db.get_reward_metrics(since_ts=since_ts)
         events = [reward_metric_to_event(row) for row in rows]
         return self.upsert_events(events)
+
+
+class OpportunitySync:
+    """Mirror trades.db opportunity rows into Supabase paper_opportunities.
+
+    SQLite stays the source of truth; the mirror makes the paper record durable
+    off-box and queryable by cloud agents without deploy-environment
+    credentials. Idempotent via (engine, source_id) upsert; the caller tracks
+    the high-water mark and only advances it on successful delivery.
+    """
+
+    ENGINE = 'arbgrid'
+
+    def __init__(self, supabase_client, db=None):
+        self._client = supabase_client
+        self._db = db
+
+    def sync_opportunities(self, after_id: int = 0, limit: int = 500) -> int:
+        """Upsert opportunities with id > after_id; return the new high-water mark.
+
+        Raises on delivery failure so the caller does NOT advance the mark and
+        the rows are retried on the next call.
+        """
+        if self._db is None:
+            raise RuntimeError('OpportunitySync has no db to read opportunities from')
+        rows = self._db.get_opportunities_after(after_id, limit=limit)
+        if not rows:
+            return after_id
+        records = [
+            {
+                'engine': self.ENGINE,
+                'source_id': row['id'],
+                'detected_at': row['timestamp'],
+                'opp_type': row['type'],
+                'market': row['market'],
+                'prices': row['prices'],
+                'total_cost': row['total_cost'],
+                'net_profit': row['net_profit'],
+                'net_roi': row['net_roi'],
+                'depth': row['depth'],
+                'action': row['action'],
+            }
+            for row in rows
+        ]
+        try:
+            self._client.table(OPPORTUNITIES_TABLE).upsert(
+                records, on_conflict='engine,source_id'
+            ).execute()
+        except Exception as exc:
+            logger.error('Supabase opportunity upsert failed: %s', exc)
+            raise
+        return max(row['id'] for row in rows)
+
+    def get_remote_high_water_mark(self) -> int:
+        """Highest source_id already mirrored for this engine.
+
+        Returns 0 for an empty remote table. On an unreachable remote it
+        falls back to the LOCAL max opportunity id (when a db is attached, else
+        0) — deliberately skipping history so a Supabase outage at startup
+        never triggers a full historical backfill; rows detected while the
+        remote was down are not retro-mirrored.
+        """
+        try:
+            resp = (
+                self._client.table(OPPORTUNITIES_TABLE)
+                .select('source_id')
+                .eq('engine', self.ENGINE)
+                .order('source_id', desc=True)
+                .limit(1)
+                .execute()
+            )
+            data = getattr(resp, 'data', None) or []
+            return int(data[0]['source_id']) if data else 0
+        except Exception as exc:
+            logger.warning('Could not read remote opportunity high-water mark: %s', exc)
+            if self._db is not None:
+                with self._db._lock:
+                    row = self._db.conn.execute('SELECT MAX(id) FROM opportunities').fetchone()
+                return int(row[0] or 0)
+            return 0

@@ -987,6 +987,22 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     _convergence_match_cache = ConvergenceMatchCache(
         refresh_interval=float(os.getenv("CONVERGENCE_REMATCH_INTERVAL", "1800")))
 
+    # Mirror paper opportunities to the shared Supabase ledger (durable,
+    # queryable off-box). Resumes from the remote high-water mark; a Supabase
+    # outage falls back to the local max so no historical backfill storms.
+    _opp_sync = None
+    _opp_sync_hwm = 0
+    _opp_sync_inflight = False
+    try:
+        from config import OPP_SYNC_ENABLED
+        if OPP_SYNC_ENABLED:
+            from supabase_sync import OpportunitySync, build_client_from_env
+            _opp_sync = OpportunitySync(build_client_from_env(), db=db)
+            _opp_sync_hwm = _opp_sync.get_remote_high_water_mark()
+            logger.info("Opportunity Supabase sync active (resuming after id %d)", _opp_sync_hwm)
+    except Exception as exc:
+        logger.warning("Opportunity Supabase sync init failed: %s", exc)
+
     # Paper-trading window tracker: daily digest + one-time completion alert.
     _paper_tracker = None
     try:
@@ -2112,6 +2128,25 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     _price_tracker.cleanup(max_age_seconds=300)
 
                 # Platform fund rebalancing check (every 5 scans)
+                nonlocal _opp_sync_inflight
+                if _opp_sync and scan_count % 5 == 0 and not _opp_sync_inflight:
+                    # Offload the Supabase HTTP call — inline it would stall the
+                    # event loop (WS handling, priority execution) during a slow
+                    # or unreachable remote. Same pattern as the nightly backtest.
+                    _opp_sync_inflight = True
+                    async def _run_opp_sync():
+                        nonlocal _opp_sync_hwm, _opp_sync_inflight
+                        try:
+                            hwm = _opp_sync_hwm
+                            loop = asyncio.get_event_loop()
+                            _opp_sync_hwm = await loop.run_in_executor(
+                                None, lambda: _opp_sync.sync_opportunities(after_id=hwm))
+                        except Exception as exc:
+                            logger.warning("Opportunity Supabase sync failed (will retry): %s", exc)
+                        finally:
+                            _opp_sync_inflight = False
+                    asyncio.ensure_future(_run_opp_sync())
+
                 if scan_count % 5 == 0 and notifier:
                     try:
                         _check_platform_balance(
