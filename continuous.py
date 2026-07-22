@@ -987,6 +987,19 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     _convergence_match_cache = ConvergenceMatchCache(
         refresh_interval=float(os.getenv("CONVERGENCE_REMATCH_INTERVAL", "1800")))
 
+    # Paper-trading window tracker: daily digest + one-time completion alert.
+    _paper_tracker = None
+    try:
+        from config import PAPER_WINDOW_START, PAPER_WINDOW_START_TS, PAPER_WINDOW_DAYS
+        if PAPER_WINDOW_START_TS and notifier:
+            from paper_record import PaperRecordTracker
+            _paper_tracker = PaperRecordTracker(
+                db, notifier, window_start=PAPER_WINDOW_START_TS, window_days=PAPER_WINDOW_DAYS)
+            logger.info("Paper-record tracker active: window %s + %d days",
+                        PAPER_WINDOW_START, PAPER_WINDOW_DAYS)
+    except Exception as exc:
+        logger.warning("Paper-record tracker init failed: %s", exc)
+
     # Initialize PriceTracker for stale price detection (Layer 2)
     _price_tracker = None
     try:
@@ -1510,6 +1523,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if _alert_manager:
                     _alert_manager.reset_daily()
                 _last_daily_reset_date = _today
+                if _paper_tracker:
+                    _paper_tracker.on_day_boundary(time.time())
 
             try:
                 from concurrent.futures import ThreadPoolExecutor

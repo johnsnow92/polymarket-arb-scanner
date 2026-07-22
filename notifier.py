@@ -150,27 +150,31 @@ class WebhookNotifier:
             thread = threading.Thread(target=self._send_raw, args=(payload,), daemon=True)
             thread.start()
 
-    def notify_text(self, message: str):
+    def notify_text(self, message: str) -> bool:
         """Send a pre-formatted alert string, synchronously.
 
         Unlike notify()/notify_promo_warning()/notify_partial_fill(), this blocks
         until the send completes. Detection-core watchers (EDGAR, etc.) render
         their own ticket text via the core's formatter and run as short-lived
         crons — a daemon thread might not flush before the process exits.
+
+        Returns True only when a configured channel accepted the message —
+        callers that must retry (e.g. the paper-window completion alert) gate
+        on this instead of assuming fire-and-forget succeeded.
         """
         if not message:
-            return
+            return False
         if self._is_telegram:
-            self._send_telegram(message)
-        elif self._is_callmebot:
-            self._send_callmebot(message)
-        elif self.url:
+            return self._send_telegram(message)
+        if self._is_callmebot:
+            return self._send_callmebot(message)
+        if self.url:
             if "hooks.slack.com" in self.url:
-                self._send_raw({"text": message})
-            elif "discord.com/api/webhooks" in self.url:
-                self._send_raw({"content": message})
-            else:
-                self._send_raw({"message": message})
+                return self._send_raw({"text": message})
+            if "discord.com/api/webhooks" in self.url:
+                return self._send_raw({"content": message})
+            return self._send_raw({"message": message})
+        return False
 
     # ---------------------------------------------------------------------------
     # Internal dispatch
@@ -194,32 +198,33 @@ class WebhookNotifier:
         except requests.RequestException as e:
             logger.warning("Webhook request failed: %s", e)
 
-    def _send_raw(self, payload: dict):
-        """POST a raw payload to the webhook URL."""
+    def _send_raw(self, payload: dict) -> bool:
+        """POST a raw payload to the webhook URL. Returns delivery success."""
         try:
             if self._is_telegram:
                 msg = payload.get("text") or payload.get("content") or json.dumps(payload)
-                self._send_telegram(msg)
-                return
+                return self._send_telegram(msg)
             if self._is_callmebot:
                 msg = payload.get("text") or payload.get("content") or json.dumps(payload)
-                self._send_callmebot(msg)
-                return
+                return self._send_callmebot(msg)
             resp = self._session.post(self.url, json=payload, timeout=10)
             if resp.status_code >= 300:
                 logger.warning("Webhook returned %d: %s", resp.status_code, resp.text[:200])
+                return False
+            return True
         except requests.RequestException as e:
             logger.warning("Webhook request failed: %s", e)
+            return False
 
     # ---------------------------------------------------------------------------
     # Telegram Bot API
     # ---------------------------------------------------------------------------
 
-    def _send_telegram(self, text: str):
-        """Send a message via the Telegram Bot API."""
+    def _send_telegram(self, text: str) -> bool:
+        """Send a message via the Telegram Bot API. Returns delivery success."""
         if not self._telegram_token or not self._telegram_chat_id:
             logger.warning("Telegram not configured: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
-            return
+            return False
         url = f"https://api.telegram.org/bot{self._telegram_token}/sendMessage"
         payload = {
             "chat_id": self._telegram_chat_id,
@@ -231,20 +236,22 @@ class WebhookNotifier:
             resp = self._session.post(url, json=payload, timeout=10)
             if resp.status_code < 300:
                 logger.debug("Telegram sent: %s", text[:60])
-            else:
-                logger.warning("Telegram returned %d: %s", resp.status_code, _redact_secrets(resp.text)[:200])
+                return True
+            logger.warning("Telegram returned %d: %s", resp.status_code, _redact_secrets(resp.text)[:200])
+            return False
         except requests.RequestException as e:
             logger.warning("Telegram request failed: %s", _redact_secrets(str(e)))
+            return False
 
     # ---------------------------------------------------------------------------
     # CallMeBot WhatsApp
     # ---------------------------------------------------------------------------
 
-    def _send_callmebot(self, text: str):
-        """Send a plain-text message via CallMeBot WhatsApp API."""
+    def _send_callmebot(self, text: str) -> bool:
+        """Send via CallMeBot WhatsApp API. Returns delivery success."""
         if not self._callmebot_phone or not self._callmebot_apikey:
             logger.warning("CallMeBot not configured: missing CALLMEBOT_PHONE or CALLMEBOT_APIKEY")
-            return
+            return False
         url = (
             f"https://api.callmebot.com/whatsapp.php"
             f"?phone={urlquote(self._callmebot_phone)}"
@@ -255,10 +262,12 @@ class WebhookNotifier:
             resp = self._session.get(url, timeout=15)
             if resp.status_code < 300:
                 logger.debug("CallMeBot WhatsApp sent: %s", text[:60])
-            else:
-                logger.warning("CallMeBot returned %d: %s", resp.status_code, _redact_secrets(resp.text[:200]))
+                return True
+            logger.warning("CallMeBot returned %d: %s", resp.status_code, _redact_secrets(resp.text[:200]))
+            return False
         except requests.RequestException as e:
             logger.warning("CallMeBot request failed: %s", _redact_secrets(str(e)))
+            return False
 
     # ---------------------------------------------------------------------------
     # Formatting helpers
