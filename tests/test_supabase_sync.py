@@ -133,17 +133,19 @@ class TestSyncFromDb:
 
 
 class TestOpportunitySync:
-    def _db_with_opps(self, tmp_path):
+    @pytest.fixture
+    def opps_db(self, tmp_path):
         from db import TradeDB
         db = TradeDB(str(tmp_path / "opps.db"))
         db.log_opportunity("KalshiMulti(4)", "Fed Combo", "0.6,0.29", 0.91, 0.04, 0.033, 151.0, "dry_run")
         db.log_opportunity("CrossPlatform", "X vs Y", "0.5,0.4", 0.90, 0.06, 0.066, 80.0, "skipped:risk")
-        return db
+        yield db
+        db.conn.close()
 
-    def test_syncs_new_rows_and_returns_high_water_mark(self, tmp_path):
+    def test_syncs_new_rows_and_returns_high_water_mark(self, opps_db):
         from supabase_sync import OpportunitySync
         client = MagicMock()
-        db = self._db_with_opps(tmp_path)
+        db = opps_db
         sync = OpportunitySync(client, db=db)
 
         last_id = sync.sync_opportunities(after_id=0)
@@ -157,10 +159,10 @@ class TestOpportunitySync:
         assert client.table.return_value.upsert.call_args[1]["on_conflict"] == "engine,source_id"
         assert last_id == max(r["source_id"] for r in rows)
 
-    def test_incremental_sync_skips_already_synced(self, tmp_path):
+    def test_incremental_sync_skips_already_synced(self, opps_db):
         from supabase_sync import OpportunitySync
         client = MagicMock()
-        db = self._db_with_opps(tmp_path)
+        db = opps_db
         sync = OpportunitySync(client, db=db)
         hwm = sync.sync_opportunities(after_id=0)
         client.reset_mock()
@@ -175,11 +177,11 @@ class TestOpportunitySync:
         assert len(rows) == 1
         assert new_hwm > hwm
 
-    def test_client_error_propagates_and_hwm_not_advanced(self, tmp_path):
+    def test_client_error_propagates_and_hwm_not_advanced(self, opps_db):
         from supabase_sync import OpportunitySync
         client = MagicMock()
         client.table.return_value.upsert.return_value.execute.side_effect = RuntimeError("supabase down")
-        db = self._db_with_opps(tmp_path)
+        db = opps_db
         sync = OpportunitySync(client, db=db)
         with pytest.raises(RuntimeError):
             sync.sync_opportunities(after_id=0)
@@ -209,8 +211,11 @@ class TestRemoteHighWaterMark:
         from supabase_sync import OpportunitySync
         from db import TradeDB
         db = TradeDB(str(tmp_path / "o.db"))
-        db.log_opportunity("T", "m", "p", 1.0, 0.01, 0.01, 1.0, "dry_run")
-        local_max_row = db.conn.execute("SELECT MAX(id) FROM opportunities").fetchone()
-        client = MagicMock()
-        client.table.return_value.select.side_effect = RuntimeError("supabase down")
-        assert OpportunitySync(client, db=db).get_remote_high_water_mark() == local_max_row[0]
+        try:
+            db.log_opportunity("T", "m", "p", 1.0, 0.01, 0.01, 1.0, "dry_run")
+            local_max_row = db.conn.execute("SELECT MAX(id) FROM opportunities").fetchone()
+            client = MagicMock()
+            client.table.return_value.select.side_effect = RuntimeError("supabase down")
+            assert OpportunitySync(client, db=db).get_remote_high_water_mark() == local_max_row[0]
+        finally:
+            db.conn.close()

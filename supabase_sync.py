@@ -200,11 +200,13 @@ class OpportunitySync:
         return max(row['id'] for row in rows)
 
     def get_remote_high_water_mark(self) -> int:
-        """Highest source_id already mirrored for this engine (0 if none/unreachable).
+        """Highest source_id already mirrored for this engine.
 
-        Used at startup so a restart resumes the mirror instead of re-scanning
-        history; falls back to the local max id on failure so a Supabase outage
-        never triggers a full historical backfill.
+        Returns 0 for an empty remote table. On an unreachable remote it
+        falls back to the LOCAL max opportunity id (when a db is attached, else
+        0) — deliberately skipping history so a Supabase outage at startup
+        never triggers a full historical backfill; rows detected while the
+        remote was down are not retro-mirrored.
         """
         try:
             resp = (
