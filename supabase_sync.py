@@ -299,7 +299,7 @@ class OpportunitySync:
             raise
         return max(row['id'] for row in rows)
 
-    def get_remote_high_water_mark(self) -> int:
+    def get_remote_high_water_mark(self, window_start_ts: float = 0.0) -> int:
         """Highest source_id already mirrored for this engine.
 
         Returns 0 for an empty remote table. On an unreachable remote it
@@ -318,7 +318,31 @@ class OpportunitySync:
                 .execute()
             )
             data = getattr(resp, 'data', None) or []
-            return int(data[0]['source_id']) if data else 0
+            remote_max = int(data[0]['source_id']) if data else 0
+            seed = 0
+            if window_start_ts and self._db is not None:
+                # With a configured paper window, never resume below the first
+                # in-window row — otherwise a fresh (or partially backfilled)
+                # remote spends days mirroring months of pre-window history
+                # before current detections ever arrive.
+                import datetime as _dt
+                since_iso = _dt.datetime.fromtimestamp(
+                    window_start_ts, _dt.timezone.utc).isoformat()
+                with self._db._lock:
+                    row = self._db.conn.execute(
+                        'SELECT MIN(id) FROM opportunities WHERE timestamp >= ?',
+                        (since_iso,),
+                    ).fetchone()
+                if row and row[0]:
+                    seed = int(row[0]) - 1
+                else:
+                    # Window configured but no in-window rows yet (fresh start
+                    # or quiet period): seed at the local max so pre-window
+                    # history is still never replayed.
+                    row = self._db.conn.execute(
+                        'SELECT MAX(id) FROM opportunities').fetchone()
+                    seed = int(row[0] or 0)
+            return max(remote_max, seed)
         except Exception as exc:
             logger.warning('Could not read remote opportunity high-water mark: %s', exc)
             if self._db is not None:

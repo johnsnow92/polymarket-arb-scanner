@@ -998,7 +998,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         if OPP_SYNC_ENABLED:
             from supabase_sync import OpportunitySync, build_client_from_env
             _opp_sync = OpportunitySync(build_client_from_env(), db=db)
-            _opp_sync_hwm = _opp_sync.get_remote_high_water_mark()
+            from config import PAPER_WINDOW_START_TS as _pw_ts
+            _opp_sync_hwm = _opp_sync.get_remote_high_water_mark(window_start_ts=_pw_ts)
             logger.info("Opportunity Supabase sync active (resuming after id %d)", _opp_sync_hwm)
     except Exception as exc:
         logger.warning("Opportunity Supabase sync init failed: %s", exc)
