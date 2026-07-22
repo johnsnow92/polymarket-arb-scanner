@@ -82,9 +82,106 @@ def build_client_from_env():
         )
     try:
         from supabase import create_client
-    except ImportError as exc:
-        raise RuntimeError('supabase-py not installed (pip install supabase)') from exc
+    except ImportError:
+        logger.info('supabase-py not installed; using built-in PostgREST client')
+        return PostgrestClient(url, key)
     return create_client(url, key)
+
+
+class _PostgrestResponse:
+    """Minimal response wrapper matching supabase-py's ``.data`` attribute."""
+
+    def __init__(self, data):
+        self.data = data
+
+
+class _PostgrestQuery:
+    """Chainable query builder for one table, supabase-py-compatible subset."""
+
+    def __init__(self, base_url: str, key: str, table: str, session):
+        self._url = f"{base_url}/rest/v1/{table}"
+        self._key = key
+        self._session = session
+        self._mode = None
+        self._payload = None
+        self._params: dict = {}
+
+    def _headers(self, extra: dict | None = None) -> dict:
+        headers = {
+            'apikey': self._key,
+            'Authorization': f'Bearer {self._key}',
+            'Content-Type': 'application/json',
+        }
+        if extra:
+            headers.update(extra)
+        return headers
+
+    def upsert(self, rows: list[dict], on_conflict: str = ''):
+        self._mode = 'upsert'
+        self._payload = rows
+        if on_conflict:
+            self._params['on_conflict'] = on_conflict
+        return self
+
+    def select(self, columns: str = '*'):
+        self._mode = 'select'
+        self._params['select'] = columns
+        return self
+
+    def eq(self, column: str, value):
+        self._params[column] = f'eq.{value}'
+        return self
+
+    def order(self, column: str, desc: bool = False):
+        self._params['order'] = f"{column}.{'desc' if desc else 'asc'}"
+        return self
+
+    def limit(self, n: int):
+        self._params['limit'] = n
+        return self
+
+    def execute(self) -> _PostgrestResponse:
+        import requests as _requests  # session may be injected in tests
+
+        if self._mode == 'upsert':
+            resp = self._session.post(
+                self._url,
+                params=self._params,
+                headers=self._headers({'Prefer': 'resolution=merge-duplicates,return=minimal'}),
+                json=self._payload,
+                timeout=15,
+            )
+            if resp.status_code >= 300:
+                raise RuntimeError(
+                    f'PostgREST upsert failed ({resp.status_code}): {resp.text[:200]}')
+            return _PostgrestResponse([])
+        resp = self._session.get(
+            self._url, params=self._params, headers=self._headers(), timeout=15)
+        if resp.status_code >= 300:
+            raise RuntimeError(
+                f'PostgREST select failed ({resp.status_code}): {resp.text[:200]}')
+        return _PostgrestResponse(resp.json())
+
+
+class PostgrestClient:
+    """Dependency-free stand-in for supabase-py's client.
+
+    Speaks the PostgREST HTTP API directly with ``requests`` (already a runtime
+    dependency), covering exactly the chain this module uses:
+    ``table().upsert().execute()`` and ``table().select().eq().order().limit()
+    .execute()``. Used when supabase-py is not installed — the deployed image
+    never shipped it, which silently disabled the opportunity mirror.
+    """
+
+    def __init__(self, url: str, key: str, session=None):
+        import requests as _requests
+
+        self._url = url.rstrip('/')
+        self._key = key
+        self._session = session or _requests.Session()
+
+    def table(self, name: str) -> _PostgrestQuery:
+        return _PostgrestQuery(self._url, self._key, name, self._session)
 
 
 class RewardSync:

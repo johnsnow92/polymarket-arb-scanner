@@ -219,3 +219,70 @@ class TestRemoteHighWaterMark:
             assert OpportunitySync(client, db=db).get_remote_high_water_mark() == local_max_row[0]
         finally:
             db.conn.close()
+
+
+# ---------------------------------------------------------------------------
+# PostgREST fallback client (supabase-py is not a runtime dependency)
+# ---------------------------------------------------------------------------
+
+
+class TestRestClientShim:
+    def _client(self):
+        from supabase_sync import PostgrestClient
+        session = MagicMock()
+        session.post.return_value = MagicMock(status_code=201, text="")
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = [{"source_id": 42}]
+        session.get.return_value = resp
+        return PostgrestClient("https://proj.supabase.co", "svc-key", session=session), session
+
+    def test_upsert_posts_with_merge_duplicates(self):
+        client, session = self._client()
+        client.table("paper_opportunities").upsert(
+            [{"engine": "arbgrid", "source_id": 1}], on_conflict="engine,source_id"
+        ).execute()
+        url = session.post.call_args[0][0]
+        assert url == "https://proj.supabase.co/rest/v1/paper_opportunities"
+        kwargs = session.post.call_args[1]
+        assert kwargs["params"]["on_conflict"] == "engine,source_id"
+        assert "resolution=merge-duplicates" in kwargs["headers"]["Prefer"]
+        assert kwargs["headers"]["apikey"] == "svc-key"
+        assert kwargs["json"] == [{"engine": "arbgrid", "source_id": 1}]
+
+    def test_upsert_error_status_raises(self):
+        client, session = self._client()
+        session.post.return_value = MagicMock(status_code=409, text="conflict")
+        with pytest.raises(RuntimeError):
+            client.table("t").upsert([{"a": 1}], on_conflict="a").execute()
+
+    def test_select_chain_builds_query_and_returns_data(self):
+        client, session = self._client()
+        result = (
+            client.table("paper_opportunities")
+            .select("source_id")
+            .eq("engine", "arbgrid")
+            .order("source_id", desc=True)
+            .limit(1)
+            .execute()
+        )
+        assert result.data == [{"source_id": 42}]
+        params = session.get.call_args[1]["params"]
+        assert params["select"] == "source_id"
+        assert params["engine"] == "eq.arbgrid"
+        assert params["order"] == "source_id.desc"
+        assert params["limit"] == 1
+
+    def test_build_client_falls_back_to_shim_without_sdk(self, monkeypatch):
+        import supabase_sync
+        monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_KEY", "svc-key")
+        # Simulate supabase-py missing regardless of local environment.
+        import builtins
+        real_import = builtins.__import__
+        def _no_sdk(name, *a, **k):
+            if name == "supabase":
+                raise ImportError("No module named 'supabase'")
+            return real_import(name, *a, **k)
+        monkeypatch.setattr(builtins, "__import__", _no_sdk)
+        client = supabase_sync.build_client_from_env()
+        assert isinstance(client, supabase_sync.PostgrestClient)
