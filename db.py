@@ -617,6 +617,18 @@ class TradeDB:
                 for r in rows
             ]
 
+    def get_opportunities_after(self, after_id: int, limit: int = 500) -> list[dict]:
+        """Return opportunities with id > after_id, oldest first (for mirroring)."""
+        with self._lock:
+            cur = self.conn.execute(
+                """SELECT id, timestamp, type, market, prices, total_cost,
+                          net_profit, net_roi, depth, action
+                   FROM opportunities WHERE id > ? ORDER BY id ASC LIMIT ?""",
+                (after_id, limit),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
     def get_opportunity_stats_by_type(self) -> list[dict]:
         """Get opportunity statistics grouped by type.
 

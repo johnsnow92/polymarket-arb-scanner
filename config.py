@@ -854,6 +854,9 @@ MARKET_TITLE_MAX_LEN = _env_int("MARKET_TITLE_MAX_LEN", "60")
 # before _is_near_resolution() flags it as a candidate. Default 48h.
 RESOLUTION_SNIPE_WINDOW_HOURS = _env_float("RESOLUTION_SNIPE_WINDOW_HOURS", "48")
 
+# Mirror paper opportunities to Supabase (supabase_sync.OpportunitySync).
+OPP_SYNC_ENABLED = _env_bool("OPP_SYNC_ENABLED", "false")
+
 # Dashboard query limits
 DASHBOARD_RECENT_TRADES_LIMIT = _env_int("DASHBOARD_RECENT_TRADES_LIMIT", "100")
 DASHBOARD_PNL_HISTORY_DAYS = _env_int("DASHBOARD_PNL_HISTORY_DAYS", "30")

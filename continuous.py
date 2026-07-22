@@ -987,6 +987,21 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     _convergence_match_cache = ConvergenceMatchCache(
         refresh_interval=float(os.getenv("CONVERGENCE_REMATCH_INTERVAL", "1800")))
 
+    # Mirror paper opportunities to the shared Supabase ledger (durable,
+    # queryable off-box). Resumes from the remote high-water mark; a Supabase
+    # outage falls back to the local max so no historical backfill storms.
+    _opp_sync = None
+    _opp_sync_hwm = 0
+    try:
+        from config import OPP_SYNC_ENABLED
+        if OPP_SYNC_ENABLED:
+            from supabase_sync import OpportunitySync, build_client_from_env
+            _opp_sync = OpportunitySync(build_client_from_env(), db=db)
+            _opp_sync_hwm = _opp_sync.get_remote_high_water_mark()
+            logger.info("Opportunity Supabase sync active (resuming after id %d)", _opp_sync_hwm)
+    except Exception as exc:
+        logger.warning("Opportunity Supabase sync init failed: %s", exc)
+
     # Initialize PriceTracker for stale price detection (Layer 2)
     _price_tracker = None
     try:
@@ -2097,6 +2112,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     _price_tracker.cleanup(max_age_seconds=300)
 
                 # Platform fund rebalancing check (every 5 scans)
+                if _opp_sync and scan_count % 5 == 0:
+                    try:
+                        _opp_sync_hwm = _opp_sync.sync_opportunities(after_id=_opp_sync_hwm)
+                    except Exception as exc:
+                        logger.warning("Opportunity Supabase sync failed (will retry): %s", exc)
+
                 if scan_count % 5 == 0 and notifier:
                     try:
                         _check_platform_balance(
