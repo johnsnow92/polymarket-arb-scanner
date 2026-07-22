@@ -335,6 +335,13 @@ class OpportunitySync:
                     ).fetchone()
                 if row and row[0]:
                     seed = int(row[0]) - 1
+                else:
+                    # Window configured but no in-window rows yet (fresh start
+                    # or quiet period): seed at the local max so pre-window
+                    # history is still never replayed.
+                    row = self._db.conn.execute(
+                        'SELECT MAX(id) FROM opportunities').fetchone()
+                    seed = int(row[0] or 0)
             return max(remote_max, seed)
         except Exception as exc:
             logger.warning('Could not read remote opportunity high-water mark: %s', exc)

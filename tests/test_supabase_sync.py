@@ -351,6 +351,22 @@ class TestWindowSeededHighWaterMark:
         finally:
             db.conn.close()
 
+    def test_window_with_no_inwindow_rows_seeds_at_local_max(self, tmp_path):
+        # Window configured but nothing detected in-window yet: seed at the
+        # local max so an empty remote never replays pre-window history.
+        from supabase_sync import OpportunitySync
+        db = self._db(tmp_path)
+        try:
+            client = MagicMock()
+            chain = client.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value
+            chain.execute.return_value = MagicMock(data=[])
+            sync = OpportunitySync(client, db=db)
+            from datetime import datetime, timezone
+            ws = datetime(2027, 1, 1, tzinfo=timezone.utc).timestamp()  # future window
+            assert sync.get_remote_high_water_mark(window_start_ts=ws) == 4  # local max id
+        finally:
+            db.conn.close()
+
     def test_empty_remote_without_window_keeps_zero(self, tmp_path):
         from supabase_sync import OpportunitySync
         db = self._db(tmp_path)
