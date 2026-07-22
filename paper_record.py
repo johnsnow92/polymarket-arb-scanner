@@ -108,8 +108,7 @@ class PaperRecordTracker:
         if not self.notifier:
             return False
         try:
-            self.notifier.notify_text(message)
-            return True
+            return bool(self.notifier.notify_text(message))
         except Exception as exc:
             logger.warning("Paper-record notification failed: %s", exc)
             return False

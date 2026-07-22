@@ -990,14 +990,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     # Paper-trading window tracker: daily digest + one-time completion alert.
     _paper_tracker = None
     try:
-        from config import PAPER_WINDOW_START, PAPER_WINDOW_DAYS
-        if PAPER_WINDOW_START and notifier:
-            from datetime import datetime as _dt
+        from config import PAPER_WINDOW_START, PAPER_WINDOW_START_TS, PAPER_WINDOW_DAYS
+        if PAPER_WINDOW_START_TS and notifier:
             from paper_record import PaperRecordTracker
-            _window_start_ts = _dt.fromisoformat(
-                PAPER_WINDOW_START.replace("Z", "+00:00")).timestamp()
             _paper_tracker = PaperRecordTracker(
-                db, notifier, window_start=_window_start_ts, window_days=PAPER_WINDOW_DAYS)
+                db, notifier, window_start=PAPER_WINDOW_START_TS, window_days=PAPER_WINDOW_DAYS)
             logger.info("Paper-record tracker active: window %s + %d days",
                         PAPER_WINDOW_START, PAPER_WINDOW_DAYS)
     except Exception as exc:
