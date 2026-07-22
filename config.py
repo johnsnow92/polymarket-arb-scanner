@@ -865,9 +865,14 @@ PAPER_WINDOW_START = os.getenv("PAPER_WINDOW_START", "")
 PAPER_WINDOW_START_TS = 0.0
 if PAPER_WINDOW_START:
     try:
-        from datetime import datetime as _pw_dt
-        PAPER_WINDOW_START_TS = _pw_dt.fromisoformat(
-            PAPER_WINDOW_START.replace("Z", "+00:00")).timestamp()
+        from datetime import datetime as _pw_dt, timezone as _pw_tz
+        _pw_parsed = _pw_dt.fromisoformat(PAPER_WINDOW_START.replace("Z", "+00:00"))
+        if _pw_parsed.tzinfo is None:
+            # A naive timestamp would be read as deploy-host local time,
+            # making the window deployment-dependent; the config contract is
+            # UTC, so pin it explicitly.
+            _pw_parsed = _pw_parsed.replace(tzinfo=_pw_tz.utc)
+        PAPER_WINDOW_START_TS = _pw_parsed.timestamp()
     except ValueError as _pw_exc:
         raise ConfigError(
             f"PAPER_WINDOW_START is not a valid ISO timestamp: {PAPER_WINDOW_START!r}"

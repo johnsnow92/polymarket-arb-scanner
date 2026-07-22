@@ -2128,6 +2128,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     _price_tracker.cleanup(max_age_seconds=300)
 
                 # Platform fund rebalancing check (every 5 scans)
+                nonlocal _opp_sync_inflight
                 if _opp_sync and scan_count % 5 == 0 and not _opp_sync_inflight:
                     # Offload the Supabase HTTP call — inline it would stall the
                     # event loop (WS handling, priority execution) during a slow
