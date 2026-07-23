@@ -19,9 +19,14 @@ set -euo pipefail
 REPO="${MM_D0_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 PY="${MM_D0_PYTHON:-$HOME/Dev/polymarket-arb-scanner/.venv/bin/python}"
 STATUS_URL="https://api.elections.kalshi.com/trade-api/v2/exchange/status"
-INFISICAL_ARGS=(--env=dev)
 
 cd "$REPO"
+
+# Machine-identity tokens can't infer the project from .infisical.json —
+# `infisical run` errors with "Project ID is required" (verified 2026-07-23).
+# Pass it explicitly; harmless for personal-session auth too.
+PROJECT_ID=$(jq -r .workspaceId .infisical.json)
+INFISICAL_ARGS=(--projectId "$PROJECT_ID" --env=dev)
 
 # --- 1. Secrets auth: machine identity if provisioned, else personal session
 CLIENT_ID=$(security find-generic-password -a infisical -s mm-d0-client-id -w 2>/dev/null || true)
