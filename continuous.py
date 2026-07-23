@@ -1916,7 +1916,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if args.mode in ("all", "news-snipe") and CONFIG_NEWS_SNIPE_ENABLED:
                     try:
                         from scans.news_snipe import scan_news_snipe
-                        from config import NEWS_SNIPE_CONFIDENCE_THRESHOLD, NEWS_SNIPE_MAX_TRADE
+                        from config import NEWS_SNIPE_CONFIDENCE_THRESHOLD, NEWS_SNIPE_MAX_TRADE, FINNHUB_API_KEY
                         if not FINNHUB_API_KEY:
                             logger.debug("NEWS_SNIPE_ENABLED but FINNHUB_API_KEY not set")
                         else:
