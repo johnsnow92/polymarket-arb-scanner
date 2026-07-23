@@ -20,6 +20,28 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+_TRUTHY = ("1", "true", "yes")
+
+
+def require_kalshi_or_exit(kalshi_client) -> None:
+    """Abort at boot when REQUIRE_KALSHI is set but Kalshi auth failed.
+
+    Kalshi-only runs (D0 soaks, kalshi-only production) must not degrade to a
+    Polymarket-only scan when Kalshi is unreachable — a 48h soak that silently
+    drops its subject exchange produces void evidence (2026-07-23 incident).
+    """
+    if os.getenv("REQUIRE_KALSHI", "").strip().lower() not in _TRUTHY:
+        return
+    if kalshi_client is not None:
+        return
+    logger.error(
+        "REQUIRE_KALSHI is set but Kalshi auth failed or credentials are missing — "
+        "aborting instead of degrading (exchange may be in its maintenance window; "
+        "check GET /trade-api/v2/exchange/status before relaunching)."
+    )
+    sys.exit(1)
+
+
 from polymarket_api import (
     fetch_all_markets,
     fetch_events,
@@ -1268,13 +1290,7 @@ def main():
     # Kalshi-only runs (D0 soaks, kalshi-only production) must not degrade to a
     # Polymarket-only scan when Kalshi is unreachable — a 48h soak that silently
     # drops its subject exchange produces void evidence (2026-07-23 incident).
-    if os.getenv("REQUIRE_KALSHI", "").lower() in ("1", "true", "yes") and kalshi_client is None:
-        logger.error(
-            "REQUIRE_KALSHI is set but Kalshi auth failed or credentials are missing — "
-            "aborting instead of degrading (exchange may be in its maintenance window; "
-            "check GET /trade-api/v2/exchange/status before relaunching)."
-        )
-        sys.exit(1)
+    require_kalshi_or_exit(kalshi_client)
 
     pm_trader = None
     pm_private_key = os.getenv("POLYMARKET_PRIVATE_KEY")

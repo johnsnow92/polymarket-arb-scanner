@@ -46,7 +46,8 @@ if ! infisical run "${INFISICAL_ARGS[@]}" -- true >/dev/null 2>&1; then
 fi
 
 # --- 2. Exchange must be open — a soak started in the maintenance window voids itself
-until curl -sS -m 10 "$STATUS_URL" | grep -q '"exchange_active":true'; do
+# Whitespace-tolerant match: the status JSON's formatting is not contractual.
+until curl -sS -m 10 "$STATUS_URL" | grep -Eq '"exchange_active"[[:space:]]*:[[:space:]]*true'; do
   echo "[preflight] Kalshi exchange inactive (maintenance window?) — retry in 300s"
   sleep 300
 done
@@ -76,13 +77,19 @@ the earliest valid stop, exits cleanly on SIGTERM, and the final evidence is
 reviewed. No canary or live-order authority is implied by this run.
 EOF
 
-screen -dmS "mm-d0-$TS" zsh -c "cd '$REPO' && \
+# INFISICAL_TOKEN (exported in step 1) reaches the child via environment
+# inheritance — it must NEVER be interpolated into the command line, where
+# it would sit visible in the process list for the soak's whole 48 hours.
+# Per-run paths ride the environment the same way. `--mode mm-pilot` is
+# required: since #98–#108 the MM pilot only starts in that mode.
+export MM_D0_RUN_DIR="$DIR" MM_D0_PROJECT_ID="$PROJECT_ID" MM_D0_PY_BIN="$PY" MM_D0_REPO_DIR="$REPO"
+screen -dmS "mm-d0-$TS" zsh -c 'cd "$MM_D0_REPO_DIR" && \
   DRY_RUN=true EXECUTION_MODE=semi-auto ENABLED_EXECUTION_PLATFORMS=kalshi \
   MM_KALSHI_PILOT_ENABLED=true REQUIRE_KALSHI=true \
-  LOG_FILE='$DIR/scanner.log' MM_STATE_PATH='$DIR/mm_pilot_state.json' \
-  MM_DECISIONS_LOG_PATH='$DIR/decisions.jsonl' \
-  ${INFISICAL_TOKEN:+INFISICAL_TOKEN=$INFISICAL_TOKEN} \
-  infisical run ${INFISICAL_ARGS[*]} -- '$PY' scanner.py --continuous >> '$DIR/process.out' 2>&1"
+  LOG_FILE="$MM_D0_RUN_DIR/scanner.log" MM_STATE_PATH="$MM_D0_RUN_DIR/mm_pilot_state.json" \
+  MM_DECISIONS_LOG_PATH="$MM_D0_RUN_DIR/decisions.jsonl" \
+  infisical run --projectId "$MM_D0_PROJECT_ID" --env=dev -- \
+  "$MM_D0_PY_BIN" scanner.py --continuous --mode mm-pilot >> "$MM_D0_RUN_DIR/process.out" 2>&1'
 echo "[launch] mm-d0-$TS started — verifying boot (120s)"
 
 # --- 5. Boot verification: Kalshi authenticated AND the MM pilot actually started
