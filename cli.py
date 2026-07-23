@@ -1265,6 +1265,17 @@ def main():
     else:
         logger.info("KALSHI_API_KEY_ID/KALSHI_PRIVATE_KEY_PATH not set in .env")
 
+    # Kalshi-only runs (D0 soaks, kalshi-only production) must not degrade to a
+    # Polymarket-only scan when Kalshi is unreachable — a 48h soak that silently
+    # drops its subject exchange produces void evidence (2026-07-23 incident).
+    if os.getenv("REQUIRE_KALSHI", "").lower() in ("1", "true", "yes") and kalshi_client is None:
+        logger.error(
+            "REQUIRE_KALSHI is set but Kalshi auth failed or credentials are missing — "
+            "aborting instead of degrading (exchange may be in its maintenance window; "
+            "check GET /trade-api/v2/exchange/status before relaunching)."
+        )
+        sys.exit(1)
+
     pm_trader = None
     pm_private_key = os.getenv("POLYMARKET_PRIVATE_KEY")
     if pm_private_key and not dry_run:
