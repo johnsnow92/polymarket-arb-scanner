@@ -47,7 +47,7 @@ from polymarket_api import (
     fetch_events,
     PolymarketTrader,
 )
-from kalshi_api import KalshiClient
+from kalshi_api import build_client_from_env, kalshi_creds_configured
 from betfair_api import BetfairClient
 from smarkets_api import SmarketsClient
 from sxbet_api import SXBetClient
@@ -1271,21 +1271,24 @@ def main():
     kalshi_api_key_id = os.getenv("KALSHI_API_KEY_ID")
     kalshi_private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
     kalshi_private_key_b64 = os.getenv("KALSHI_PRIVATE_KEY_BASE64")
-    if kalshi_api_key_id and (kalshi_private_key_path or kalshi_private_key_b64):
-        kalshi_client = KalshiClient()
+    if kalshi_private_key_path:
+        kalshi_private_key_path = os.path.expanduser(kalshi_private_key_path)
+    if kalshi_creds_configured():
         logger.info("Authenticating with Kalshi (API key)...")
-        if kalshi_private_key_b64:
-            success = kalshi_client.login_with_api_key(kalshi_api_key_id, private_key_base64=kalshi_private_key_b64)
-        else:
-            kalshi_private_key_path = os.path.expanduser(kalshi_private_key_path)
-            success = kalshi_client.login_with_api_key(kalshi_api_key_id, private_key_path=kalshi_private_key_path)
-        if not success:
-            kalshi_client = None
-            logger.warning("Kalshi auth failed.")
+        kalshi_client = build_client_from_env(
+            attempts=config.KALSHI_AUTH_BOOT_ATTEMPTS,
+            retry_wait=config.KALSHI_AUTH_BOOT_RETRY_WAIT,
+        )
+        if kalshi_client is None:
+            logger.warning(
+                "Kalshi auth failed after %d attempts — continuing without "
+                "Kalshi; continuous mode will keep retrying every %.0fs.",
+                config.KALSHI_AUTH_BOOT_ATTEMPTS, config.KALSHI_REAUTH_INTERVAL,
+            )
         else:
             logger.info("Kalshi authenticated successfully.")
     else:
-        logger.info("KALSHI_API_KEY_ID/KALSHI_PRIVATE_KEY_PATH not set in .env")
+        logger.info("KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY_BASE64) not set — Kalshi disabled")
 
     # Kalshi-only runs (D0 soaks, kalshi-only production) must not degrade to a
     # Polymarket-only scan when Kalshi is unreachable — a 48h soak that silently

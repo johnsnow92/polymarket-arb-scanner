@@ -96,6 +96,8 @@ class FeedManager:
         self._pending_kalshi_subs: list[str] = []
         self._pending_betfair_subs: list[str] = []
         self._kalshi_ws = None
+        self._kalshi_task_started = False
+        self._kalshi_late_task: asyncio.Task | None = None
         # Per-ticker Kalshi book state: {ticker: {"yes": {price_cents: qty}, "no": {...}}}.
         # Needed because orderbook_delta messages carry single-level changes, not ladders.
         self._kalshi_books: dict[str, dict[str, dict[int, float]]] = {}
@@ -194,6 +196,7 @@ class FeedManager:
         self._running = True
         tasks = []
         if self._kalshi_tickers and self.kalshi_api_key_id and self.kalshi_private_key:
+            self._kalshi_task_started = True
             tasks.append(self._run_kalshi())
         if self._poly_token_ids:
             tasks.append(self._run_polymarket())
@@ -211,6 +214,30 @@ class FeedManager:
             len(self._betfair_market_ids),
         )
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    def start_kalshi_feed_late(self) -> bool:
+        """Start the Kalshi WS task after run() began without any Kalshi tickers.
+
+        Covers the self-heal path: when Kalshi auth fails at boot, run() starts
+        with zero Kalshi tickers and never spawns _run_kalshi. Once re-auth
+        succeeds and tickers arrive via update_subscriptions, this spawns the
+        feed task into the running loop. Idempotent; returns True only when a
+        task was actually started. Must be called from the event loop thread.
+        """
+        if self._kalshi_task_started:
+            return False
+        if not (self._running and self._kalshi_tickers
+                and self.kalshi_api_key_id and self.kalshi_private_key):
+            return False
+        self._kalshi_task_started = True
+        # _connect_kalshi's initial loop subscribes everything already in
+        # _kalshi_tickers; drop queued pending subs to avoid a duplicate
+        # subscribe message right after connect.
+        self._pending_kalshi_subs.clear()
+        self._kalshi_late_task = asyncio.create_task(self._run_kalshi())
+        logger.info("Kalshi WS feed started late (%d tickers) after re-auth.",
+                    len(self._kalshi_tickers))
+        return True
 
     def get_stale_feeds(self, max_silent_seconds: float = 120.0) -> list[str]:
         """Return list of platform names that have gone silent beyond threshold.
