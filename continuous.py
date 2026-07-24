@@ -21,6 +21,7 @@ from dashboard import state as dashboard_state
 from recovery import reconcile_orphaned_positions
 from scripts.analytics import get_strategy_metrics
 from credential_health import CredentialHealthChecker
+from kalshi_api import build_client_from_env, kalshi_creds_configured
 from fees import (
     net_profit_binary_internal,
     net_profit_negrisk_internal,
@@ -892,6 +893,35 @@ def _feed_sprint3_trackers(platform: str, ticker: str, data: dict) -> None:
         logger.debug("VolatilityTracker/LeadLagMM WS feed failed: %s", exc)
 
 
+def heal_kalshi_client(executor, platform_clients, hedger, notifier):
+    """Attempt one Kalshi re-auth from env creds and rewire dependents.
+
+    Called from the continuous loop when the run started degraded (boot-time
+    auth failure, e.g. during Kalshi's daily maintenance window). On success
+    the executor, credential-health platform map, and hedger all receive the
+    fresh client so execution paths heal along with scanning.
+
+    Returns the authenticated client, or None if re-auth failed.
+    """
+    healed = build_client_from_env()
+    if healed is None:
+        logger.warning("Kalshi re-auth attempt failed — will retry on cooldown.")
+        return None
+    executor.kalshi_client = healed
+    platform_clients["kalshi"] = healed
+    if hedger is not None:
+        hedger.kalshi_client = healed
+    logger.warning("Kalshi authentication RESTORED — resuming Kalshi scans.")
+    if notifier:
+        try:
+            notifier.notify_text(
+                "arbgrid: Kalshi authentication restored — Kalshi and "
+                "cross-platform scanning resumed.")
+        except Exception as e:
+            logger.warning("Notifier failed on Kalshi-restore alert: %s", e)
+    return healed
+
+
 def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                    kalshi_private_key_path, executor, db, price_cache,
                    extra_clients=None, notifier=None, pm_trader=None,
@@ -1390,6 +1420,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     # Remove None clients
     platform_clients = {k: v for k, v in platform_clients.items() if v is not None}
 
+    # Kalshi self-heal state: last re-auth attempt timestamp (cooldown-gated
+    # in the scan loop; see heal_kalshi_client). The alias is needed because
+    # `platform_clients` is shadowed by a triangular-scan local inside the loop.
+    _kalshi_reauth_last = 0.0
+    _health_platform_clients = platform_clients
+
     health_checker = None
     if _alert_manager and platform_clients:
         from config import CREDENTIAL_HEALTH_CHECK_INTERVAL
@@ -1499,7 +1535,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         # Capture the running loop for the direct OS signal handler.  Its
         # call_soon_threadsafe wakeup preserves immediate pilot cancellation
         # while also interrupting a selector wait on macOS.
-        nonlocal _signal_loop
+        nonlocal _signal_loop, kalshi_client, _kalshi_reauth_last
         _signal_loop = asyncio.get_running_loop()
 
         ws_task = None
@@ -1529,6 +1565,19 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
             _scan_start = time.time()
             _stage_timings: dict[str, float] = {}
+
+            # Self-heal a degraded Kalshi start (e.g. boot during the venue's
+            # daily maintenance window): re-auth on a cooldown until it works.
+            if (kalshi_client is None and kalshi_creds_configured()
+                    and _scan_start - _kalshi_reauth_last >= config.KALSHI_REAUTH_INTERVAL):
+                _kalshi_reauth_last = _scan_start
+                # Synchronous login can block up to ~30s on a dead venue —
+                # run it off the event loop so WS execution keeps moving.
+                healed = await asyncio.get_running_loop().run_in_executor(
+                    None, heal_kalshi_client,
+                    executor, _health_platform_clients, hedger, notifier)
+                if healed is not None:
+                    kalshi_client = healed
 
             # Daily reset for metrics and alert state
             nonlocal _last_daily_reset_date
@@ -2541,6 +2590,10 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         poly_token_ids=poly_sub_ids,
                         kalshi_tickers=kalshi_sub_tickers,
                     )
+                    # If Kalshi healed after a degraded boot, its WS task was
+                    # never spawned by run() — start it now (idempotent).
+                    if kalshi_client is not None:
+                        feed_manager.start_kalshi_feed_late()
 
             except Exception as e:
                 import traceback
