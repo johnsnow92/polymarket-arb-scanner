@@ -1,8 +1,11 @@
 """Sentry initialization helper. Import early in any entry point."""
 
+import logging
 import os
 import re
 import sentry_sdk
+
+logger = logging.getLogger(__name__)
 
 # Variable names that look like credentials. If local-variable capture is
 # ever re-enabled, before_send drops any frame-local whose name matches —
@@ -60,3 +63,31 @@ def init_sentry() -> None:
         include_local_variables=False,
         before_send=_scrub_event,
     )
+
+
+def capture_scan_heartbeat(status: str = "ok") -> None:
+    """Sentry Crons check-in for the continuous scan loop.
+
+    Pages when the loop stops checking in (process hang, silent death) —
+    the detection gap that let the 2026-07-23 Kalshi degradation run 31h.
+    No-op without SENTRY_DSN and under pytest; never raises into the loop.
+
+    Args:
+        status: "ok" for a completed cycle, "error" for a failed one.
+    """
+    if not os.environ.get("SENTRY_DSN") or os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    try:
+        from sentry_sdk.crons import capture_checkin
+        capture_checkin(
+            monitor_slug="arbgrid-scan-loop",
+            status=status,
+            monitor_config={
+                "schedule": {"type": "interval", "value": 5, "unit": "minute"},
+                "checkin_margin": 10,
+                "max_runtime": 15,
+                "timezone": "UTC",
+            },
+        )
+    except Exception as e:
+        logger.debug("Sentry Crons check-in failed: %s", e)

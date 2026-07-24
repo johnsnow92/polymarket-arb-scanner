@@ -125,6 +125,7 @@ class _DashboardState:
         self.signal_sources_active = 0
         # Analytics (MON-01): per-strategy P&L metrics
         self.strategy_metrics: list[dict] = []
+        self.platform_health: dict = {}
         # Leaderboard (MON-02): strategy leaderboard state
         self.strategy_leaderboard: list[dict] = []
         self.leaderboard_updated_at: float = 0
@@ -163,6 +164,7 @@ class _DashboardState:
             "convergence_signals": self.convergence_signals,
             "signal_sources_active": self.signal_sources_active,
             "strategy_metrics": self.strategy_metrics,
+            "platform_health": self.platform_health,
             "rewards": rewards_metrics,
         }
 

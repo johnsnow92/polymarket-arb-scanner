@@ -1,6 +1,6 @@
 """Continuous mode: periodic re-scans with WebSocket feeds, settlement, and dashboard updates."""
 
-from sentry_init import init_sentry
+from sentry_init import init_sentry, capture_scan_heartbeat
 init_sentry()
 
 import asyncio
@@ -14,7 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from polymarket_api import fetch_all_markets, fetch_events
-from ws_feeds import FeedManager
+from ws_feeds import FeedManager, get_feed_health_tracker
 from db import TradeDB
 from display import display_results
 from dashboard import state as dashboard_state
@@ -1189,8 +1189,29 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     except Exception as exc:
         logger.debug("Reward trackers not available: %s", exc)
 
+    # Feed health tracking: WS messages feed the tracker; outage/recovery
+    # transitions alert via the notifier (the 07-23 incident ran 31h silent).
+    _feed_health = get_feed_health_tracker()
+
+    def _on_feed_health_change(platform: str, is_healthy: bool):
+        if is_healthy:
+            msg = "arbgrid: %s feed RECOVERED — full detection resumed." % platform
+        else:
+            msg = ("arbgrid: %s feed DEGRADED — no WS messages for >%.0fs; "
+                   "detection running blind on this venue." % (
+                       platform, config.API_OUTAGE_STALE_THRESHOLD))
+        logger.warning(msg)
+        if notifier:
+            try:
+                notifier.notify_text(msg)
+            except Exception as e:
+                logger.warning("Feed-health alert failed to send: %s", e)
+
+    _feed_health.register_health_callback(_on_feed_health_change)
+
     def on_price_update(platform, ticker, data):
         data["_ts"] = time.time()
+        _feed_health.record_message(platform)
         with _price_cache_lock:
             price_cache[(platform, ticker)] = data
 
@@ -1515,6 +1536,30 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 logger.warning("Feed staleness check failed: %s", e)
                 await asyncio.sleep(5)  # Retry after 5 seconds
 
+    async def _monitor_feed_health():
+        """Background task: evaluate feed outages every 30s.
+
+        check_outages() fires the registered degradation/recovery alerts and
+        its result is published to /status as per-platform health so the
+        external monitor can page on a degraded venue, not just a dead pod.
+        """
+        while not shutdown_event.is_set():
+            try:
+                outages = _feed_health.check_outages()
+                dashboard_state.platform_health = {
+                    "feeds": {
+                        p: {
+                            "healthy": not info["in_outage"],
+                            "last_message_ago_s": round(info["last_message_ago"], 1),
+                        }
+                        for p, info in outages.items()
+                    },
+                    "clients": {name: True for name in _health_platform_clients},
+                }
+            except Exception as e:
+                logger.warning("Feed health check failed: %s", e)
+            await asyncio.sleep(30)
+
     async def _monitor_credential_health():
         """Background task: check API credential health every 30 minutes.
 
@@ -1541,6 +1586,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
         ws_task = None
         priority_consumer_task = None
         stale_monitor_task = None
+        feed_health_task = None
         health_monitor_task = None
         scan_count = 0
 
@@ -1550,6 +1596,10 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
 
         # Start feed staleness monitor as a background task
         stale_monitor_task = asyncio.create_task(_monitor_feed_staleness())
+
+        # Start feed health monitor (outage alerts + /status platform health)
+        feed_health_task = asyncio.create_task(_monitor_feed_health())
+        logger.info("Feed health monitor started.")
 
         # Start credential health monitor as a background task
         if health_checker:
@@ -2225,6 +2275,10 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if notifier and all_opportunities:
                     notifier.notify(all_opportunities)
 
+                # Sentry Crons heartbeat: a completed cycle checks in; a
+                # missed check-in pages (loop hang / silent death).
+                capture_scan_heartbeat("ok")
+
                 # Update dashboard state
                 dashboard_state.scan_count = scan_count
                 dashboard_state.last_scan_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2598,6 +2652,7 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             except Exception as e:
                 import traceback
                 logger.error("Scan failed: %s\n%s", e, traceback.format_exc())
+                capture_scan_heartbeat("error")
                 if _metrics:
                     _metrics.inc("scans_total", {"status": "failed"})
 
@@ -2663,6 +2718,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             stale_monitor_task.cancel()
             try:
                 await stale_monitor_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if feed_health_task:
+            feed_health_task.cancel()
+            try:
+                await feed_health_task
             except (asyncio.CancelledError, Exception):
                 pass
         if health_monitor_task:
