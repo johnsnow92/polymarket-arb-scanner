@@ -635,3 +635,39 @@ class TestGetCurrentGasCost:
         monitor = GasMonitor(enabled=True)
         monitor.get_polygon_gas_cost = MagicMock(return_value=0.0042)
         assert monitor.get_current_gas_cost() == pytest.approx(0.0042)
+
+
+class TestMaticPolMigration:
+    """CoinGecko serves Polygon's gas token as polygon-ecosystem-token after
+    the MATIC->POL migration; the legacy id intermittently returns an empty
+    dict (the prod KeyError-'usd' class). Fetch failures must keep the
+    last-good price, not poison the cache with the default."""
+
+    def test_prefers_pol_id(self):
+        monitor = GasMonitor(polygon_rpc_url="http://fake-rpc", enabled=True)
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"polygon-ecosystem-token": {"usd": 0.42},
+                                  "matic-network": {"usd": 0.41}}
+        with patch("gas_monitor.requests.get", return_value=resp):
+            assert monitor._do_fetch_matic_price() == pytest.approx(0.42)
+
+    def test_empty_legacy_dict_returns_none_not_keyerror(self):
+        monitor = GasMonitor(polygon_rpc_url="http://fake-rpc", enabled=True)
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"matic-network": {}}
+        with patch("gas_monitor.requests.get", return_value=resp):
+            assert monitor._do_fetch_matic_price() is None
+
+    def test_fetch_failure_keeps_last_good_price(self):
+        monitor = GasMonitor(polygon_rpc_url="http://fake-rpc", enabled=True)
+        good = MagicMock()
+        good.raise_for_status = MagicMock()
+        good.json.return_value = {"polygon-ecosystem-token": {"usd": 0.44}}
+        with patch("gas_monitor.requests.get", return_value=good):
+            assert monitor._fetch_matic_price() == pytest.approx(0.44)
+        # Expire the TTL, then fail the next fetch: last-good must survive.
+        monitor._matic_price_ts = 0.0
+        with patch("gas_monitor.requests.get", side_effect=Exception("down")):
+            assert monitor._fetch_matic_price() == pytest.approx(0.44)
