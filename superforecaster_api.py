@@ -14,9 +14,6 @@ import os
 import time
 from typing import Any
 
-from thefuzz import fuzz
-
-from config import FUZZY_MATCH_THRESHOLD
 from url_guard import assert_public_url
 
 logger = logging.getLogger(__name__)
@@ -269,10 +266,9 @@ class SuperforecasterClient:
 
         if metaculus_client:
             try:
-                metaculus_prob = _metaculus_prediction_by_title(
-                    metaculus_client, market_title)
-                if metaculus_prob is not None:
-                    forecasts.append(metaculus_prob)
+                metaculus_result = metaculus_client.get_community_prediction_by_title(market_title)
+                if metaculus_result and metaculus_result.get("probability") is not None:
+                    forecasts.append(metaculus_result["probability"])
                     weights.append(1.5)
             except Exception as e:
                 logger.debug("Metaculus lookup failed: %s", e)
@@ -287,40 +283,3 @@ class SuperforecasterClient:
             "num_sources": len(forecasts),
             "confidence": min(0.85, 0.50 + (len(forecasts) * 0.15)),
         }
-
-
-def _metaculus_prediction_by_title(metaculus_client, market_title: str) -> float | None:
-    """Resolve a market title to a Metaculus community probability.
-
-    Replaces a call to a method that never existed on MetaculusClient
-    (``get_community_prediction_by_title``) — that signal path was silently
-    dead because the AttributeError was swallowed by the caller's broad
-    except. Searches open questions, fuzzy-verifies the best title match
-    against FUZZY_MATCH_THRESHOLD, and returns its community median.
-
-    Args:
-        metaculus_client: MetaculusClient instance.
-        market_title: Platform market title to match.
-
-    Returns:
-        Community probability (0-1), or None when no confident match exists.
-    """
-    matches = metaculus_client.search_questions(market_title, limit=10)
-    if not matches:
-        return None
-
-    best_id = None
-    best_score = 0
-    for question in matches:
-        title = question.get("title") or ""
-        question_id = question.get("id")
-        if not title or question_id is None:
-            continue
-        score = fuzz.token_sort_ratio(market_title.lower(), title.lower())
-        if score > best_score:
-            best_score = score
-            best_id = question_id
-
-    if best_id is None or best_score < FUZZY_MATCH_THRESHOLD:
-        return None
-    return metaculus_client.get_question_prediction(best_id)
