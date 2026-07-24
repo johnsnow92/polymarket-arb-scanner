@@ -992,3 +992,48 @@ def _audit_orderbook_sort_order(ticker: str, side: str, entries: list) -> None:
         _orderbook_sort_audit_logged = True
     except (KeyError, ValueError, TypeError, IndexError) as e:
         logger.debug("Orderbook sort audit skipped (parse error): %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Environment-driven construction + self-heal support
+# ---------------------------------------------------------------------------
+
+def kalshi_creds_configured() -> bool:
+    """True when the env carries enough material to attempt Kalshi auth."""
+    return bool(
+        os.getenv("KALSHI_API_KEY_ID")
+        and (os.getenv("KALSHI_PRIVATE_KEY_PATH") or os.getenv("KALSHI_PRIVATE_KEY_BASE64"))
+    )
+
+
+def build_client_from_env(attempts: int = 1, retry_wait: float = 0.0) -> "KalshiClient | None":
+    """Construct and authenticate a KalshiClient from env credentials.
+
+    Auth verification pings /exchange/status, which fails during Kalshi's
+    daily maintenance window even with valid keys — so callers that boot at
+    an unlucky time can pass attempts/retry_wait to ride it out, and the
+    continuous loop re-invokes this to heal a degraded start.
+
+    Returns None when creds are absent or every attempt fails.
+    """
+    if not kalshi_creds_configured():
+        return None
+    api_key_id = os.getenv("KALSHI_API_KEY_ID")
+    key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
+    key_b64 = os.getenv("KALSHI_PRIVATE_KEY_BASE64")
+    for attempt in range(1, max(1, attempts) + 1):
+        client = KalshiClient()
+        if key_b64:
+            ok = client.login_with_api_key(api_key_id, private_key_base64=key_b64)
+        else:
+            ok = client.login_with_api_key(api_key_id, private_key_path=os.path.expanduser(key_path))
+        if ok:
+            return client
+        if attempt < max(1, attempts):
+            logger.warning(
+                "Kalshi auth failed (attempt %d/%d) — venue may be in its "
+                "maintenance window; retrying in %.0fs",
+                attempt, attempts, retry_wait,
+            )
+            time.sleep(retry_wait)
+    return None
