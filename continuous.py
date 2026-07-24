@@ -1571,7 +1571,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
             if (kalshi_client is None and kalshi_creds_configured()
                     and _scan_start - _kalshi_reauth_last >= config.KALSHI_REAUTH_INTERVAL):
                 _kalshi_reauth_last = _scan_start
-                healed = heal_kalshi_client(executor, _health_platform_clients, hedger, notifier)
+                # Synchronous login can block up to ~30s on a dead venue —
+                # run it off the event loop so WS execution keeps moving.
+                healed = await asyncio.get_running_loop().run_in_executor(
+                    None, heal_kalshi_client,
+                    executor, _health_platform_clients, hedger, notifier)
                 if healed is not None:
                     kalshi_client = healed
 

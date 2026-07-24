@@ -230,6 +230,10 @@ class FeedManager:
                 and self.kalshi_api_key_id and self.kalshi_private_key):
             return False
         self._kalshi_task_started = True
+        # _connect_kalshi's initial loop subscribes everything already in
+        # _kalshi_tickers; drop queued pending subs to avoid a duplicate
+        # subscribe message right after connect.
+        self._pending_kalshi_subs.clear()
         self._kalshi_late_task = asyncio.create_task(self._run_kalshi())
         logger.info("Kalshi WS feed started late (%d tickers) after re-auth.",
                     len(self._kalshi_tickers))

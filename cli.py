@@ -1288,7 +1288,7 @@ def main():
         else:
             logger.info("Kalshi authenticated successfully.")
     else:
-        logger.info("KALSHI_API_KEY_ID/KALSHI_PRIVATE_KEY_PATH not set in .env")
+        logger.info("KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH (or KALSHI_PRIVATE_KEY_BASE64) not set — Kalshi disabled")
 
     # Kalshi-only runs (D0 soaks, kalshi-only production) must not degrade to a
     # Polymarket-only scan when Kalshi is unreachable — a 48h soak that silently

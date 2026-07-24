@@ -183,10 +183,14 @@ class TestStartKalshiFeedLate:
 
     def test_starts_once_then_idempotent(self):
         fm, ws_feeds = self._manager()
+        fm._pending_kalshi_subs = list(fm._kalshi_tickers)
         with patch.object(ws_feeds.asyncio, "create_task") as create_task:
             assert fm.start_kalshi_feed_late() is True
             assert fm.start_kalshi_feed_late() is False
         assert create_task.call_count == 1
+        # Initial connect subscribes everything in _kalshi_tickers; queued
+        # pending subs must be dropped or the same tickers get subscribed twice.
+        assert fm._pending_kalshi_subs == []
         create_task.call_args[0][0].close()  # avoid un-awaited coroutine warning
 
     def test_requires_running_loop_flag(self):
