@@ -253,31 +253,59 @@ class GasMonitor:
         price = self._do_fetch_matic_price()
 
         with self._matic_lock:
-            self._matic_price = price
+            if price is not None:
+                self._matic_price = price
+                self._matic_price_ts = time.time()
+                return price
+            if self._matic_price is not None:
+                # Fetch failed: keep the last-good price rather than
+                # poisoning the cache with the default; bump ts so a flaky
+                # CoinGecko is not hammered every call.
+                self._matic_price_ts = time.time()
+                logger.warning(
+                    "MATIC price fetch failed — reusing last-good $%.4f",
+                    self._matic_price)
+                return self._matic_price
+            logger.warning(
+                "MATIC price unavailable and no last-good value — using default $%.2f",
+                self._default_matic_price)
+            self._matic_price = self._default_matic_price
             self._matic_price_ts = time.time()
+            return self._default_matic_price
 
-        return price
+    def _do_fetch_matic_price(self) -> float | None:
+        """Raw HTTP call to CoinGecko for the Polygon gas-token price.
 
-    def _do_fetch_matic_price(self) -> float:
-        """Raw HTTP call to CoinGecko for MATIC price."""
+        Polygon's gas token migrated MATIC→POL (Sept 2024). CoinGecko serves
+        the live token as polygon-ecosystem-token; the legacy matic-network
+        id intermittently returns an empty dict, which produced the
+        KeyError-'usd' failures seen in prod. Query both, prefer POL.
+
+        Returns None on failure so the caller can keep the last-good price
+        instead of poisoning the cache with the default.
+        """
         try:
             resp = requests.get(
                 "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": "matic-network", "vs_currencies": "usd"},
+                params={
+                    "ids": "polygon-ecosystem-token,matic-network",
+                    "vs_currencies": "usd",
+                },
                 timeout=5,
             )
             resp.raise_for_status()
             data = resp.json()
-            price = float(data["matic-network"]["usd"])
-            logger.debug("MATIC price: $%.4f", price)
-            return price
+            for coin_id in ("polygon-ecosystem-token", "matic-network"):
+                usd = (data.get(coin_id) or {}).get("usd")
+                if usd is not None:
+                    price = float(usd)
+                    logger.debug("Polygon gas-token price: $%.4f (%s)", price, coin_id)
+                    return price
+            logger.warning("CoinGecko returned no usd price for POL/MATIC: %s", data)
+            return None
         except Exception as exc:
-            logger.warning(
-                "Failed to fetch MATIC price: %s. Using default $%.2f",
-                exc,
-                self._default_matic_price,
-            )
-            return self._default_matic_price
+            logger.warning("Failed to fetch MATIC price: %s", exc)
+            return None
 
     def _infer_platforms(self, opp: dict) -> tuple[str, str]:
         """Extract or infer platform pair from an opportunity dict.
