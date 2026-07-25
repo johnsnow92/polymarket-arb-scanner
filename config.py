@@ -463,6 +463,11 @@ KALSHI_MULTI_MIN_DEPTH = _env_int("KALSHI_MULTI_MIN_DEPTH", "10")
 # YES asks sum to just under/over 1.0. A sum well below this means missing,
 # closed, or stale legs — not a real arb.
 KALSHI_MULTI_MIN_SUM = _env_float("KALSHI_MULTI_MIN_SUM", "0.85")
+# Same implausible-sum defense for Gemini categorical events: point-spread
+# events list alternative lines that are neither exclusive nor exhaustive,
+# so summing their prices fakes riskless 90%+ ROI (2026-07-24 paper-window
+# false-positive class — sibling of the Kalshi strike-ladder gate, PR #100).
+GEMINI_MULTI_MIN_SUM = _env_float("GEMINI_MULTI_MIN_SUM", "0.85")
 
 # Multi-outcome cross-platform execution gating (kill-switch + depth check)
 # MultiCross places N legs concurrently across Polymarket + Kalshi. Same
