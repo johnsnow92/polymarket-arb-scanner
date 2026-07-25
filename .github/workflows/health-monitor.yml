@@ -33,11 +33,17 @@ jobs:
           problem=""
           if [ "$code" != "200" ]; then
             problem="/status returned HTTP ${code:-000} (bot down, dashboard dead, or auth broken)"
+          elif ! jq -e 'type == "object"' status.json >/dev/null 2>&1; then
+            # Fail closed: /status serves state.to_dict() as JSON — a 200
+            # with a non-object body violates the endpoint contract.
+            problem="/status returned 200 but the body is not a JSON object"
           else
             # kalshi is the enabled execution platform: it must be in the
             # authenticated client set. platform_health may be absent on
             # builds predating the detection layer — treat absent as OK.
-            kalshi=$(jq -r '.platform_health.clients.kalshi // "absent"' status.json 2>/dev/null)
+            # NOTE: jq's // would collapse false/null to the default, so
+            # membership is tested explicitly with has().
+            kalshi=$(jq -r 'if (.platform_health.clients? | type) == "object" and (.platform_health.clients | has("kalshi")) then (.platform_health.clients.kalshi | tostring) else "absent" end' status.json 2>/dev/null)
             if [ "$kalshi" = "false" ] || [ "$kalshi" = "null" ]; then
               problem="Kalshi client is NOT authenticated (self-heal not recovering?)"
             fi
@@ -60,9 +66,15 @@ jobs:
           WEBHOOK: ${{ secrets.MONITOR_SLACK_WEBHOOK }}
           PROBLEM: ${{ steps.probe.outputs.problem }}
         run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning::MONITOR_SLACK_WEBHOOK secret is not set — no Slack alert sent"
+            exit 0
+          fi
           payload=$(jq -n --arg text ":rotating_light: arbgrid external monitor: ${PROBLEM} — https://arb-scanner-production.up.railway.app/status" '{text: $text}')
-          curl -s --max-time 15 -X POST -H "Content-Type: application/json" \
-            -d "$payload" "$WEBHOOK" > /dev/null || true
+          if ! curl -sf --max-time 15 -X POST -H "Content-Type: application/json" \
+            -d "$payload" "$WEBHOOK" > /dev/null; then
+            echo "::warning::Slack alert delivery FAILED — health problem was: ${PROBLEM}"
+          fi
 
       - name: Fail job on problem (visible in Actions history)
         if: steps.probe.outputs.problem != ''
