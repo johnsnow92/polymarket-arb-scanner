@@ -1202,10 +1202,15 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                        platform, config.API_OUTAGE_STALE_THRESHOLD))
         logger.warning(msg)
         if notifier:
-            try:
-                notifier.notify_text(msg)
-            except Exception as e:
-                logger.warning("Feed-health alert failed to send: %s", e)
+            # notify_text is a synchronous webhook POST — deliver off-thread
+            # so a slow Slack endpoint can't stall WS message processing or
+            # the event loop that invoked the health callback.
+            def _send(m=msg):
+                try:
+                    notifier.notify_text(m)
+                except Exception as e:
+                    logger.warning("Feed-health alert failed to send: %s", e)
+            threading.Thread(target=_send, name="feed-health-alert", daemon=True).start()
 
     _feed_health.register_health_callback(_on_feed_health_change)
 
@@ -1446,6 +1451,9 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
     # `platform_clients` is shadowed by a triangular-scan local inside the loop.
     _kalshi_reauth_last = 0.0
     _health_platform_clients = platform_clients
+    # Latest measured credential-health results (platform -> bool), filled by
+    # _monitor_credential_health; consumed by the /status health publisher.
+    _cred_health_state: dict = {}
 
     health_checker = None
     if _alert_manager and platform_clients:
@@ -1554,7 +1562,12 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                         }
                         for p, info in outages.items()
                     },
-                    "clients": {name: True for name in _health_platform_clients},
+                    # Measured credential health from the 30-min checker;
+                    # "unknown" until a platform's first check completes.
+                    "clients": {
+                        name: _cred_health_state.get(name, "unknown")
+                        for name in _health_platform_clients
+                    },
                 }
             except Exception as e:
                 logger.warning("Feed health check failed: %s", e)
@@ -1571,6 +1584,8 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if health_checker:
                     results = await health_checker.check_all_platforms()
                     logger.info("Credential health check complete: %s", results)
+                    if isinstance(results, dict):
+                        _cred_health_state.update(results)
                 await asyncio.sleep(1800)  # 30 minutes
             except Exception as e:
                 logger.warning("Credential health check failed: %s", e)
@@ -2275,10 +2290,6 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                 if notifier and all_opportunities:
                     notifier.notify(all_opportunities)
 
-                # Sentry Crons heartbeat: a completed cycle checks in; a
-                # missed check-in pages (loop hang / silent death).
-                capture_scan_heartbeat("ok")
-
                 # Update dashboard state
                 dashboard_state.scan_count = scan_count
                 dashboard_state.last_scan_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2648,6 +2659,11 @@ def run_continuous(args, min_profit, kalshi_client, kalshi_api_key_id,
                     # never spawned by run() — start it now (idempotent).
                     if kalshi_client is not None:
                         feed_manager.start_kalshi_feed_late()
+
+                # Sentry Crons heartbeat: emitted as the LAST step of the try
+                # block so a failure anywhere in the cycle reports "error",
+                # never both. A missed check-in pages (loop hang / death).
+                capture_scan_heartbeat("ok")
 
             except Exception as e:
                 import traceback
